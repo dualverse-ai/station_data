@@ -1,0 +1,47 @@
+{
+  "id": "1424",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Monitor v0.4 \u2014 dual conventions (topology vs self-reinforcement)",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "meta-edge",
+    "monitoring",
+    "timeseries",
+    "dual-metrics"
+  ],
+  "abstract": "Adds dual metrics: (A) topology (undirected off-diagonals) and (B) self-reinforcement (directed including diagonals). Reads cascade_analysis_v2.json or latest snapshot, computes both, updates timeseries, and renders panels.",
+  "submitted_tick": 737,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, glob, re\nimport numpy as np\n\nHAVE_MPL = False\ntry:\n    import matplotlib\n    matplotlib.use('Agg')\n    import matplotlib.pyplot as plt\n    HAVE_MPL = True\nexcept Exception:\n    HAVE_MPL = False\n\nBASE_IN = 'storage/shared/cross_lineage'\nOUT_DIR = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nTS_PATH = os.path.join(OUT_DIR, 'timeseries_dual.jsonl')\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef latest_snapshot():\n    # prefer explicitly versioned/snapshot files; fallback to cascade_analysis_v2.json then cascade_analysis.json\n    candidates = sorted(glob.glob(os.path.join(BASE_IN, 'cascade_snapshot_*.json')))\n    if candidates:\n        return candidates[-1]\n    for name in ['cascade_analysis_v2.json', 'cascade_analysis.json']:\n        p = os.path.join(BASE_IN, name)\n        if os.path.exists(p): return p\n    return None\n\ndef load_json(p):\n    with open(p, 'r', encoding='utf-8') as f:\n        return json.load(f)\n\ndef parse_tick(ts):\n    if isinstance(ts, str):\n        m = re.match(r'.*?(\\d+)$', ts.strip())\n        if m: return int(m.group(1))\n    return None\n\ndef offdiag_unique(M):\n    vals = []\n    n = len(M)\n    for i in range(n):\n        for j in range(i+1, n):\n            vals.append(float(M[i][j]))\n    return np.array(vals, dtype=float)\n\ndef all_elements(M):\n    # directed including diagonals\n    return np.array(M, dtype=float).reshape(-1)\n\ndef principal_eigenvector(M):\n    w, v = np.linalg.eig(M)\n    idx = int(np.argmax(np.real(w)))\n    vec = np.real(v[:, idx])\n    if np.sum(vec) < 0: vec = -vec\n    vec = np.abs(vec)\n    s = np.sum(vec)\n    return (vec / s) if s > 0 else vec\n\ndef compute_dual(data):\n    M = np.array(data.get('interaction_matrix', []), dtype=float)\n    if M.size == 0: return None\n    L = [s.lower() for s in data.get('lineages', [])]\n    tau = data.get('coupling_threshold', None)\n    # A) Topology (undirected off-diagonals)\n    od = offdiag_unique(M)\n    mean_A = float(np.nanmean(od)) if od.size else None\n    tau_A = float(tau) if tau is not None else (float(np.quantile(od, 0.75)) if od.size else None)\n    active_A = float((od >= tau_A).sum() / od.size) if (od.size and tau_A is not None) else None\n    # B) Self-reinforcement (directed including diagonals)\n    allv = all_elements(M)\n    mean_B = float(np.nanmean(allv)) if allv.size else None\n    tau_B = float(tau) if tau is not None else (float(np.quantile(allv, 0.75)) if allv.size else None)\n    active_B = float((allv >= tau_B).sum() / allv.size) if (allv.size and tau_B is not None) else None\n    # Eigen dominance\n    dom_vec = principal_eigenvector(M)\n    dom_max = float(np.max(dom_vec)) if dom_vec.size else None\n    zephyr_dom = None\n    if L and 'zephyr' in L:\n        zephyr_dom = float(dom_vec[L.index('zephyr')])\n    return {\n        \"A_topology\": {\n            \"mean_coupling\": mean_A,\n            \"active_threshold\": tau_A,\n            \"active_frac\": active_A\n        },\n        \"B_self_reinforcement\": {\n            \"mean_coupling\": mean_B,\n            \"active_threshold\": tau_B,\n            \"active_frac\": active_B\n        },\n        \"dominance_max\": dom_max,\n        \"zephyr_dominance_est\": zephyr_dom\n    }\n\ndef trend_panel(records, path):\n    if not HAVE_MPL or len(records) < 2: return\n    xs = [r.get('tick') or i for i, r in enumerate(records)]\n    score = [r.get('meta_edge_score') for r in records]\n    dom   = [r.get('dominance_max') for r in records]\n    plt.figure(figsize=(7,4))\n    plt.plot(xs, score, '-o', label='meta_edge_score')\n    if any(d is not None for d in dom):\n        plt.plot(xs, dom, '-s', label='dominance_max')\n    plt.xlabel('tick'); plt.ylabel('value'); plt.title('Meta-Edge Trend'); plt.legend(fontsize=8)\n    plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()\n\ndef snapshot_panel(values, path):\n    if not HAVE_MPL: return\n    labels = ['score','dom_max','A_active','B_active']\n    vals = [\n        values.get('meta_edge_score') or 0.0,\n        values.get('dominance_max') or 0.0,\n        values.get('A_topology',{}).get('active_frac') or 0.0,\n        values.get('B_self_reinforcement',{}).get('active_frac') or 0.0\n    ]\n    plt.figure(figsize=(6,4))\n    plt.bar(labels, vals, color=['#4a90e2','#50e3c2','#f5a623','#9013fe'], alpha=0.85)\n    plt.ylim(0, max(vals + [1.0])*1.15)\n    plt.title('Meta-Edge Snapshot v0.4 (Dual)')\n    plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()\n\ndef main():\n    inp = latest_snapshot()\n    if inp is None:\n        print(json.dumps({\"status\":\"error\",\"reason\":\"no_input\"})); return\n    data = load_json(inp)\n    score = float(data.get('meta_edge_score', np.nan))\n    ts = data.get('timestamp', None)\n    tick = parse_tick(ts)\n    dual = compute_dual(data)\n    out = {\n        \"source\": os.path.basename(inp),\n        \"timestamp\": ts, \"tick\": tick,\n        \"meta_edge_score\": score,\n        **(dual or {})\n    }\n    # Write snapshot\n    snap_json = os.path.join(OUT_DIR, 'monitor_summary_v0_4_dual.json')\n    with open(snap_json, 'w', encoding='utf-8') as f:\n        json.dump(out, f, ensure_ascii=False, indent=2)\n    snap_txt = os.path.join(OUT_DIR, 'monitor_summary_v0_4_dual.txt')\n    with open(snap_txt, 'w', encoding='utf-8') as f:\n        for k,v in out.items():\n            f.write(f\"{k}={v}\\n\")\n    # Append timeseries\n    with open(TS_PATH, 'a', encoding='utf-8') as f:\n        f.write(json.dumps(out) + \"\\n\")\n    # Trend + panels\n    if HAVE_MPL:\n        try:\n            snapshot_panel(out, os.path.join(OUT_DIR, 'snapshot_panel_v0_4_dual.png'))\n        except Exception:\n            pass\n        # load timeseries\n        recs = []\n        try:\n            with open(TS_PATH, 'r', encoding='utf-8') as f:\n                for line in f:\n                    line = line.strip()\n                    if line:\n                        try: recs.append(json.loads(line))\n                        except Exception: pass\n        except FileNotFoundError:\n            pass\n        try:\n            trend_panel(recs, os.path.join(OUT_DIR, 'trend_panel_dual.png'))\n        except Exception:\n            pass\n    print(json.dumps({\"status\":\"ok\",\"snapshot_json\":snap_json,\"timeseries\":TS_PATH}))\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761338562.312827,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"snapshot_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_4_dual.json\", \"timeseries\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/timeseries_dual.jsonl\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761338565.9450576,
+      "evaluation_datetime": "2025-10-25T04:42:45.945061"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761338566.2256453,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Monitor v0.4 \u2014 dual conventions (topology vs self-reinforcement)' (ID: 1424) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"snapshot_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_4_dual.json\", \"timeseries\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/timeseries_dual.jsonl\"}\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "254",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Consensus v2: 4-lineage active-set intersection/union @ tol=1e-8 (Noesis SOTA 243, Aletheia 155, Inquire 207, Scientia latest)",
+  "tags": [
+    "analysis",
+    "consensus",
+    "active-sets",
+    "jaccard",
+    "cross-lineage",
+    "reproducibility"
+  ],
+  "abstract": "Compute boundary/pair intersections and unions across four lineages at tol=1e\u22128 using published exports: Noesis SOTA (Eval 243), Aletheia Eval 155, Inquire Eval 207, and Scientia latest. Write JSON/CSV, plus per-lineage boundary diffs vs Noesis. Return current saved SOTA packing unchanged.",
+  "submitted_tick": 159,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np, os, json\n\nN = 26\nTOL = 1e-8\n\n# Sources (exports at tol=1e-8)\nNOESIS = {\n    \"name\": \"noesis_sota243\",\n    \"boundary\": \"storage/noesis/exports/sota_243/active_boundary_tol1e8.csv\",\n    \"pairs\":    \"storage/noesis/exports/sota_243/active_pairs_tol1e8.csv\",\n}\nALETHEIA = {\n    \"name\": \"aletheia_eval155\",\n    \"boundary\": \"storage/Aletheia/exports/active_boundary_tol1e8.csv\",\n    \"pairs\":    \"storage/Aletheia/exports/active_pairs_tol1e8.csv\",\n}\nINQUIRE = {\n    \"name\": \"inquire_eval207\",\n    \"boundary\": \"storage/Inquire/exports/active_boundary_tol1e8.csv\",\n    \"pairs\":    \"storage/Inquire/exports/active_pairs_tol1e8.csv\",\n}\nSCIENTIA = {\n    \"name\": \"scientia_latest\",\n    \"boundary\": \"storage/Scientia/exports/active_boundary_tol1e8.csv\",\n    \"pairs\":    \"storage/Scientia/exports/active_pairs_tol1e8.csv\",\n}\nPEERS = [NOESIS, ALETHEIA, INQUIRE, SCIENTIA]\n\nOUT_JSON = 'storage/noesis/nmap/consensus_n26_4lineage_sota243_tol1e8.json'\nOUT_CSV  = 'storage/noesis/nmap/consensus_n26_4lineage_sota243_tol1e8.csv'\n\ndef load_latest():\n    c = np.loadtxt('storage/noesis/latest_centers.txt').reshape(N, 2)\n    r = np.loadtxt('storage/noesis/latest_radii.txt').reshape(N,)\n    return np.array(c, float), np.array(r, float)\n\ndef map_kind(k):\n    k = k.strip()\n    return {'xmin': 'xL', 'xmax': 'xR', 'ymin': 'yB', 'ymax': 'yT'}.get(k, k)\n\ndef read_boundary_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0])\n            kind = map_kind(parts[1])\n            S.add((i, kind))\n    return S\n\ndef read_pairs_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0]); j = int(parts[1])\n            if i > j: i, j = j, i\n            S.add((i, j))\n    return S\n\ndef consensus_sets(sets):\n    inter = None\n    uni = set()\n    for s in sets:\n        uni |= s\n        inter = s if inter is None else (inter & s)\n    return inter if inter is not None else set(), uni\n\ndef write_diff_csv(base_set, other_set, path):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    only_base = sorted(list(base_set - other_set))\n    only_other = sorted(list(other_set - base_set))\n    with open(path, 'w') as f:\n        f.write(\"side,i,kind\\n\")\n        for (i, kind) in only_base:\n            f.write(f\"only_noesis,{i},{kind}\\n\")\n        for (i, kind) in only_other:\n            f.write(f\"only_peer,{i},{kind}\\n\")\n\ndef jaccard(A, B):\n    inter = len(A & B)\n    uni = len(A | B)\n    return inter, uni, (inter / uni if uni > 0 else 1.0)\n\ndef construct_packing():\n    # Read all sets\n    B_sets = {}\n    P_sets = {}\n    for src in PEERS:\n        B_sets[src[\"name\"]] = read_boundary_csv(src[\"boundary\"])\n        P_sets[src[\"name\"]] = read_pairs_csv(src[\"pairs\"])\n\n    # Consensus and union\n    B_inter, B_union = consensus_sets(list(B_sets.values()))\n    P_inter, P_union = consensus_sets(list(P_sets.values()))\n\n    # Sizes per lineage\n    sizes = {\n        \"boundary\": {k: len(v) for k, v in B_sets.items()},\n        \"pairs\":    {k: len(v) for k, v in P_sets.items()},\n    }\n\n    # Pairwise Jaccards (pairs only)\n    pairwise = {}\n    keys = list(P_sets.keys())\n    for i in range(len(keys)):\n        for j in range(i+1, len(keys)):\n            ki, kj = keys[i], keys[j]\n            pi, pu, pj = jaccard(P_sets[ki], P_sets[kj])\n            pairwise[f\"{ki}__{kj}\"] = {\"intersection\": pi, \"union\": pu, \"jaccard\": pj}\n\n    # Boundary diffs vs Noesis\n    diffs_dir = 'storage/noesis/nmap/consensus_diffs'\n    write_diff_csv(B_sets[\"noesis_sota243\"], B_sets[\"aletheia_eval155\"], f\"{diffs_dir}/boundary_diff_aletheia_vs_noesis.csv\")\n    write_diff_csv(B_sets[\"noesis_sota243\"], B_sets[\"inquire_eval207\"],  f\"{diffs_dir}/boundary_diff_inquire_vs_noesis.csv\")\n    write_diff_csv(B_sets[\"noesis_sota243\"], B_sets[\"scientia_latest\"],  f\"{diffs_dir}/boundary_diff_scientia_vs_noesis.csv\")\n\n    os.makedirs('storage/noesis/nmap', exist_ok=True)\n    data = {\n        \"n\": 26,\n        \"tolerance\": \"1e-8\",\n        \"lineages\": [src[\"name\"] for src in PEERS],\n        \"paths\": {src[\"name\"]: {\"boundary\": src[\"boundary\"], \"pairs\": src[\"pairs\"]} for src in PEERS},\n        \"boundary\": {\n            \"intersection_size\": len(B_inter),\n            \"union_size\": len(B_union),\n            \"sizes\": sizes[\"boundary\"]\n        },\n        \"pairs\": {\n            \"intersection_size\": len(P_inter),\n            \"union_size\": len(P_union),\n            \"sizes\": sizes[\"pairs\"]\n        },\n        \"pairwise_pairs_jaccard\": pairwise,\n        \"diffs\": {\n            \"dir\": diffs_dir,\n            \"files\": [\n                f\"{diffs_dir}/boundary_diff_aletheia_vs_noesis.csv\",\n                f\"{diffs_dir}/boundary_diff_inquire_vs_noesis.csv\",\n                f\"{diffs_dir}/boundary_diff_scientia_vs_noesis.csv\"\n            ]\n        }\n    }\n    with open(OUT_JSON, 'w') as f:\n        json.dump(data, f, indent=2)\n\n    with open(OUT_CSV, 'w') as f:\n        f.write(\"section,metric,value\\n\")\n        f.write(f\"boundary,intersection_size,{len(B_inter)}\\n\")\n        f.write(f\"boundary,union_size,{len(B_union)}\\n\")\n        for k, v in sizes[\"boundary\"].items():\n            f.write(f\"boundary,size_{k},{v}\\n\")\n        f.write(f\"pairs,intersection_size,{len(P_inter)}\\n\")\n        f.write(f\"pairs,union_size,{len(P_union)}\\n\")\n        for k, v in sizes[\"pairs\"].items():\n            f.write(f\"pairs,size_{k},{v}\\n\")\n        for key, val in pairwise.items():\n            f.write(f\"pairs_jaccard,{key},{val['jaccard']}\\n\")\n\n    # Return unchanged current SOTA packing\n    c, r = load_latest()\n    return np.array(c, float), np.array(r, float)\n",
+    "submitted_timestamp": 1760888891.0433085,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.634292357,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760888892.7973924,
+      "evaluation_datetime": "2025-10-19T23:48:12.797395"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.634292357,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760888892.8662713,
+    "version_notified": "original",
+    "message": "Your research submission 'Consensus v2: 4-lineage active-set intersection/union @ tol=1e-8 (Noesis SOTA 243, Aletheia 155, Inquire 207, Scientia latest)' (ID: 254) has been evaluated.\n\n**Score:** 2.634292357\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

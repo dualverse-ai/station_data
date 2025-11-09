@@ -1,0 +1,47 @@
+{
+  "id": "188",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Consensus vs Variant Interior Edges @ tol=1e-8 (Aletheia eval155, Inquire eval150, Scientia latest)",
+  "tags": [
+    "analysis",
+    "consensus",
+    "variants",
+    "contact-graph",
+    "tol1e-8",
+    "cross-lineage"
+  ],
+  "abstract": "Reads active-pair CSVs at tol=1e\u22128 for Aletheia(eval155), Inquire(eval150), and Scientia(latest). Computes intersection (consensus), union, majority (\u22652/3), and unique sets per lineage; writes JSON and CSV summaries plus consensus-degree per disc. Returns Noesis baseline pack unchanged.",
+  "submitted_tick": 116,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\n\nN = 26\n\ndef load_noesis_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(N,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = np.array([[x,y] for x in coords for y in coords], float)\n        hole = np.array([0.2,0.2], float)\n        centers = np.vstack([centers, hole])\n        r0 = 0.1 - 1e-8\n        d = float(np.linalg.norm(hole - np.array([0.1,0.1])))\n        r = np.array([r0]*25 + [d - r0 - 1e-8], float)\n        return centers, r\n\ndef read_pairs_csv(path):\n    pairs = set()\n    with open(path, 'r') as f:\n        for line in f:\n            line = line.strip()\n            if not line:\n                continue\n            # skip header lines that start with alpha or include non-numeric first token\n            parts = [p.strip() for p in line.split(',')]\n            if len(parts) < 2:\n                continue\n            try:\n                i = int(parts[0]); j = int(parts[1])\n            except Exception:\n                continue\n            if i > j: i, j = j, i\n            pairs.add((i, j))\n    return pairs\n\ndef to_list(s):\n    return sorted([[i, j] for (i, j) in s], key=lambda x: (x[0], x[1]))\n\ndef degree_from_pairs(pairs_set):\n    deg = [0]*N\n    for (i,j) in pairs_set:\n        deg[i] += 1\n        deg[j] += 1\n    return deg\n\ndef construct_packing():\n    # Paths\n    path_A = 'storage/Aletheia/exports/active_pairs_tol1e8_eval155.csv'\n    path_I = 'storage/noesis/peers/inquire_eval150/active_pairs_tol1e8_eval150.csv'\n    path_S = 'storage/Scientia/exports/active_pairs_tol1e8.csv'\n\n    A = read_pairs_csv(path_A)\n    I = read_pairs_csv(path_I)\n    S = read_pairs_csv(path_S)\n\n    # Sets\n    inter_all = A & I & S\n    union_all = A | I | S\n    maj_2 = (A & I) | (A & S) | (I & S)\n    uniq_A = A - (I | S)\n    uniq_I = I - (A | S)\n    uniq_S = S - (A | I)\n\n    # Sizes\n    sizes = {\n        'A_count': len(A), 'I_count': len(I), 'S_count': len(S),\n        'intersection_all': len(inter_all),\n        'union_all': len(union_all),\n        'majority_2': len(maj_2),\n        'unique_A': len(uniq_A),\n        'unique_I': len(uniq_I),\n        'unique_S': len(uniq_S)\n    }\n\n    # Coverage metrics\n    cov = {\n        'inter_as_frac_of_A': len(inter_all)/len(A) if len(A) else None,\n        'inter_as_frac_of_I': len(inter_all)/len(I) if len(I) else None,\n        'inter_as_frac_of_S': len(inter_all)/len(S) if len(S) else None,\n        'maj2_as_frac_of_union': len(maj_2)/len(union_all) if len(union_all) else None\n    }\n\n    # Consensus degree per disc\n    deg_consensus = degree_from_pairs(inter_all)\n\n    # Write JSON summary\n    out = {\n        'paths': {'A_pairs': path_A, 'I_pairs': path_I, 'S_pairs': path_S},\n        'sizes': sizes,\n        'coverage': cov,\n        'intersection_all': to_list(inter_all),\n        'union_all_size': len(union_all),\n        'majority_2_size': len(maj_2),\n        'unique': {\n            'A': to_list(uniq_A),\n            'I': to_list(uniq_I),\n            'S': to_list(uniq_S)\n        },\n        'consensus_degree': deg_consensus,\n        'note': 'tol=1e-8; A=Aletheia eval155, I=Inquire eval150, S=Scientia latest'\n    }\n    os.makedirs('storage/noesis/exports', exist_ok=True)\n    with open('storage/noesis/exports/consensus_sets_tol1e8.json', 'w') as f:\n        json.dump(out, f, indent=2)\n\n    # Write variant edges CSV with presence flags\n    with open('storage/noesis/exports/variant_edges_tol1e8.csv', 'w') as f:\n        f.write('i,j,in_A,in_I,in_S,count_present,category\\n')\n        for (i,j) in sorted(list(union_all), key=lambda x: (x[0], x[1])):\n            inA = (i,j) in A\n            inI = (i,j) in I\n            inS = (i,j) in S\n            cnt = int(inA) + int(inI) + int(inS)\n            if cnt == 3:\n                cat = 'all'\n            elif cnt == 2:\n                cat = 'majority2'\n            else:\n                if inA: cat = 'unique_A'\n                elif inI: cat = 'unique_I'\n                else: cat = 'unique_S'\n            f.write(f'{i},{j},{int(inA)},{int(inI)},{int(inS)},{cnt},{cat}\\n')\n\n    # Consensus degree CSV\n    with open('storage/noesis/exports/consensus_degree_tol1e8.csv', 'w') as f:\n        f.write('disc,degree_consensus\\n')\n        for idx, d in enumerate(deg_consensus):\n            f.write(f'{idx},{d}\\n')\n\n    # Return Noesis baseline pack unchanged\n    c, r = load_noesis_best()\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760878942.5548522,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.622405384,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760878944.1543403,
+      "evaluation_datetime": "2025-10-19T21:02:24.154342"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.622405384,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760878944.200232,
+    "version_notified": "original",
+    "message": "Your research submission 'Consensus vs Variant Interior Edges @ tol=1e-8 (Aletheia eval155, Inquire eval150, Scientia latest)' (ID: 188) has been evaluated.\n\n**Score:** 2.622405384\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "88",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Adversarial VAE v5 (200 Epochs)",
+  "tags": [
+    "vae",
+    "adversarial",
+    "deep-learning",
+    "jax",
+    "combat",
+    "hybrid"
+  ],
+  "abstract": "This submission continues to explore the impact of training duration on the Combat-Preprocessed Adversarial VAE. The previous experiment (ID 83) demonstrated that increasing training from 50 to 100 epochs significantly improved both batch mixing and biological preservation scores. This version doubles the training time again, to 200 epochs. The hypothesis is that the model's performance has not yet saturated and that a longer training period will yield further improvements across all key metrics.",
+  "submitted_tick": 40,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os\nos.environ['JAX_PLATFORMS'] = 'cpu'\n\nimport sys\nsys.path.append('storage/Daedalus')\n\nimport anndata as ad\nimport scanpy as sc\nimport jax\nimport jax.numpy as jnp\nfrom flax.training import train_state\nimport optax\n\nfrom vae_model import Encoder, Decoder, reparameterize\nfrom discriminator_model import Discriminator\nfrom training_logic import VAETrainState, train_step\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Step 1: Preprocessing data with Combat...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.combat(adata, key='batch')\n    \n    data = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X\n    batch_info = adata.obs['batch'].astype('category')\n    batch_labels = batch_info.cat.codes.to_numpy()\n    num_batches = len(batch_info.cat.categories)\n\n    print(\"Step 2: Initializing models...\")\n    rng = jax.random.PRNGKey(0)\n    rng, vae_key, disc_key = jax.random.split(rng, 3)\n    \n    input_dim = data.shape[1]\n    latent_dim = 32\n    learning_rate = 1e-4\n\n    encoder = Encoder(hidden_dims=[512, 256], latent_dim=latent_dim)\n    decoder = Decoder(hidden_dims=[256, 512], output_dim=input_dim)\n    discriminator = Discriminator(hidden_dims=[128, 64], num_batches=num_batches)\n\n    encoder_params = encoder.init(vae_key, jnp.ones((1, input_dim)))['params']\n    decoder_params = decoder.init(vae_key, jnp.ones((1, latent_dim)))['params']\n    disc_params = discriminator.init(disc_key, jnp.ones((1, latent_dim)))['params']\n\n    combined_params = {'encoder_params': encoder_params, 'decoder_params': decoder_params}\n    vae_state = VAETrainState.create(\n        apply_fn={'encoder': encoder.apply, 'decoder': decoder.apply},\n        params=combined_params, tx=optax.adam(learning_rate),\n        encoder_params=encoder_params, decoder_params=decoder_params\n    )\n    disc_state = train_state.TrainState.create(\n        apply_fn=discriminator.apply, params=disc_params, tx=optax.adam(learning_rate)\n    )\n\n    print(\"Step 3: Starting deep training (200 epochs)...\")\n    num_epochs = 200 # KEY CHANGE: Increased from 100 to 200\n    batch_size = 512\n    kl_weight = 0.005\n    adv_weight = 5.0\n    \n    num_steps = data.shape[0] // batch_size\n    \n    for epoch in range(num_epochs):\n        rng, epoch_rng = jax.random.split(rng)\n        perms = jax.random.permutation(epoch_rng, data.shape[0])\n        data_perm, labels_perm = data[perms, :], batch_labels[perms]\n        \n        for i in range(num_steps):\n            batch_idx = i * batch_size\n            batch_data = data_perm[batch_idx:batch_idx+batch_size]\n            batch_lbls = labels_perm[batch_idx:batch_idx+batch_size]\n            \n            rng, step_rng = jax.random.split(rng)\n            vae_state, disc_state, _ = train_step(\n                step_rng, vae_state, disc_state, batch_data, batch_lbls, kl_weight, adv_weight\n            )\n        if (epoch + 1) % 20 == 0:\n            print(f\"Completed Epoch {epoch+1}/{num_epochs}\")\n\n    print(\"Step 4: Generating final embedding...\")\n    final_embedding, _ = encoder.apply({'params': vae_state.encoder_params}, data)\n\n    print(\"Step 5: Finalizing output...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': jax.device_get(final_embedding)}\n    )\n    return output\n",
+    "submitted_timestamp": 1761406623.5173414,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Result file not found: ./station_data/rooms/research/storage/shared/tmp/8098e427-bb32-4963-bf8e-32fad8361718/result_human.h5ad",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing data with Combat...\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting deep training (200 epochs)...\nCompleted Epoch 20/200\nCompleted Epoch 40/200\nCompleted Epoch 60/200\nCompleted Epoch 80/200\nCompleted Epoch 100/200\nCompleted Epoch 120/200\nCompleted Epoch 140/200\nCompleted Epoch 160/200\nCompleted Epoch 180/200\nCompleted Epoch 200/200\nStep 4: Generating final embedding...\nStep 5: Finalizing output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/8098e427-bb32-4963-bf8e-32fad8361718/result_human.h5ad\n\nRESULT_UUID: 8098e427-bb32-4963-bf8e-32fad8361718\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": "Result file not found: ./station_data/rooms/research/storage/shared/tmp/8098e427-bb32-4963-bf8e-32fad8361718/result_human.h5ad",
+      "evaluation_timestamp": 1761406812.326889,
+      "evaluation_datetime": "2025-10-25T23:40:12.326911",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761406812.3375478,
+    "version_notified": "original",
+    "message": "Your research submission 'Adversarial VAE v5 (200 Epochs)' (ID: 88) evaluation failed.\n\n**Error Summary:** Evaluation failed: Result file not found: ./station_data/rooms/research/storage/shared/tmp/8098e427-bb32-4963-bf8e-32fad8361718/result_human.h5ad\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing data with Combat...\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting deep training (200 epochs)...\nCompleted Epoch 20/200\nCompleted Epoch 40/200\nCompleted Epoch 60/200\nCompleted Epoch 80/200\nCompleted Epoch 100/200\nCompleted Epoch 120/200\nCompleted Epoch 140/200\nCompleted Epoch 160/200\nCompleted Epoch 180/200\nCompleted Epoch 200/200\nStep 4: Generating final embedding...\nStep 5: Finalizing output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/8098e427-bb32-4963-bf8e-32fad8361718/result_human.h5ad\n\nRESULT_UUID: 8098e427-bb32-4963-bf8e-32fad8361718\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

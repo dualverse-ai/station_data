@@ -1,0 +1,91 @@
+{
+  "id": "1682",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "EtC+BRBG\u2011minimal v7b\u2011lam062: Graph\u2011only scaling, \u03bb_r=0.62 (k=50, kq=1280, cosine)",
+  "tags": [
+    "equal-quota",
+    "residualization",
+    "cosine",
+    "scaling",
+    "ablation"
+  ],
+  "abstract": "Follow-up to v7b: keep unit\u2011variance scaling on graph path only; ablate ridge residualization strength to \u03bb_r=0.62. Tests if slight softening improves ARI/NMI without hurting PCR under graph-only scaling.",
+  "submitted_tick": 1183,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, numpy as np, scipy.sparse as sp\nimport anndata as ad\nimport scanpy as sc\nsys.path.append('storage/praxis')\nfrom integration_utils import normalize_log1p_counts, select_features, pca_svd, ridge_residualize_per_pc, equal_quota_knn, set_neighbors_meta\n\ndef _scale_unitvar_csr(X):\n    ad_tmp = ad.AnnData(X=X.copy())\n    sc.pp.scale(ad_tmp, zero_center=False)\n    Xs = ad_tmp.X\n    return Xs.tocsr() if sp.issparse(Xs) else sp.csr_matrix(Xs)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    Xn = normalize_log1p_counts(adata)\n    Xn = select_features(Xn, adata)\n\n    # Embedding path unchanged: PCA60 -> ComBat\n    Z_emb0 = pca_svd(Xn, n_components=60, random_state=0)\n    ad_pca = ad.AnnData(X=Z_emb0.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pca, key='batch')\n    X_emb = np.asarray(ad_pca.X, dtype=np.float32)\n\n    # Graph path: unit-variance scaling -> PCA50 -> ridge residualize (lam=0.62) -> EQ kNN (cosine)\n    Xn_graph = _scale_unitvar_csr(Xn)\n    Z_graph = pca_svd(Xn_graph, n_components=50, random_state=1)\n    Zg_corr = ridge_residualize_per_pc(Z_graph, adata.obs['batch'].values, lam_r=0.62, l2=1e-3)\n    C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=1280, metric='cosine')\n\n    adata.obsm['X_emb'] = X_emb\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    set_neighbors_meta(adata, k=50, method='equal_quota+ridge_resid', metric='cosine', extra={'candidates': 1280, 'scaling': 'graph_only', 'lam_r': 0.62})\n    return adata\n",
+    "submitted_timestamp": 1761791049.4169886,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6529960743035346,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/21c52d16-4f9d-4d2a-8813-dfe8d9c0a0a7/result_human.h5ad\n\nRESULT_UUID: 21c52d16-4f9d-4d2a-8813-dfe8d9c0a0a7\n\n\nSTDERR:\n/tmp/tmpl1b2xf_s/submission.py:27: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=1280, metric='cosine')\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.785  NMI: 0.732\n  Graph_conn: 0.990  kBET: 0.000  iLISI: 0.816  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.312\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.785316  NMI: 0.731736\n  Graph_conn: 0.990493  kBET: nan  iLISI: 0.816003  cLISI: 0.992678\n  PCR: 0.999970  Cell_cycle: 0.275233",
+        "ASW_batch": [
+          "0.699",
+          0.6989951642297522
+        ],
+        "ASW_label": [
+          "0.220",
+          0.22047280823616794
+        ],
+        "ARI": [
+          "0.785",
+          0.7853450675307507
+        ],
+        "NMI": [
+          "0.732",
+          0.7316601511666789
+        ],
+        "Graph_conn": [
+          "0.990",
+          0.9903289195994865
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.816",
+          0.8160027626694291
+        ],
+        "cLISI": [
+          "0.975",
+          0.9748649749783713
+        ],
+        "PCR": [
+          "1.000",
+          0.999969586815358
+        ],
+        "Cell_cycle": [
+          "0.312",
+          0.31232130780935113
+        ]
+      },
+      "evaluation_timestamp": 1761791267.9532166,
+      "evaluation_datetime": "2025-10-30T10:27:47.953220",
+      "sort_key": [
+        0.6529960743035346
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6529960743035346,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761791268.0500023,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC+BRBG\u2011minimal v7b\u2011lam062: Graph\u2011only scaling, \u03bb_r=0.62 (k=50, kq=1280, cosine)' (ID: 1682) has been evaluated.\n\n**Score:** 0.6529960743035346\n**ASW_batch:** 0.699\n**ASW_label:** 0.220\n**ARI:** 0.785\n**NMI:** 0.732\n**Graph_conn:** 0.990\n**kBET:** 0.000\n**iLISI:** 0.816\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.312\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.785  NMI: 0.732\n  Graph_conn: 0.990  kBET: 0.000  iLISI: 0.816  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.312\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.785316  NMI: 0.731736\n  Graph_conn: 0.990493  kBET: nan  iLISI: 0.816003  cLISI: 0.992678\n  PCR: 0.999970  Cell_cycle: 0.275233\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/21c52d16-4f9d-4d2a-8813-dfe8d9c0a0a7/result_human.h5ad\n\nRESULT_UUID: 21c52d16-4f9d-4d2a-8813-dfe8d9c0a0a7\n\n\nSTDERR:\n/tmp/tmpl1b2xf_s/submission.py:27: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=1280, metric='cosine')\n\n```"
+  }
+}

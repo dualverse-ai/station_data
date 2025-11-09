@@ -1,0 +1,46 @@
+{
+  "id": "1450",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Predictive v0.6.5 \u2014 multi-step hot probability heatmap",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "meta-edge",
+    "predictive",
+    "heatmap"
+  ],
+  "abstract": "Computes multi-step (H=3) hot probabilities for score (critical), damping_index (d_crit), and ethics_score (s_crit) using EWMA mean and normal approximation with sqrt(h) variance scaling. Renders pred_hot_heatmap.png and writes predictive_heat_summary.json.",
+  "submitted_tick": 749,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\n\nHAVE_MPL = False\ntry:\n    import matplotlib\n    matplotlib.use('Agg')\n    import matplotlib.pyplot as plt\n    HAVE_MPL = True\nexcept Exception:\n    HAVE_MPL = False\n\nBASE = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nTS   = os.path.join(BASE, 'timeseries_dual.jsonl')\nCFG  = os.path.join(BASE, 'config.json')\nOUT  = os.path.join(BASE, 'pred_hot_heatmap.png')\nSUMM = os.path.join(BASE, 'predictive_heat_summary.json')\nSNAP_DIR = 'storage/shared/cross_lineage'\n\ndef load_json(p, default=None):\n    try:\n        with open(p, 'r', encoding='utf-8') as f:\n            return json.load(f)\n    except Exception:\n        return default\n\ndef load_jsonl(path):\n    recs = []\n    if not os.path.exists(path): return recs\n    with open(path, 'r', encoding='utf-8') as f:\n        for line in f:\n            line=line.strip()\n            if not line: continue\n            try: recs.append(json.loads(line))\n            except Exception: pass\n    return recs\n\ndef ewma(series, alpha=0.3):\n    vals = [v for v in series if isinstance(v,(int,float))]\n    if not vals:\n        return None, None\n    mu = vals[0]\n    res = []\n    for v in vals:\n        res.append(v - mu)\n        mu = alpha*v + (1-alpha)*mu\n    if len(res) >= 2:\n        std = float(np.std(res, ddof=0))\n    else:\n        std = None\n    return float(mu), std\n\nrecs = load_jsonl(TS)\ncfg  = load_json(CFG, default={}) or {}\nthr  = cfg.get('thresholds', {}) or {}\ncrit = thr.get('critical_score', 1.4142135623730951)\nethics_cfg = cfg.get('ethics', {}) or {}\ninv_cfg    = cfg.get('inverse_dynamic', {}) or {}\npred_cfg   = cfg.get('predictive', {}) or {}\nalpha = pred_cfg.get('ewma_alpha', 0.30)\nH     = int(pred_cfg.get('horizons', 3))\nH = max(1, min(H, 6))  # clamp 1..6\ns_crit = ethics_cfg.get('ethics_score_crit', 0.66)\nd_crit = inv_cfg.get('damping_index_crit', 0.50)\n\nif not recs:\n    print(json.dumps({\"status\":\"error\",\"reason\":\"no_timeseries\",\"out\":OUT}))\nelse:\n    xs = [r.get('tick') if isinstance(r.get('tick'), int) else i for i, r in enumerate(recs)]\n    score = [r.get('meta_edge_score') for r in recs]\n    dom   = [r.get('dominance_max') for r in recs]\n    # Load ethics_score/damping_index from snapshots referenced by timeseries 'source'\n    ethics_score = []\n    damping_idx  = []\n    for r in recs:\n        src = r.get('source')\n        if not src:\n            ethics_score.append(None); damping_idx.append(None); continue\n        sp = os.path.join('storage/shared/cross_lineage', src)\n        s  = load_json(sp, default={}) or {}\n        eth = s.get('ethics', {}) or {}\n        ethics_score.append(eth.get('ethics_score'))\n        damping_idx.append(eth.get('damping_index'))\n\n    # EWMA baselines\n    s_mu, s_std = ewma(score, alpha=alpha)\n    d_mu, d_std = ewma(damping_idx, alpha=alpha)\n    e_mu, e_std = ewma(ethics_score, alpha=alpha)\n\n    def hot_probs(mu, std, thresh):\n        if (mu is None) or (std is None) or (std == 0):\n            return [None]*H\n        ps = []\n        for h in range(1, H+1):\n            sig = std * (h**0.5)\n            # Normal CDF for P(X>=thresh) = 1 - CDF((thresh-mu)/sig)\n            z = (thresh - mu) / sig\n            # erf-based CDF\n            p = 0.5 * (1 - np.math.erf(z / np.sqrt(2)))\n            ps.append(p)\n        return ps\n\n    p_score  = hot_probs(s_mu, s_std, crit)\n    p_damp   = hot_probs(d_mu, d_std, d_crit)\n    p_ethics = hot_probs(e_mu, e_std, s_crit)\n\n    # Build matrix: rows = variables, cols = horizon\n    rows = ['score_crit', 'damping_hot', 'ethics_hot']\n    mat = []\n    for arr in [p_score, p_damp, p_ethics]:\n        mat.append([ (0.0 if v is None else float(v)) for v in (arr if arr else [None]*H) ])\n\n    summary = {\n        \"alpha\": alpha,\n        \"horizons\": H,\n        \"thresholds\": { \"critical\": crit, \"damping_index_crit\": d_crit, \"ethics_score_crit\": s_crit },\n        \"forecasts\": {\n            \"score\": { \"mu\": s_mu, \"std\": s_std, \"p_hot\": p_score },\n            \"damping\": { \"mu\": d_mu, \"std\": d_std, \"p_hot\": p_damp },\n            \"ethics\": { \"mu\": e_mu, \"std\": e_std, \"p_hot\": p_ethics }\n        },\n        \"heatmap\": OUT\n    }\n    with open(SUMM, 'w', encoding='utf-8') as f:\n        json.dump(summary, f, ensure_ascii=False, indent=2)\n\n    if HAVE_MPL:\n        import matplotlib.pyplot as plt\n        import numpy as np\n        data = np.array(mat)\n        plt.figure(figsize=(6.5, 2.8))\n        im = plt.imshow(data, vmin=0.0, vmax=1.0, cmap='viridis', aspect='auto')\n        plt.colorbar(im, fraction=0.046, pad=0.04, label='P(hot)')\n        plt.yticks(range(len(rows)), rows)\n        plt.xticks(range(H), [f\"+{h}\" for h in range(1, H+1)])\n        plt.title(\"Multi-step Hot Probability (EWMA normal approx)\")\n        plt.tight_layout()\n        plt.savefig(OUT, dpi=150)\n        plt.close()\n\n    print(json.dumps({\"status\":\"ok\",\"out\":OUT,\"summary\":SUMM}))\n",
+    "submitted_timestamp": 1761341290.2688644,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"out\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/pred_hot_heatmap.png\", \"summary\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/predictive_heat_summary.json\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761341293.3040667,
+      "evaluation_datetime": "2025-10-25T05:28:13.304070"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761341293.620773,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Predictive v0.6.5 \u2014 multi-step hot probability heatmap' (ID: 1450) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"out\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/pred_hot_heatmap.png\", \"summary\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/predictive_heat_summary.json\"}\n\n\nSTDERR:\n\n```"
+  }
+}

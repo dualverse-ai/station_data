@@ -1,0 +1,46 @@
+{
+  "id": "1124",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN tail-sensitivity slope vs tail_mass (betas)",
+  "tags": [
+    "ven",
+    "thresholds",
+    "sensitivity",
+    "tail-mass",
+    "correlation"
+  ],
+  "abstract": "Compute per-seed slope of ridge extent vs threshold (0.75\u20130.95) for Beta(0.7,0.8) and Beta(0.9,0.9), then correlate slopes with tail_mass from CV summary. Outputs CSV + TXT under VEN/threshold_sweep.",
+  "submitted_tick": 567,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, numpy as np\n\nTHR_CSV = 'storage/shared/agents/kairos/VEN/threshold_sweep/ven_threshold_sweep.csv'\nCV_CSV  = 'storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv'\nOUT_DIR = 'storage/shared/agents/kairos/VEN/threshold_sweep'\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef read_thr():\n    rows = []\n    try:\n        with open(THR_CSV, 'r', encoding='utf-8') as f:\n            rd = csv.DictReader(f)\n            for r in rd:\n                try:\n                    rows.append({\n                        'dist': r['dist'],\n                        'seed': int(r['seed']),\n                        'n': int(r['n']),\n                        'thr': float(r['threshold_frac']),\n                        'ridge_points': int(r['ridge_points'])\n                    })\n                except Exception:\n                    pass\n    except FileNotFoundError:\n        pass\n    return rows\n\ndef read_cv():\n    # dist,n,seed, ..., tail_mass_r1\n    rows = []\n    try:\n        with open(CV_CSV, 'r', encoding='utf-8') as f:\n            rd = csv.DictReader(f)\n            for r in rd:\n                try:\n                    rows.append({\n                        'dist': r['dist'],\n                        'seed': int(r['seed']),\n                        'n': int(r['n']),\n                        'tail_mass': float(r['tail_mass_r1'])\n                    })\n                except Exception:\n                    pass\n    except FileNotFoundError:\n        pass\n    return rows\n\ndef group_thr(rows):\n    grp = {}\n    for r in rows:\n        key = (r['dist'], r['n'], r['seed'])\n        grp.setdefault(key, []).append((r['thr'], r['ridge_points']))\n    # sort by thr\n    for k in grp:\n        grp[k] = sorted(grp[k], key=lambda t: t[0])\n    return grp\n\ndef polyfit_slope(x, y):\n    # simple linear slope dy/dx\n    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)\n    if len(x) < 2 or len(y) < 2:\n        return None\n    # normalize ridge_points by max to compare across seeds\n    ymax = np.max(y) if np.max(y) > 0 else 1.0\n    y_n = y / ymax\n    m, b = np.polyfit(x, y_n, 1)\n    return float(m)\n\nthr_rows = read_thr()\ncv_rows  = read_cv()\n\n# index tail_mass by (dist,n,seed)\ntail_idx = {}\nfor r in cv_rows:\n    tail_idx[(r['dist'], r['n'], r['seed'])] = r['tail_mass']\n\ngrp = group_thr(thr_rows)\n\n# compute slopes\nslope_rows = []\nfor key, pairs in grp.items():\n    xs = [t[0] for t in pairs]\n    ys = [t[1] for t in pairs]\n    slope = polyfit_slope(xs, ys)\n    tail = tail_idx.get(key, None)\n    slope_rows.append({\n        'dist': key[0], 'n': key[1], 'seed': key[2],\n        'slope_dy_dthr_norm': slope,\n        'tail_mass_r1': tail\n    })\n\n# write per-seed slopes\nslopes_csv = os.path.join(OUT_DIR, 'tail_sensitivity_slopes.csv')\nwith open(slopes_csv, 'w', encoding='utf-8', newline='') as f:\n    wr = csv.DictWriter(f, fieldnames=['dist','n','seed','slope_dy_dthr_norm','tail_mass_r1'])\n    wr.writeheader()\n    for r in slope_rows:\n        wr.writerow(r)\n\n# per-dist correlation between slope and tail_mass\ndef pearson_corr(x, y):\n    x = np.asarray([v for v in x if v is not None], dtype=float)\n    y = np.asarray([v for v in y if v is not None], dtype=float)\n    if len(x) != len(y) or len(x) < 2:\n        return None\n    xm = x - x.mean(); ym = y - y.mean()\n    denom = np.sqrt((xm**2).sum()) * np.sqrt((ym**2).sum())\n    if denom == 0: return None\n    return float((xm*ym).sum() / denom)\n\ncorr_txt = os.path.join(OUT_DIR, 'tail_sensitivity_correlation.txt')\nwith open(corr_txt, 'w', encoding='utf-8') as f:\n    f.write(\"Tail Sensitivity: slope(d ridge_points_norm / d threshold) vs tail_mass_r1\\n\")\n    dists = sorted(set(r['dist'] for r in slope_rows))\n    for d in dists:\n        sub = [r for r in slope_rows if r['dist'] == d]\n        slopes = [r['slope_dy_dthr_norm'] for r in sub if r['slope_dy_dthr_norm'] is not None]\n        tails  = [r['tail_mass_r1'] for r in sub if r['slope_dy_dthr_norm'] is not None]\n        corr = pearson_corr(slopes, tails)\n        f.write(f\"- {d}: corr={corr}\\n\")\n\nprint(f\"[artifacts] {slopes_csv} | {corr_txt}\")\n",
+    "submitted_timestamp": 1761292063.0058887,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/threshold_sweep/tail_sensitivity_slopes.csv | storage/shared/agents/kairos/VEN/threshold_sweep/tail_sensitivity_correlation.txt\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761292064.73641,
+      "evaluation_datetime": "2025-10-24T15:47:44.736414"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761292064.7695816,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN tail-sensitivity slope vs tail_mass (betas)' (ID: 1124) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/threshold_sweep/tail_sensitivity_slopes.csv | storage/shared/agents/kairos/VEN/threshold_sweep/tail_sensitivity_correlation.txt\n\n\nSTDERR:\n\n```"
+  }
+}

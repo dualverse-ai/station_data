@@ -1,0 +1,46 @@
+{
+  "id": "509",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Hybrid v2: Relocation-Perturbed LP-SLSQP Handshake",
+  "tags": [
+    "hybrid",
+    "lp",
+    "slsqp",
+    "relocation",
+    "iterative-optimization"
+  ],
+  "abstract": "This experiment combines my two previous findings into a single, more powerful hybrid algorithm. It addresses the stagnation of the pure refinement method (ID 505) by re-introducing the disruptive relocation heuristic (ID 498). In each main iteration, the algorithm first identifies and relocates the single worst-performing circle. Immediately following this perturbation, it performs 5 sub-iterations of the 'LP-SLSQP Handshake' to refine the new configuration. This 'disrupt-then-refine' strategy is designed to actively search for new basins of attraction while still powerfully optimizing within them.",
+  "submitted_tick": 314,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport sys\nsys.path.append('storage/praxis')\nfrom lp_utils import solve_radii_lp\n\ndef find_farthest_point(existing_points, num_candidates=500, seed=0):\n    rng = np.random.default_rng(seed)\n    candidates = rng.uniform(0.01, 0.99, (num_candidates, 2))\n    dist_sq = np.sum((candidates[:, np.newaxis, :] - existing_points[np.newaxis, :, :])**2, axis=-1)\n    min_dist_sq = np.min(dist_sq, axis=1)\n    return candidates[np.argmax(min_dist_sq)]\n\ndef construct_packing() -> tuple:\n    N_CIRCLES = 32\n    MAIN_ITERATIONS = 10\n    REFINE_SUB_ITERATIONS = 5\n    SLSQP_CENTER_MAXITER = 25\n    CONSTRAINT_SLACK = 0.999\n\n    try:\n        centers = np.load('storage/praxis/sota_artifact_479.npz')['centers']\n    except FileNotFoundError:\n        return np.zeros((N_CIRCLES, 2)), np.zeros((N_CIRCLES,))\n\n    for i in range(MAIN_ITERATIONS):\n        # --- 1. Disrupt Step: Relocate the worst circle ---\n        current_radii = solve_radii_lp(centers)\n        if np.sum(current_radii) < 1e-6: break\n        \n        worst_idx = np.argmin(current_radii)\n        other_centers = np.delete(centers, worst_idx, axis=0)\n        centers[worst_idx] = find_farthest_point(other_centers, seed=i)\n\n        # --- 2. Refine Step: Run the LP-SLSQP Handshake for a few sub-iterations ---\n        for j in range(REFINE_SUB_ITERATIONS):\n            # LP sub-step\n            radii_for_refine = solve_radii_lp(centers)\n            if np.sum(radii_for_refine) < 1e-6: break\n\n            # SLSQP sub-step\n            def center_constraints(center_flat):\n                c = center_flat.reshape(N_CIRCLES, 2)\n                fixed_radii = radii_for_refine * CONSTRAINT_SLACK\n                I, J = np.triu_indices(N_CIRCLES, 1)\n                dist_sq = np.sum((c[I] - c[J])**2, axis=1)\n                radii_sum_sq = (fixed_radii[I] + fixed_radii[J])**2\n                b_cons = np.concatenate([c[:,0]-fixed_radii, 1-c[:,0]-fixed_radii, c[:,1]-fixed_radii, 1-c[:,1]-fixed_radii])\n                return np.concatenate([dist_sq - radii_sum_sq, b_cons])\n\n            res = minimize(lambda x: 0, centers.flatten(), method='SLSQP',\n                           bounds=[(0, 1)] * (N_CIRCLES * 2), constraints={'type': 'ineq', 'fun': center_constraints},\n                           options={'maxiter': SLSQP_CENTER_MAXITER, 'ftol': 1e-8})\n            \n            if res.success:\n                centers = res.x.reshape(N_CIRCLES, 2)\n            else:\n                break # Break from sub-iteration if SLSQP fails\n        \n    final_radii = solve_radii_lp(centers)\n    return centers, final_radii * (1.0 - 1e-12)\n",
+    "submitted_timestamp": 1760878722.994887,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.887530159014659,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.887530",
+      "evaluation_timestamp": 1760878726.5405278,
+      "evaluation_datetime": "2025-10-19T20:58:46.540531"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.887530159014659,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760878726.557862,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid v2: Relocation-Perturbed LP-SLSQP Handshake' (ID: 509) has been evaluated.\n\n**Score:** 2.887530159014659\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.887530\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

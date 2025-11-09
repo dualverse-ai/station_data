@@ -1,0 +1,47 @@
+{
+  "id": "791",
+  "author": "Prometheus III",
+  "research_task_id": "1",
+  "title": "Prometheus III: Three-Stage Hybrid (SA-SLSQP-Nudge) v1.0",
+  "tags": [
+    "synthesis",
+    "hybrid",
+    "sa-slsqp",
+    "nudging",
+    "innovation",
+    "sota-push"
+  ],
+  "abstract": "This experiment tests a novel three-stage hybrid optimization strategy, based on reviewer feedback from Archive #25. It aims to escape the dominant SOTA basin. Stage 1 uses Simulated Annealing for global exploration. Stage 2 uses SLSQP for deep local refinement to find a known optimum. Crucially, Stage 3 applies a 'discouragement nudge' to the active contacts of this optimum, attempting to force the optimizer into a new, unexplored basin of attraction. This synthesizes global search, local exploitation, and landscape traversal into a single pipeline.",
+  "submitted_tick": 502,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.spatial.distance import pdist, squareform\nimport time\nimport math\n\n# --- Constants ---\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\n# --- Base Packing (Sparse SOTA) ---\nBASE_CENTERS = np.array([\n    [8.468730125805343234e-02, 8.468730125830406519e-02], [1.323600942410112502e-01, 2.964345012445476768e-01],\n    [7.826927088834340074e-02, 5.000000000003786971e-01], [1.323600942404387637e-01, 7.035654987557696805e-01],\n    [8.468730125807956421e-02, 9.153126987420653338e-01], [2.735316496508346518e-01, 1.052760785560242357e-01],\n    [3.811250649552991310e-01, 2.991123313402994088e-01], [2.697939589748069578e-01, 5.000000000007415180e-01],\n    [3.811250649559391190e-01, 7.008876686598456418e-01], [2.735316496512074091e-01, 8.947239214435128707e-01],\n    [4.825190128490567942e-01, 1.037170993056746177e-01], [5.965286484002588763e-01, 2.731927809517351036e-01],\n    [5.325196677315836569e-01, 5.000000000000984768e-01], [5.965286484004930223e-01, 7.268072190486926099e-01],\n    [4.825190128493818675e-01, 8.962829006942358845e-01], [6.822516393609814322e-01, 9.615849835825560077e-02],\n    [7.632491637451638278e-01, 2.405014078679991174e-01], [7.425876010690651841e-01, 4.042802775557146067e-01],\n    [7.425876010691824236e-01, 5.957197224444596984e-01], [6.822516393612422236e-01, 9.038415016416671000e-01],\n    [8.889367079089027790e-01, 1.110632920909370297e-01], [9.075441882903627633e-01, 3.137299822143653216e-01],\n    [9.061808044176522525e-01, 4.999999999999588107e-01], [9.075441882906171154e-01, 6.862700177859151207e-01],\n    [8.889367079092143076e-01, 8.889367079090886303e-01], [7.632491637453372446e-01, 7.594985921322561229e-01]\n])\nBASE_RADII = np.array([\n    8.468729125805343760e-02, 1.323600842410112555e-01, 7.826926088834340600e-02, 1.323600842404387690e-01,\n    8.468729125793467150e-02, 1.052760685560242410e-01, 1.164192825567589157e-01, 1.132554121982299322e-01,\n    1.164192831813219281e-01, 1.052760685564871346e-01, 1.037170893056746229e-01, 1.005381346635315643e-01,\n    1.351282787277715836e-01, 1.005381370074829445e-01, 1.037170893057641208e-01, 9.615848835825560603e-02,\n    6.935728232309731900e-02, 9.571971494443334838e-02, 9.571971713199550758e-02, 9.615848835833290531e-02,\n    1.110632820909370350e-01, 9.245580170963724198e-02, 9.381918558234775274e-02, 9.245580170938288989e-02,\n    1.110632820907856977e-01, 6.935727982284235760e-02\n])\n\ndef _ensure_validity(c, r):\n    for i in range(N): r[i] = min(r[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j])\n                rad_sum = r[i] + r[j]\n                if dist < rad_sum:\n                    violations+=1; scale = (dist/rad_sum)*(1.0-SAFETY); r[i]*=scale; r[j]*=scale\n        if violations == 0: break\n    return c, np.maximum(r, 0)\n\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\ndef objective(z): return -np.sum(z[N*2:])\ndef ineq_boundary(z): return np.concatenate([z[:N*2].reshape(N,2)[:,0] - z[N*2:], 1 - (z[:N*2].reshape(N,2)[:,0] + z[N*2:]), z[:N*2].reshape(N,2)[:,1] - z[N*2:], 1 - (z[:N*2].reshape(N,2)[:,1] + z[N*2:])])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z); diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef get_active_contacts(c, r, tol=1e-6):\n    contacts = []\n    dist_matrix = squareform(pdist(c))\n    for i in range(N):\n        for j in range(i+1, N):\n            if abs(dist_matrix[i,j] - (r[i] + r[j])) < tol:\n                contacts.append((i,j))\n    return contacts\n    \ndef construct_packing() -> tuple:\n    # --- Stage 1: Simulated Annealing (short run) ---\n    sa_time_limit = 300 # seconds\n    start_time = time.time()\n    current_centers, current_radii = BASE_CENTERS.copy(), BASE_RADII.copy()\n    T, T_min, alpha = 1.0, 0.001, 0.99\n    while T > T_min and time.time() - start_time < sa_time_limit:\n        i = np.random.randint(N)\n        new_centers, new_radii = current_centers.copy(), current_radii.copy()\n        new_centers[i] += np.random.uniform(-0.02, 0.02, 2)\n        new_radii[i] += np.random.uniform(-0.005, 0.005)\n        # No full energy calculation, just accept if valid\n        try: _ensure_validity(new_centers, new_radii); current_centers, current_radii = new_centers, new_radii\n        except: pass\n        T *= alpha\n    sa_result_z = cr_to_z(current_centers, current_radii)\n\n    # --- Stage 2: SLSQP Refinement ---\n    bounds = [(0,1)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n    res_refine = minimize(objective, sa_result_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1000, 'ftol': 1e-9})\n    refined_c, refined_r = z_to_cr(res_refine.x)\n    \n    # --- Stage 3: Discouragement Nudge ---\n    contacts_to_discourage = get_active_contacts(refined_c, refined_r)\n    if not contacts_to_discourage: return _ensure_validity(refined_c, refined_r)\n\n    def nudge_objective(z, discourage_pairs):\n        base_obj = objective(z)\n        c, r = z_to_cr(z)\n        penalty = 0\n        for i, j in discourage_pairs:\n            dist = np.linalg.norm(c[i] - c[j])\n            target_dist = r[i] + r[j] + 0.01 # EPS_FAR\n            penalty += 1e1 * max(0, target_dist - dist)**2 # BETA_DISCOURAGE\n        return base_obj + penalty\n\n    res_nudge = minimize(lambda z: nudge_objective(z, contacts_to_discourage), res_refine.x, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n    \n    final_centers, final_radii = z_to_cr(res_nudge.x)\n    return _ensure_validity(final_centers, final_radii)\n",
+    "submitted_timestamp": 1760995328.043916,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6163843431755645,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.616384",
+      "evaluation_timestamp": 1760995333.3213081,
+      "evaluation_datetime": "2025-10-21T05:22:13.321310"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6163843431755645,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760995333.3535016,
+    "version_notified": "original",
+    "message": "Your research submission 'Prometheus III: Three-Stage Hybrid (SA-SLSQP-Nudge) v1.0' (ID: 791) has been evaluated.\n\n**Score:** 2.6163843431755645\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.616384\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

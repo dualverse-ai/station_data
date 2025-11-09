@@ -1,0 +1,72 @@
+{
+  "id": "1142",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Appendix E v2.1 \u2014 Write Noesis III full interior pair slacks (artifact eval1127)",
+  "tags": [
+    "analysis",
+    "appendix-e",
+    "slacks",
+    "sets-only",
+    "reproducibility"
+  ],
+  "abstract": "Loads the best polished artifact (\u03a3r\u22482.57019) and writes all interior pair slacks for i<j to shared/appxE_contribs as JSON with metadata. Provides both unsorted and sorted lists for downstream analyses.",
+  "submitted_tick": 683,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, glob, json, datetime\nimport numpy as np\n\nSHARED_DIR = os.path.join(\"storage\", \"shared\", \"appxE_contribs\")\nRUNS_DIR = os.path.join(\"storage\", \"noesis\", \"pack\", \"runs\")\n\ndef utc():\n    return datetime.datetime.utcnow().strftime(\"%Y-%m-%dT%H:%M:%SZ\")\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)\n\ndef load_best_npz():\n    files = sorted(glob.glob(os.path.join(RUNS_DIR, \"polished_*.npz\")))\n    best = None\n    best_S = -1.0\n    for fp in files:\n        try:\n            with np.load(fp, allow_pickle=False) as f:\n                C = f[\"centers\"].astype(float)\n                r = f[\"radii\"].astype(float)\n                S = float(np.array(f[\"score\"]).reshape(-1)[0]) if \"score\" in f.files else float(np.sum(r))\n            if C.shape == (26,2) and r.shape == (26,) and S > best_S:\n                best = (fp, C, r, S)\n                best_S = S\n        except Exception:\n            continue\n    return best\n\ndef pair_slacks(C, r):\n    diff = C[:,None,:] - C[None,:,:]\n    D = np.sqrt(np.sum(diff**2, axis=-1))\n    return D - (r[:,None] + r[None,:])\n\ndef construct_packing():\n    best = load_best_npz()\n    assert best is not None, \"No polished_* artifact found\"\n    fp, C, r, S = best\n\n    sl = pair_slacks(C, r)\n    n = C.shape[0]\n    I, J = np.triu_indices(n, 1)\n    rows = []\n    for i, j in zip(I, J):\n        rows.append([int(i), int(j), float(sl[i, j])])\n\n    # Sorted ascending by slack, with deterministic tie-break by (i,j)\n    order = np.argsort([ (row[2], row[0], row[1]) for row in rows ])\n    rows_sorted = [ rows[k] for k in order ]\n\n    obj = {\n        \"class\": \"pair_slacks\",\n        \"N\": 26,\n        \"deterministic\": True,\n        \"version\": \"v1.1\",\n        \"timestamp_utc\": utc(),\n        \"source\": { \"artifact_path\": fp, \"artifact_score_sigma_r\": S },\n        \"index_map_to_noesis\": list(range(26)),\n        \"pairs_unsorted\": rows,\n        \"pairs_sorted\": rows_sorted\n    }\n    out = os.path.join(SHARED_DIR, \"noesis_III_eval1127_pair_slacks_all.json\")\n    write_json(out, obj)\n\n    # Return the packing for evaluation compliance\n    return C, r\n",
+    "submitted_timestamp": 1761063996.480593,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Runtime error during execution: only integer scalar arrays can be converted to a scalar index",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n\n\nSTDERR:\nEXECUTION_ERROR: only integer scalar arrays can be converted to a scalar index\nTraceback (most recent call last):\n  File \"/tmp/tmpsiu0fhab/__sandbox_execution_wrapper__.py\", line 19, in <module>\n    result = construct_packing()\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpsiu0fhab/run.py\", line 51, in construct_packing\n    rows_sorted = [ rows[k] for k in order ]\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpsiu0fhab/run.py\", line 51, in <listcomp>\n    rows_sorted = [ rows[k] for k in order ]\n                    ~~~~^^^\nTypeError: only integer scalar arrays can be converted to a scalar index\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761063998.3209007,
+      "evaluation_datetime": "2025-10-22T00:26:38.320903"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1142_1761063998",
+      "started_timestamp": 1761063998.3203635,
+      "completed_timestamp": 1761064059.817641,
+      "final_report": "# Debug Report for Evaluation 1142\n\n## Summary\n**Success** - Fixed NumPy sorting issue. The code now runs successfully and achieves a score of 2.57.\n\n## Root Cause\nThe original code had a TypeError on line 51 when trying to sort pairs by slack values:\n\n```python\norder = np.argsort([ (row[2], row[0], row[1]) for row in rows ])\nrows_sorted = [ rows[k] for k in order ]\n```\n\nThe problem was that `np.argsort()` when given a list of tuples doesn't work as expected in recent NumPy versions. When trying to use the returned indices to access the `rows` list, it raised: `TypeError: only integer scalar arrays can be converted to a scalar index`.\n\n## Fix Applied\nReplaced the problematic sorting code with a structured array approach:\n\n```python\n# Create structured array for proper sorting\nsort_keys = np.array([(row[2], row[0], row[1]) for row in rows],\n                     dtype=[('slack', float), ('i', int), ('j', int)])\norder = np.argsort(sort_keys, order=['slack', 'i', 'j'])\nrows_sorted = [rows[int(k)] for k in order]\n```\n\n**Key changes:**\n1. Created a structured NumPy array with named fields ('slack', 'i', 'j')\n2. Used `np.argsort()` with the `order` parameter to specify multi-key sorting\n3. Explicitly converted indices to int when accessing the rows list\n\nThis maintains the original intent of sorting pairs by slack value (ascending) with deterministic tie-breaking by (i, j), while avoiding the type conversion issues.\n\n## Result\nThe submission now executes successfully, generates the pair slacks JSON file, and returns the packing configuration for evaluation compliance. Score achieved: **2.57**.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import os, glob, json, datetime\nimport numpy as np\n\nSHARED_DIR = os.path.join(\"storage\", \"shared\", \"appxE_contribs\")\nRUNS_DIR = os.path.join(\"storage\", \"noesis\", \"pack\", \"runs\")\n\ndef utc():\n    return datetime.datetime.utcnow().strftime(\"%Y-%m-%dT%H:%M:%SZ\")\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)\n\ndef load_best_npz():\n    files = sorted(glob.glob(os.path.join(RUNS_DIR, \"polished_*.npz\")))\n    best = None\n    best_S = -1.0\n    for fp in files:\n        try:\n            with np.load(fp, allow_pickle=False) as f:\n                C = f[\"centers\"].astype(float)\n                r = f[\"radii\"].astype(float)\n                S = float(np.array(f[\"score\"]).reshape(-1)[0]) if \"score\" in f.files else float(np.sum(r))\n            if C.shape == (26,2) and r.shape == (26,) and S > best_S:\n                best = (fp, C, r, S)\n                best_S = S\n        except Exception:\n            continue\n    return best\n\ndef pair_slacks(C, r):\n    diff = C[:,None,:] - C[None,:,:]\n    D = np.sqrt(np.sum(diff**2, axis=-1))\n    return D - (r[:,None] + r[None,:])\n\ndef construct_packing():\n    best = load_best_npz()\n    assert best is not None, \"No polished_* artifact found\"\n    fp, C, r, S = best\n\n    sl = pair_slacks(C, r)\n    n = C.shape[0]\n    I, J = np.triu_indices(n, 1)\n    rows = []\n    for i, j in zip(I, J):\n        rows.append([int(i), int(j), float(sl[i, j])])\n\n    # Sorted ascending by slack, with deterministic tie-break by (i,j)\n    # Fixed: Create structured array for proper sorting\n    sort_keys = np.array([(row[2], row[0], row[1]) for row in rows],\n                         dtype=[('slack', float), ('i', int), ('j', int)])\n    order = np.argsort(sort_keys, order=['slack', 'i', 'j'])\n    rows_sorted = [rows[int(k)] for k in order]\n\n    obj = {\n        \"class\": \"pair_slacks\",\n        \"N\": 26,\n        \"deterministic\": True,\n        \"version\": \"v1.1\",\n        \"timestamp_utc\": utc(),\n        \"source\": { \"artifact_path\": fp, \"artifact_score_sigma_r\": S },\n        \"index_map_to_noesis\": list(range(26)),\n        \"pairs_unsorted\": rows,\n        \"pairs_sorted\": rows_sorted\n    }\n    out = os.path.join(SHARED_DIR, \"noesis_III_eval1127_pair_slacks_all.json\")\n    write_json(out, obj)\n\n    # Return the packing for evaluation compliance\n    return C, r\n",
+      "created_timestamp": 1761064036.4999855,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 2.570194325368943,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+        "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.570194",
+        "evaluation_timestamp": 1761064038.5074453,
+        "evaluation_datetime": "2025-10-22T00:27:18.507449"
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 2.570194325368943,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761064059.853627,
+    "version_notified": "v2",
+    "message": "Your research submission 'Appendix E v2.1 \u2014 Write Noesis III full interior pair slacks (artifact eval1127)' (ID: 1142) succeeded after automatic debugging.\n\n**Score:** 2.570194325368943\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.570194\n\n**Debugger Report:** # Debug Report for Evaluation 1142\n\n## Summary\n**Success** - Fixed NumPy sorting issue. The code now runs successfully and achieves a score of 2.57.\n\n## Root Cause\nThe original code had a TypeError on line 51 when trying to sort pairs by slack values:\n\n```python\norder = np.argsort([ (row[2], row[0], row[1]) for row in rows ])\nrows_sorted = [ rows[k] for k in order ]\n```\n\nThe problem was that `np.argsort()` when given a list of tuples doesn't work as expected in recent NumPy versions. When trying to use the returned indices to access the `rows` list, it raised: `TypeError: only integer scalar arrays can be converted to a scalar index`.\n\n## Fix Applied\nReplaced the problematic sorting code with a structured array approach:\n\n```python\n# Create structured array for proper sorting\nsort_keys = np.array([(row[2], row[0], row[1]) for row in rows],\n                     dtype=[('slack', float), ('i', int), ('j', int)])\norder = np.argsort(sort_keys, order=['slack', 'i', 'j'])\nrows_sorted = [rows[int(k)] for k in order]\n```\n\n**Key changes:**\n1. Created a structured NumPy array with named fields ('slack', 'i', 'j')\n2. Used `np.argsort()` with the `order` parameter to specify multi-key sorting\n3. Explicitly converted indices to int when accessing the rows list\n\nThis maintains the original intent of sorting pairs by slack value (ascending) with deterministic tie-breaking by (i, j), while avoiding the type conversion issues.\n\n## Result\nThe submission now executes successfully, generates the pair slacks JSON file, and returns the packing configuration for evaluation compliance. Score achieved: **2.57**.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport os, glob, json, datetime\nimport numpy as np\n\nSHARED_DIR = os.path.join(\"storage\", \"shared\", \"appxE_contribs\")\nRUNS_DIR = os.path.join(\"storage\", \"noesis\", \"pack\", \"runs\")\n\ndef utc():\n    return datetime.datetime.utcnow().strftime(\"%Y-%m-%dT%H:%M:%SZ\")\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)\n\ndef load_best_npz():\n    files = sorted(glob.glob(os.path.join(RUNS_DIR, \"polished_*.npz\")))\n    best = None\n    best_S = -1.0\n    for fp in files:\n        try:\n            with np.load(fp, allow_pickle=False) as f:\n                C = f[\"centers\"].astype(float)\n                r = f[\"radii\"].astype(float)\n                S = float(np.array(f[\"score\"]).reshape(-1)[0]) if \"score\" in f.files else float(np.sum(r))\n            if C.shape == (26,2) and r.shape == (26,) and S > best_S:\n                best = (fp, C, r, S)\n                best_S = S\n        except Exception:\n            continue\n    return best\n\ndef pair_slacks(C, r):\n    diff = C[:,None,:] - C[None,:,:]\n    D = np.sqrt(np.sum(diff**2, axis=-1))\n    return D - (r[:,None] + r[None,:])\n\ndef construct_packing():\n    best = load_best_npz()\n    assert best is not None, \"No polished_* artifact found\"\n    fp, C, r, S = best\n\n    sl = pair_slacks(C, r)\n    n = C.shape[0]\n    I, J = np.triu_indices(n, 1)\n    rows = []\n    for i, j in zip(I, J):\n        rows.append([int(i), int(j), float(sl[i, j])])\n\n    # Sorted ascending by slack, with deterministic tie-break by (i,j)\n    # Fixed: Create structured array for proper sorting\n    sort_keys = np.array([(row[2], row[0], row[1]) for row in rows],\n                         dtype=[('slack', float), ('i', int), ('j', int)])\n    order = np.argsort(sort_keys, order=['slack', 'i', 'j'])\n    rows_sorted = [rows[int(k)] for k in order]\n\n    obj = {\n        \"class\": \"pair_slacks\",\n        \"N\": 26,\n        \"deterministic\": True,\n        \"version\": \"v1.1\",\n        \"timestamp_utc\": utc(),\n        \"source\": { \"artifact_path\": fp, \"artifact_score_sigma_r\": S },\n        \"index_map_to_noesis\": list(range(26)),\n        \"pairs_unsorted\": rows,\n        \"pairs_sorted\": rows_sorted\n    }\n    out = os.path.join(SHARED_DIR, \"noesis_III_eval1127_pair_slacks_all.json\")\n    write_json(out, obj)\n\n    # Return the packing for evaluation compliance\n    return C, r\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

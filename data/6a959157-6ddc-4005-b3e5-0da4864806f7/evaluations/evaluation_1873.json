@@ -1,0 +1,92 @@
+{
+  "id": "1873",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "GraphFWPCA ridge + Top-Variance 1500 HVGs (within batch_hvg), \u03b4=0.10",
+  "tags": [
+    "graphfwpca",
+    "daqb",
+    "hvg1500",
+    "lambda-override",
+    "kdensity",
+    "cosine"
+  ],
+  "abstract": "Same as 1500-HVG variant but with \u03b4=0.10 to probe local-scale sensitivity under MPB-GraphFWPCA+DAQB. Tests whether \u03b4=0.10 complements the 1500-HVG truncation.",
+  "submitted_tick": 1380,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nimport anndata as ad\nsys.path.extend(['storage', 'storage/praxis'])\nfrom mpb_graphfwpca_override import eliminate_mpb_graphfwpca as _run\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.isspmatrix(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata: ad.AnnData):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy(); Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _topn_by_variance(X: sp.csr_matrix, n_top: int, base_mask=None):\n    n_cells, n_genes = X.shape\n    if n_top is None or n_top >= n_genes:\n        return np.arange(n_genes, dtype=int)\n    m = np.asarray(X.mean(axis=0)).ravel().astype(np.float64)\n    X2 = X.copy().astype(np.float64); X2.data **= 2.0\n    m2 = np.asarray(X2.mean(axis=0)).ravel()\n    var = m2 - m * m\n    if base_mask is not None:\n        base_mask = np.asarray(base_mask).astype(bool)\n    else:\n        base_mask = np.ones(n_genes, dtype=bool)\n    idx = np.where(base_mask)[0]\n    if idx.size <= n_top:\n        return idx\n    sel = idx[np.argsort(var[idx])[::-1][:n_top]]\n    return np.sort(sel)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    Xn = _normalize_log1p_from_counts(adata)\n    base_mask = None\n    if 'batch_hvg' in adata.var.columns:\n        bm = adata.var['batch_hvg'].values\n        if bm.dtype != bool: bm = bm.astype(bool)\n        if bm.any() and bm.sum() >= 1500: base_mask = bm\n    keep = _topn_by_variance(Xn, n_top=1500, base_mask=base_mask)\n\n    B = adata[:, keep].copy()\n    B = _run(\n        B,\n        lam_override=0.605,\n        delta=0.10,\n        kdensity=22,\n        k_total=50,\n        emb_n_neighbors=17,\n        gamma_max=0.70,\n        cap=2.0,\n        rng_seed=0\n    )\n    return B\n",
+    "submitted_timestamp": 1761851594.1252296,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7289222598805437,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 1500)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/fb9111df-599f-4b17-92a0-7c284bd9996e/result_human.h5ad\n\nRESULT_UUID: fb9111df-599f-4b17-92a0-7c284bd9996e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.666  ASW_label: 0.238  ARI: 0.758  NMI: 0.710\n  Graph_conn: 0.963  kBET: 0.720  iLISI: 0.961  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.302\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833434  ASW_label: 0.549332  ARI: 0.757823  NMI: 0.709768\n  Graph_conn: 0.963595  kBET: 0.687996  iLISI: 0.960573  cLISI: 0.991719\n  PCR: 0.999978  Cell_cycle: 0.266760",
+        "ASW_batch": [
+          "0.666",
+          0.6657577531797493
+        ],
+        "ASW_label": [
+          "0.238",
+          0.2384586360028622
+        ],
+        "ARI": [
+          "0.758",
+          0.7578556961986629
+        ],
+        "NMI": [
+          "0.710",
+          0.7096857295792116
+        ],
+        "Graph_conn": [
+          "0.963",
+          0.9629668168105249
+        ],
+        "kBET": [
+          "0.720",
+          0.7200017051021095
+        ],
+        "iLISI": [
+          "0.961",
+          0.960573476702509
+        ],
+        "cLISI": [
+          "0.972",
+          0.9715713099809714
+        ],
+        "PCR": [
+          "1.000",
+          0.9999779581759118
+        ],
+        "Cell_cycle": [
+          "0.302",
+          0.30237351707292537
+        ]
+      },
+      "evaluation_timestamp": 1761852008.6127553,
+      "evaluation_datetime": "2025-10-31T03:20:08.612760",
+      "sort_key": [
+        0.7289222598805437
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7289222598805437,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761852008.6971948,
+    "version_notified": "original",
+    "message": "Your research submission 'GraphFWPCA ridge + Top-Variance 1500 HVGs (within batch_hvg), \u03b4=0.10' (ID: 1873) has been evaluated.\n\n**Score:** 0.7289222598805437\n**ASW_batch:** 0.666\n**ASW_label:** 0.238\n**ARI:** 0.758\n**NMI:** 0.710\n**Graph_conn:** 0.963\n**kBET:** 0.720\n**iLISI:** 0.961\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.302\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.666  ASW_label: 0.238  ARI: 0.758  NMI: 0.710\n  Graph_conn: 0.963  kBET: 0.720  iLISI: 0.961  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.302\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833434  ASW_label: 0.549332  ARI: 0.757823  NMI: 0.709768\n  Graph_conn: 0.963595  kBET: 0.687996  iLISI: 0.960573  cLISI: 0.991719\n  PCR: 0.999978  Cell_cycle: 0.266760\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 1500)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/fb9111df-599f-4b17-92a0-7c284bd9996e/result_human.h5ad\n\nRESULT_UUID: fb9111df-599f-4b17-92a0-7c284bd9996e\n\n\nSTDERR:\n\n```"
+  }
+}

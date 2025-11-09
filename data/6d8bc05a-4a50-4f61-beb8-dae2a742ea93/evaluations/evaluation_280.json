@@ -1,0 +1,45 @@
+{
+  "id": "280",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v0 Final v2 \u2014 Robust plasticity analysis (fixed syntax; shared+fallback)",
+  "tags": [
+    "sas",
+    "plasticity",
+    "analysis",
+    "robustness"
+  ],
+  "abstract": "Final CPS_v0 analysis for Zephyr IV. Ingest from shared beacons and fallback file storage/shared/meta/sas/zephyr_iv_beacons.jsonl, map A2/R2/D1/D2 by phase label or last_sentinel_tick, compute deltas and D1/R2, D2/R2 ratios vs expected 2.5, and report centers/entropy. No writes.",
+  "submitted_tick": 378,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, re\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\n\nAGENT = \"Zephyr IV\"\nTICK_MAP = {\"A2\": 363, \"R2\": 368, \"D1\": 370, \"D2\": 371}\nPHASE_RE = {\n    \"A2\": re.compile(r\"CPS_v0:?A2\", re.I),\n    \"R2\": re.compile(r\"CPS_v0:?R2\", re.I),\n    \"D1\": re.compile(r\"CPS_v0:?D1\", re.I),\n    \"D2\": re.compile(r\"CPS_v0:?D2\", re.I),\n}\n\ndef fnum(x):\n    try:\n        return float(x)\n    except Exception:\n        return None\n\ndef load_fallback(path):\n    recs = []\n    if not os.path.exists(path):\n        return recs\n    with open(path, 'r', encoding='utf-8') as f:\n        for line in f:\n            line = line.strip()\n            if not line:\n                continue\n            try:\n                r = json.loads(line)\n            except Exception:\n                continue\n            sd = fnum(r.get('sentinel_delta'))\n            if sd is None:\n                continue\n            rr = dict(r)\n            rr['sentinel_delta'] = sd\n            rr['_tick'] = rr.get('tick')\n            rr['_lt'] = rr.get('last_sentinel_tick') or rr.get('tick')\n            rr['_phase'] = rr.get('phase_label') or rr.get('notes') or \"\"\n            recs.append(rr)\n    return recs\n\n# Load shared beacons (canonical)\nshared = []\nfor r in load_beacons('storage/shared/meta/sas/beacons'):\n    if r.get('agent') != AGENT:\n        continue\n    sd = fnum(r.get('sentinel_delta'))\n    if sd is None:\n        continue\n    rr = dict(r)\n    rr['sentinel_delta'] = sd\n    rr['_tick'] = r.get('tick')\n    rr['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n    rr['_phase'] = r.get('phase_label') or r.get('notes') or \"\"\n    shared.append(rr)\n\n# Fallback file provided by Zephyr IV\nfallback = load_fallback('storage/shared/meta/sas/zephyr_iv_beacons.jsonl')\n\n# Merge (prefer shared if duplicates appear later in selection order)\nall_recs = shared + fallback\n\ndef select_phase(key):\n    patt = PHASE_RE[key]\n    # Prefer explicit label match, newest first\n    for r in reversed(all_recs):\n        lbl = r.get('_phase')\n        if isinstance(lbl, str) and patt.search(lbl):\n            return r\n    # fallback by last_sentinel_tick\n    for r in reversed(all_recs):\n        try:\n            if int(r.get('_lt') or -1) == TICK_MAP[key]:\n                return r\n        except Exception:\n            pass\n    return None\n\nA2 = select_phase(\"A2\")\nR2 = select_phase(\"R2\")\nD1 = select_phase(\"D1\")\nD2 = select_phase(\"D2\")\n\ndef ratio(deep, shallow):\n    if not deep or not shallow:\n        return None\n    s = fnum(shallow.get('sentinel_delta'))\n    d = fnum(deep.get('sentinel_delta'))\n    if s and s > 0 and d is not None:\n        return d / s\n    return None\n\ndef exp_ratio(deep, shallow):\n    if not deep or not shallow:\n        return None\n    try:\n        dpe = float(deep.get('path_complexity_est') or 1.0)\n        spe = float(shallow.get('path_complexity_est') or 1.0)\n        return dpe / (spe if spe else 1.0)\n    except Exception:\n        return None\n\nr_d1 = ratio(D1, R2)\nr_d2 = ratio(D2, R2)\ne_d1 = exp_ratio(D1, R2)\ne_d2 = exp_ratio(D2, R2)\n\ncenters = compute_centers(all_recs, window=None, min_samples=1)\nadvice  = advise_all()\nentropy = compute_per_agent_entropy(all_recs, advice, {}, dynamic_centers=centers, window=10)\n\nout = {\n    \"sources\": {\"shared_count\": len(shared), \"fallback_count\": len(fallback)},\n    \"present\": {\n        \"A2\": A2 is not None, \"R2\": R2 is not None, \"D1\": D1 is not None, \"D2\": D2 is not None\n    },\n    \"A2\": { \"delta\": (A2 or {}).get('sentinel_delta'), \"state\": (A2 or {}).get('state'), \"phase\": (A2 or {}).get('_phase') },\n    \"R2\": { \"delta\": (R2 or {}).get('sentinel_delta'), \"state\": (R2 or {}).get('state'), \"phase\": (R2 or {}).get('_phase') },\n    \"D1\": { \"delta\": (D1 or {}).get('sentinel_delta'), \"state\": (D1 or {}).get('state'), \"phase\": (D1 or {}).get('_phase') },\n    \"D2\": { \"delta\": (D2 or {}).get('sentinel_delta'), \"state\": (D2 or {}).get('state'), \"phase\": (D2 or {}).get('_phase') },\n    \"ratios\": {\n        \"D1_over_R2\": r_d1, \"D2_over_R2\": r_d2,\n        \"expected_D1\": e_d1, \"expected_D2\": e_d2\n    },\n    \"centers_snapshot\": centers.get(AGENT, {}),\n    \"entropy_snapshot\": entropy.get(AGENT, {})\n}\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757926830.3089466,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"sources\": {\n    \"shared_count\": 6,\n    \"fallback_count\": 0\n  },\n  \"present\": {\n    \"A2\": true,\n    \"R2\": true,\n    \"D1\": false,\n    \"D2\": true\n  },\n  \"A2\": {\n    \"delta\": 8.0,\n    \"state\": \"Clean\",\n    \"phase\": \"CPS_v0:A2_baseline_sentinel\"\n  },\n  \"R2\": {\n    \"delta\": 1097.0,\n    \"state\": \"Borderline\",\n    \"phase\": \"CPS_v0:R2_recovery_sentinel\"\n  },\n  \"D1\": {\n    \"delta\": null,\n    \"state\": null,\n    \"phase\": null\n  },\n  \"D2\": {\n    \"delta\": 5948.0,\n    \"state\": \"Active\",\n    \"phase\": \"CPS_v0:D2_deep_probe\"\n  },\n  \"ratios\": {\n    \"D1_over_R2\": null,\n    \"D2_over_R2\": 5.422060164083865,\n    \"expected_D1\": null,\n    \"expected_D2\": 2.5\n  },\n  \"centers_snapshot\": {\n    \"Clean\": 304.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 2.24275584395422,\n    \"var\": 6.4078738398692,\n    \"mis\": 0.0,\n    \"vol\": 0.0,\n    \"sev\": 0.0,\n    \"samples\": 6.0,\n    \"band\": \"Clean\",\n    \"pace\": 0.9\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757926832.2651815,
+      "evaluation_datetime": "2025-09-15T17:00:32.265185"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757926832.3372078,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v0 Final v2 \u2014 Robust plasticity analysis (fixed syntax; shared+fallback)' (ID: 280) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"sources\": {\n    \"shared_count\": 6,\n    \"fallback_count\": 0\n  },\n  \"present\": {\n    \"A2\": true,\n    \"R2\": true,\n    \"D1\": false,\n    \"D2\": true\n  },\n  \"A2\": {\n    \"delta\": 8.0,\n    \"state\": \"Clean\",\n    \"phase\": \"CPS_v0:A2_baseline_sentinel\"\n  },\n  \"R2\": {\n    \"delta\": 1097.0,\n    \"state\": \"Borderline\",\n    \"phase\": \"CPS_v0:R2_recovery_sentinel\"\n  },\n  \"D1\": {\n    \"delta\": null,\n    \"state\": null,\n    \"phase\": null\n  },\n  \"D2\": {\n    \"delta\": 5948.0,\n    \"state\": \"Active\",\n    \"phase\": \"CPS_v0:D2_deep_probe\"\n  },\n  \"ratios\": {\n    \"D1_over_R2\": null,\n    \"D2_over_R2\": 5.422060164083865,\n    \"expected_D1\": null,\n    \"expected_D2\": 2.5\n  },\n  \"centers_snapshot\": {\n    \"Clean\": 304.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 2.24275584395422,\n    \"var\": 6.4078738398692,\n    \"mis\": 0.0,\n    \"vol\": 0.0,\n    \"sev\": 0.0,\n    \"samples\": 6.0,\n    \"band\": \"Clean\",\n    \"pace\": 0.9\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

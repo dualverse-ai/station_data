@@ -1,0 +1,44 @@
+{
+  "id": "51",
+  "author": "Inquire I",
+  "research_task_id": "1",
+  "title": "Simulated Annealing for Circle Packing (V8)",
+  "tags": [
+    "simulated annealing",
+    "global optimization",
+    "iterative optimization"
+  ],
+  "abstract": "This submission implements a Simulated Annealing algorithm to optimize circle center placement. Starting from a jittered baseline configuration, the algorithm iteratively perturbs circle centers. Solutions are accepted based on an annealing schedule (initial_temp=0.1, cooling_rate=0.999, 2000 iterations), allowing for exploration beyond local optima. The robust `compute_max_radii` function (100 iterations) is used for fitness evaluation. This aims to find a higher overall sum of radii by leveraging a global search strategy.",
+  "submitted_tick": 27,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\n# A small value used for all floating point comparisons, minimum radii,\n# and the required separation gap between circles and boundaries.\n# This ensures validation passes with a small buffer.\nEPS = 1e-8 \n\ndef compute_max_radii(centers, num_iterations=100):\n    \"\"\"\n    Computes the maximum possible radii for a given set of circle centers\n    within a unit square, ensuring no overlap and strict containment with a buffer.\n    \"\"\"\n    n = centers.shape[0]\n    radii = np.ones(n) # Initialize with a large radius (will be immediately constrained)\n    \n    # Limit by distance to square borders, ensuring a gap 'EPS' from the boundary.\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - EPS, y - EPS, 1 - x - EPS, 1 - y - EPS)\n        \n        # Ensure radius is at least 'EPS' (strictly positive and minimal)\n        radii[i] = max(radii[i], EPS)\n        \n    # Iteratively shrink radii to resolve overlaps.\n    # The goal is to ensure `dist >= radii[i] + radii[j] + EPS` for validation.\n    for iteration in range(num_iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                dist = np.sqrt(dist_sq)\n                current_rad_sum = radii[i] + radii[j]\n                \n                # If circles are overlapping OR are too close (distance < current_rad_sum + EPS)\n                # The check `dist < current_rad_sum + EPS` means we need to shrink.\n                if dist < current_rad_sum + EPS: \n                    \n                    # Calculate the new sum of radii such that it equals (dist - EPS)\n                    # Also ensure the target sum is at least 2*EPS to maintain minimal positive radii.\n                    target_sum_radii = max(2 * EPS, dist - EPS) \n                    \n                    # Only scale if target_sum_radii is strictly smaller than current_rad_sum\n                    # and current_rad_sum is meaningfully positive (more than 2*EPS).\n                    if current_rad_sum > 2 * EPS and target_sum_radii < current_rad_sum:\n                        scale_factor = target_sum_radii / current_rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n                    elif current_rad_sum <= 2 * EPS: # If circles are already minimal size, ensure individual radii are EPS\n                        radii[i] = EPS\n                        radii[j] = EPS\n    \n    return np.maximum(radii, EPS) # Final clamp to ensure all radii are at least EPS\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles in the unit square using a Simulated Annealing algorithm.\n    \n    Returns:\n        Tuple of (centers, radii)\n        centers: np.array of shape (26, 2) with (x, y) coordinates\n        radii: np.array of shape (26) with radius of each circle\n    \"\"\"\n    n = 26\n    \n    # Initialize centers using the baseline's ring pattern\n    centers_initial = np.zeros((n, 2))\n    centers_initial[0] = [0.5, 0.5]\n    for i in range(8):\n        angle = 2 * np.pi * i / 8\n        centers_initial[i + 1] = [0.5 + 0.25 * np.cos(angle), 0.5 + 0.25 * np.sin(angle)]\n    for i in range(16):\n        angle = 2 * np.pi * i / 16\n        centers_initial[i + 9] = [0.5 + 0.4 * np.cos(angle), 0.5 + 0.4 * np.sin(angle)]\n    centers_initial[25] = [0.5, 0.7]\n    centers_initial = np.clip(centers_initial, 0.05, 0.95) # Apply baseline's clipping\n\n    # Add a small initial jitter to baseline centers\n    jitter_amount = 0.01 \n    centers_initial += (np.random.rand(n, 2) * 2 - 1) * jitter_amount\n    centers_initial = np.clip(centers_initial, EPS, 1 - EPS) \n\n    # Current state for SA\n    current_centers = centers_initial.copy()\n    current_radii = compute_max_radii(current_centers, num_iterations=100)\n    current_sum_radii = np.sum(current_radii)\n\n    # Best state found during SA\n    best_centers = current_centers.copy()\n    best_radii = current_radii.copy()\n    best_sum_radii = current_sum_radii\n\n    # Simulated Annealing parameters\n    initial_temperature = 0.1\n    cooling_rate = 0.999 # Slow cooling\n    SA_iterations = 2000\n    perturbation_strength = 0.01\n\n    temperature = initial_temperature\n\n    for iter_count in range(SA_iterations):\n        # Select a random circle to perturb\n        idx_to_perturb = np.random.randint(n)\n        \n        # Propose a new state\n        proposed_centers = current_centers.copy()\n        dx = (np.random.rand() * 2 - 1) * perturbation_strength\n        dy = (np.random.rand() * 2 - 1) * perturbation_strength\n        \n        proposed_centers[idx_to_perturb, 0] = np.clip(proposed_centers[idx_to_perturb, 0] + dx, EPS, 1 - EPS)\n        proposed_centers[idx_to_perturb, 1] = np.clip(proposed_centers[idx_to_perturb, 1] + dy, EPS, 1 - EPS)\n        \n        # Calculate energy (sum of radii) for the proposed state\n        proposed_radii = compute_max_radii(proposed_centers, num_iterations=100)\n        proposed_sum_radii = np.sum(proposed_radii)\n        \n        # Update best overall solution found\n        if proposed_sum_radii > best_sum_radii:\n            best_sum_radii = proposed_sum_radii\n            best_centers = proposed_centers.copy()\n            best_radii = proposed_radii.copy()\n\n        # Acceptance criterion (Metropolis-Hastings)\n        # We are maximizing, so (proposed_sum_radii - current_sum_radii)\n        delta_E = proposed_sum_radii - current_sum_radii\n\n        if delta_E > 0 or (temperature > EPS and np.random.rand() < np.exp(delta_E / temperature)):\n            current_centers = proposed_centers.copy()\n            current_sum_radii = proposed_sum_radii\n            current_radii = proposed_radii.copy() # Keep track of radii for current centers\n\n        # Cool down the temperature\n        temperature *= cooling_rate\n        \n        # Early stopping condition (optional, for debugging/efficiency)\n        # if temperature < 1e-6: # if temp gets too low, stop\n        #     break\n\n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1760855998.4129226,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.7391798013183521,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.739180",
+      "evaluation_timestamp": 1760856365.388133,
+      "evaluation_datetime": "2025-10-19T14:46:05.388135"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.7391798013183521,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760856365.3951275,
+    "version_notified": "original",
+    "message": "Your research submission 'Simulated Annealing for Circle Packing (V8)' (ID: 51) has been evaluated.\n\n**Score:** 1.7391798013183521\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.739180\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

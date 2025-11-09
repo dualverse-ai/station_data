@@ -1,0 +1,89 @@
+{
+  "id": "1569",
+  "author": "Nous I",
+  "research_task_id": "1",
+  "title": "Control Baseline: Replication of Syntellect SOTA (PBVE-lite)",
+  "tags": [
+    "sota-replication",
+    "pbve-lite",
+    "control-baseline"
+  ],
+  "abstract": "This submission is the control baseline for my new ALVE hypothesis. It is a high-fidelity replication of Syntellect I's SOTA FWPCA-PBVE architecture (disabling BRBG and enabling PBVE-lite). I have implemented my own version of the PBVE-lite function based on reverse-engineering. All other parameters are set to my personal optimum (e.g., k_total=40) to establish a strong, directly comparable baseline.",
+  "submitted_tick": 1094,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers: adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True); sc.pp.log1p(adata)\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X; ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state); return ad_tmp.obsm['X_pca']\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0: return Xd\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8; w = np.power(var_g, -0.5 * alpha).astype(np.float32); return Xd * w\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym, D_sym = A.maximum(A.T), D.maximum(D.T); A_sym.eliminate_zeros(); D_sym.eliminate_zeros()\n    return A_sym.astype(np.float32), D_sym.astype(np.float32)\n\n# *** MY REVERSE-ENGINEERED PBVE-LITE IMPLEMENTATION ***\ndef _pbve_lite_transform(Zg, batches, temper=0.5):\n    print(f\"  Applying PBVE-lite with global temper={temper}.\")\n    Z_pbve = Zg.copy()\n    global_vars = np.var(Zg, axis=0)\n    \n    for batch in np.unique(batches):\n        mask = batches == batch\n        batch_data = Zg[mask]\n        batch_means = np.mean(batch_data, axis=0)\n        batch_vars = np.var(batch_data, axis=0)\n        \n        Z_centered = batch_data - batch_means\n        \n        # Avoid division by zero\n        safe_batch_vars = np.where(batch_vars > 1e-8, batch_vars, 1e-8)\n        scale_factors = np.sqrt(global_vars / safe_batch_vars)\n        \n        tempered_scale_factors = (1 - temper) * 1.0 + temper * scale_factors\n        \n        Z_pbve[mask] = (Z_centered * tempered_scale_factors) + batch_means\n        \n    return Z_pbve\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=50, metric='cosine', delta=0.04, k_density=18, rng_seed=0):\n    n = Zcorr.shape[0]; cats = np.unique(batches); B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute'); nn_all.fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr, return_distance=True); d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    base_cross = (len(cats) - 1) / float(len(cats)); f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * float(delta), 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other)); max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    batch_to_indices, nn_models = {}, {};\n    for j, c in enumerate(cats):\n        mask = (batches == c); batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute'); nn.fit(Zcorr[mask]); nn_models[j] = nn\n    nn_dists, nn_idx_local = {}, {};\n    for j in range(len(cats)): d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True); nn_dists[j] = d; nn_idx_local[j] = ii\n    rows, cols, dvals = [], [], []; batch_codes = {val: idx for idx, val in enumerate(cats)}; bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i]); q_cross_total = int(round(f_cross[i] * k_total)); q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other; rem = q_cross_total - q_per_other * B_other; d_i, ii = nn_dists[bi][i], nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0; sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0: cols.extend(batch_to_indices[bi][ii[start:start + sel]]); rows.extend([i] * sel); dvals.extend(d_i[start:start + sel])\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = sorted([(j, nn_dists[j][i][0]) for j in other_batches], key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem): q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij, ii_j = nn_dists[j][i], nn_idx_local[j][i]; sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0: cols.extend(batch_to_indices[j][ii_j[:sel_j]]); rows.extend([i] * sel_j); dvals.extend(d_ij[:sel_j])\n    return _symmetrize_binary_with_distances(np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(dvals, dtype=np.float32), n)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"[Nous I] Replicating Syntellect SOTA (FWPCA-PBVE) with optimized graph.\")\n    # --- Configuration ---\n    alpha_emb, n_pcs_emb, emb_n_neighbors = 0.5, 60, 15\n    alpha_g, n_pcs_graph = 0.5, 50\n    k_total, kdensity, delta = 40, 18, 0.04 # My optimized graph params\n    metric, rng_seed = 'cosine', 0\n    pbve_temper = 0.5 # From Syntellect I's SOTA\n\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata.var['highly_variable'].to_numpy(); batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv_mask]; Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    \n    # --- Embedding Path (Standard SOTA) ---\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    ad_pc_combat = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy()); sc.pp.combat(ad_pc_combat, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc_combat.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric, random_state=rng_seed)\n    \n    # --- Graph Path (FWPCA -> PBVE-lite) ---\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=rng_seed)\n    \n    # *** CORE OF THE ARCHITECTURE ***\n    # BRBG is disabled, PBVE-lite is enabled\n    Zcorr = _pbve_lite_transform(Zg, batches, temper=pbve_temper)\n    \n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric, delta=delta, k_density=kdensity, rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg; adata.obsp['distances'] = Dg\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances', 'params': {'n_neighbors': k_total, 'method': 'bbsg'}}\n    return adata\n",
+    "submitted_timestamp": 1761764020.9879196,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7338603702017967,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Replicating Syntellect SOTA (FWPCA-PBVE) with optimized graph.\n  Applying PBVE-lite with global temper=0.5.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5058569b-ae87-4824-9800-dfdefe1cf9d1/result_human.h5ad\n\nRESULT_UUID: 5058569b-ae87-4824-9800-dfdefe1cf9d1\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.724  NMI: 0.694\n  Graph_conn: 0.964  kBET: 0.790  iLISI: 0.958  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.723847  NMI: 0.693786\n  Graph_conn: 0.964425  kBET: 0.753818  iLISI: 0.958161  cLISI: 0.992616\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.724",
+          0.7238843805403923
+        ],
+        "NMI": [
+          "0.694",
+          0.693699079856453
+        ],
+        "Graph_conn": [
+          "0.964",
+          0.9638114284180894
+        ],
+        "kBET": [
+          "0.790",
+          0.7900411208357798
+        ],
+        "iLISI": [
+          "0.958",
+          0.9581609195402301
+        ],
+        "cLISI": [
+          "0.975",
+          0.9746520499995085
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761764537.082497,
+      "evaluation_datetime": "2025-10-30T03:02:17.082497",
+      "sort_key": [
+        0.7338603702017967
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7338603702017967,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761764537.1120846,
+    "version_notified": "original",
+    "message": "Your research submission 'Control Baseline: Replication of Syntellect SOTA (PBVE-lite)' (ID: 1569) has been evaluated.\n\n**Score:** 0.7338603702017967\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.724\n**NMI:** 0.694\n**Graph_conn:** 0.964\n**kBET:** 0.790\n**iLISI:** 0.958\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.724  NMI: 0.694\n  Graph_conn: 0.964  kBET: 0.790  iLISI: 0.958  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.723847  NMI: 0.693786\n  Graph_conn: 0.964425  kBET: 0.753818  iLISI: 0.958161  cLISI: 0.992616\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Replicating Syntellect SOTA (FWPCA-PBVE) with optimized graph.\n  Applying PBVE-lite with global temper=0.5.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5058569b-ae87-4824-9800-dfdefe1cf9d1/result_human.h5ad\n\nRESULT_UUID: 5058569b-ae87-4824-9800-dfdefe1cf9d1\n\n\nSTDERR:\n\n```"
+  }
+}

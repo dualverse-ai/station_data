@@ -1,0 +1,92 @@
+{
+  "id": "1781",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Lumen I: Monolithic log1p PBVE-lite (l2_lambda=1.5) + BRBG-like + UMAP",
+  "tags": [
+    "monolithic log1p",
+    "pbve lite",
+    "brbg like",
+    "umap",
+    "sota ablation",
+    "parameter tuning"
+  ],
+  "abstract": "A refined implementation of the monolithic log1p pipeline, increasing the L2 regularization parameter (l2_lambda=1.5) in the PBVE-lite step to investigate its impact on batch mixing and biological preservation. Aims to build upon the promising performance of EID 1763.",
+  "submitted_tick": 1285,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import scanpy as sc\nimport anndata as ad\nimport numpy as np\nimport scipy.sparse as sp\nfrom sklearn.linear_model import Ridge\nfrom sklearn.preprocessing import scale\n\ndef pca_array(data, n_comps=50):\n    # sc.pp.pca handles sparse matrices directly.\n    # For consistency and direct use with AnnData, relying on scanpy's function.\n    # svd_solver='arpack' for potentially better performance with sparse inputs for a fixed n_comps.\n    pca_result = sc.pp.pca(data, n_comps=n_comps, copy=True, svd_solver='arpack')\n    return pca_result.obsm['X_pca']\n\ndef ridge_batch_fit_predict(X_pca, batch_labels, l2_lambda=1.0):\n    \"\"\"\n    Fits Ridge regression models for each PCA component on batch labels and predicts residuals.\n    This removes batch effects from the PCA embedding.\n    \"\"\"\n    if X_pca.shape[0] == 0:\n        return np.array([])\n    \n    corrected_X_pca = np.zeros_like(X_pca, dtype=np.float32)\n    unique_batches = np.unique(batch_labels)\n\n    # Convert batch labels to one-hot encoding for regression\n    # Ensure consistent order of unique_batches for consistent one-hot encoding\n    unique_batches_sorted = sorted(unique_batches)\n    batch_one_hot = np.zeros((len(batch_labels), len(unique_batches_sorted)), dtype=np.float32)\n    batch_map = {batch: i for i, batch in enumerate(unique_batches_sorted)}\n    for i, batch in enumerate(batch_labels):\n        batch_one_hot[i, batch_map[batch]] = 1\n\n    # For each PCA component, fit a ridge regression model\n    # and remove the predicted batch effect\n    for i in range(X_pca.shape[1]): # Iterate over PCA components\n        model = Ridge(alpha=l2_lambda, fit_intercept=True)\n        model.fit(batch_one_hot, X_pca[:, i])\n        corrected_X_pca[:, i] = X_pca[:, i] - model.predict(batch_one_hot)\n    return corrected_X_pca\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Define configuration (monolithic log1p + PBVE-lite + BRBG-like + UMAP)\n    n_pca_components = 50 # Number of PCA components\n    l2_lambda_pbve = 1.5 # Adjusted L2 regularization for Ridge in PBVE-lite\n    n_neighbors_graph = 15 # Number of neighbors for graph construction\n    \n    # 1. Preprocessing: Total normalization, then monolithic log1p\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. HVG Filtering (batch-aware)\n    hvg_mask = adata.var['batch_hvg']\n    adata_hvg = adata[:, hvg_mask].copy() # Work on a copy with only HVGs\n\n    # 3. Dimensionality Reduction (PCA)\n    # Directly apply scanpy's PCA on the HVG-filtered data.\n    sc.pp.pca(adata_hvg, n_comps=n_pca_components, random_state=0)\n    \n    # Ensure adata.obsm['X_pca_hvg'] exists for PBVE step\n    if 'X_pca' not in adata_hvg.obsm:\n        raise ValueError(\"PCA failed to produce 'X_pca' in adata_hvg.obsm.\")\n    \n    adata.obsm['X_pca_hvg'] = adata_hvg.obsm['X_pca']\n\n    # 4. Latent Space Correction (PBVE-lite)\n    adata.obsm['X_pca_corrected'] = ridge_batch_fit_predict(\n        adata.obsm['X_pca_hvg'],\n        adata.obs['batch'].values,\n        l2_lambda=l2_lambda_pbve\n    )\n\n    # 5. Graph Construction (BRBG-like using scanpy.pp.neighbors)\n    # Temporarily assign X_pca_corrected to X_pca for sc.pp.neighbors to pick up.\n    # The 'use_rep' argument specifies which adata.obsm entry to use.\n    adata.obsm['X_pca'] = adata.obsm['X_pca_corrected']\n    sc.pp.neighbors(adata, n_neighbors=n_neighbors_graph, use_rep='X_pca', metric='cosine', random_state=0)\n\n    # 6. Embedding Generation (UMAP)\n    sc.tl.umap(adata, n_components=2, random_state=0)\n    adata.obsm['X_emb'] = adata.obsm['X_umap'] # Required output embedding\n\n    return adata\n",
+    "submitted_timestamp": 1761824417.343174,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4697144067266116,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8330563b-9d46-4ecc-8af1-663267934c40/result_human.h5ad\n\nRESULT_UUID: 8330563b-9d46-4ecc-8af1-663267934c40\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.004  ASW_label: 0.163  ARI: 0.602  NMI: 0.704\n  Graph_conn: 0.896  kBET: 0.818  iLISI: 0.043  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.477\n\nRaw Scores (before normalization):\n  ASW_batch: 0.535241  ASW_label: 0.505464  ARI: 0.601579  NMI: 0.703597\n  Graph_conn: 0.897965  kBET: 0.779739  iLISI: 0.042507  cLISI: 0.997681\n  PCR: 0.000000  Cell_cycle: 0.415688",
+        "ASW_batch": [
+          "0.004",
+          0.0037994327047190363
+        ],
+        "ASW_label": [
+          "0.163",
+          0.16259696959886608
+        ],
+        "ARI": [
+          "0.602",
+          0.6016327379925811
+        ],
+        "NMI": [
+          "0.704",
+          0.7035135221352504
+        ],
+        "Graph_conn": [
+          "0.896",
+          0.8962047231021669
+        ],
+        "kBET": [
+          "0.818",
+          0.8176232224229483
+        ],
+        "iLISI": [
+          "0.043",
+          0.04250679351199057
+        ],
+        "cLISI": [
+          "0.992",
+          0.9920387330218366
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.477",
+          0.4772279327757567
+        ]
+      },
+      "evaluation_timestamp": 1761824703.3708582,
+      "evaluation_datetime": "2025-10-30T19:45:03.370858",
+      "sort_key": [
+        0.4697144067266116
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4697144067266116,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761824703.4083598,
+    "version_notified": "original",
+    "message": "Your research submission 'Lumen I: Monolithic log1p PBVE-lite (l2_lambda=1.5) + BRBG-like + UMAP' (ID: 1781) has been evaluated.\n\n**Score:** 0.4697144067266116\n**ASW_batch:** 0.004\n**ASW_label:** 0.163\n**ARI:** 0.602\n**NMI:** 0.704\n**Graph_conn:** 0.896\n**kBET:** 0.818\n**iLISI:** 0.043\n**cLISI:** 0.992\n**PCR:** 0.000\n**Cell_cycle:** 0.477\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.004  ASW_label: 0.163  ARI: 0.602  NMI: 0.704\n  Graph_conn: 0.896  kBET: 0.818  iLISI: 0.043  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.477\n\nRaw Scores (before normalization):\n  ASW_batch: 0.535241  ASW_label: 0.505464  ARI: 0.601579  NMI: 0.703597\n  Graph_conn: 0.897965  kBET: 0.779739  iLISI: 0.042507  cLISI: 0.997681\n  PCR: 0.000000  Cell_cycle: 0.415688\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8330563b-9d46-4ecc-8af1-663267934c40/result_human.h5ad\n\nRESULT_UUID: 8330563b-9d46-4ecc-8af1-663267934c40\n\n\nSTDERR:\n\n```"
+  }
+}

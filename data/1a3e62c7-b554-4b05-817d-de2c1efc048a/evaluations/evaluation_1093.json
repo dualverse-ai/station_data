@@ -1,0 +1,47 @@
+{
+  "id": "1093",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Hybrid Synthesis: Noesis III's SA-LP Seeder + Praxis I's SLSQP Refiner",
+  "tags": [
+    "hybrid-model",
+    "synthesis",
+    "sa-lp",
+    "scipy",
+    "global-to-local",
+    "collaboration"
+  ],
+  "abstract": "This submission represents a synthesis of the best methods from two lineages. It uses the powerful Simulated Annealing with Linear Programming (SA-LP) global search method, developed by Noesis III (Archive #28), as a \"seeder\" for the first stage. The resulting high-potential circle centers are then fed into the robust, explicit-constraint SLSQP local \"refiner\" developed by Praxis I. This hybrid approach tests the hypothesis that combining the best available global exploration technique with the best available local exploitation technique will yield a result superior to either method in isolation.",
+  "submitted_tick": 659,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog, minimize, Bounds\nimport time\n\nN_CIRCLES = 26\n\n# Stage 1: SA-LP Seeder, based on Noesis III, Archive #28\ndef solve_lp_for_radii(centers):\n    n = centers.shape[0]\n    c = -np.ones(n) # Maximize sum(r_i) -> Minimize -sum(r_i)\n    A_ub = []\n    b_ub = []\n    bounds = []\n    \n    for i in range(n):\n        b_i = min(centers[i, 0], 1 - centers[i, 0], centers[i, 1], 1 - centers[i, 1])\n        bounds.append((0, b_i))\n    \n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.linalg.norm(centers[i] - centers[j])\n            row = np.zeros(n)\n            row[i] = 1\n            row[j] = 1\n            A_ub.append(row)\n            b_ub.append(dist - 1e-12)\n    \n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return res.x, -res.fun\n\ndef sa_lp_seeder(budget_sec=600):\n    n = N_CIRCLES\n    # Deterministic Hexagonal Init from Noesis III\n    centers = np.zeros((n, 2))\n    mx, my = 0.04, 0.06\n    sx = (1 - 2*mx) / 5\n    sy = min((1 - 2*my) / 4, (np.sqrt(3)/2)*sx)\n    row_counts = [6, 5, 5, 5, 5]\n    current_idx = 0\n    for i, count in enumerate(row_counts):\n        y = my + i * sy\n        x_start = 0.5 - (count-1)/2 * sx\n        for j in range(count):\n            centers[current_idx] = [x_start + j * sx, y]\n            current_idx += 1\n    \n    _, S = solve_lp_for_radii(centers)\n    best_centers, best_S = centers.copy(), S\n    sigma, T0, T_min, kappa = 0.035, 0.02 * S, 1e-4, 3.0\n    \n    start_time = time.time()\n    while time.time() - start_time < budget_sec:\n        t = (time.time() - start_time) / budget_sec\n        T = max(T_min, T0 * np.exp(-kappa * t))\n        \n        # Propose new centers (simplified version of Noesis III's proposals)\n        new_centers = centers.copy()\n        i = np.random.randint(n)\n        new_centers[i] += np.random.normal(0, sigma**2, 2)\n        new_centers = np.clip(new_centers, 1e-6, 1-1e-6)\n        \n        _, new_S = solve_lp_for_radii(new_centers)\n        delta_S = new_S - S\n        \n        if delta_S >= 0 or np.random.rand() < np.exp(delta_S / max(T, 1e-8)):\n            centers, S = new_centers, new_S\n            if S > best_S:\n                best_centers, best_S = centers.copy(), S\n    \n    return best_centers\n\n# Stage 2: SLSQP Refiner, from Praxis I\ndef make_slsqp_constraints(n, epsilon):\n    # ... [My proven constraint function] ...\n    constraints = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            def non_overlap(x, i=i, j=j):\n                dist_sq = np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2)\n                return dist_sq - (x[2*n+i] + x[2*n+j])**2 - epsilon\n            constraints.append({'type': 'ineq', 'fun': non_overlap})\n    for i in range(n):\n        def inside_x_min(x, i=i): return x[2*i] - x[2*n+i] - epsilon\n        def inside_x_max(x, i=i): return 1 - x[2*i] - x[2*n+i] - epsilon\n        def inside_y_min(x, i=i): return x[2*i+1] - x[2*n+i] - epsilon\n        def inside_y_max(x, i=i): return 1 - x[2*i+1] - x[2*n+i] - epsilon\n        constraints.extend([{'type': 'ineq', 'fun': f} for f in [inside_x_min, inside_x_max, inside_y_min, inside_y_max]])\n    return constraints\n\ndef construct_packing() -> tuple:\n    n = N_CIRCLES\n    print(\"--- Stage 1: SA-LP Global Seeding (inspired by Noesis III) ---\")\n    sa_centers = sa_lp_seeder()\n    \n    print(\"--- Intermediate: Calculating initial radii ---\")\n    # Use the LP solver to get a good radius guess\n    initial_radii, _ = solve_lp_for_radii(sa_centers)\n    x0 = np.concatenate([sa_centers.flatten(), initial_radii])\n\n    print(\"--- Stage 2: SLSQP Local Refinement (Praxis I) ---\")\n    constraints = make_slsqp_constraints(n, epsilon=1e-7)\n    bounds_list = [(0, 1)] * (2*n) + [(0.001, 0.5)] * n\n    bounds = Bounds([b[0] for b in bounds_list], [b[1] for b in bounds_list])\n    \n    def objective(x): return -np.sum(x[2*n:])\n\n    result = minimize(objective, x0, method='SLSQP', bounds=bounds,\n                      constraints=constraints, options={'maxiter': 300, 'disp': True})\n\n    best_params = result.x\n    centers = best_params[:2*n].reshape(n, 2)\n    radii = best_params[2*n:]\n    \n    print(f\"\\nHybrid Synthesis complete. Final Score: {-result.fun}\")\n    return centers, radii\n",
+    "submitted_timestamp": 1761049718.601111,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5816166895213297,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: SA-LP Global Seeding (inspired by Noesis III) ---\n--- Intermediate: Calculating initial radii ---\n--- Stage 2: SLSQP Local Refinement (Praxis I) ---\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.5816166895213297\n            Iterations: 9\n            Function evaluations: 711\n            Gradient evaluations: 9\n\nHybrid Synthesis complete. Final Score: 2.5816166895213297\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.581617",
+      "evaluation_timestamp": 1761050325.8771138,
+      "evaluation_datetime": "2025-10-21T20:38:45.877116"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5816166895213297,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761050325.9034977,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Synthesis: Noesis III's SA-LP Seeder + Praxis I's SLSQP Refiner' (ID: 1093) has been evaluated.\n\n**Score:** 2.5816166895213297\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.581617\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: SA-LP Global Seeding (inspired by Noesis III) ---\n--- Intermediate: Calculating initial radii ---\n--- Stage 2: SLSQP Local Refinement (Praxis I) ---\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.5816166895213297\n            Iterations: 9\n            Function evaluations: 711\n            Gradient evaluations: 9\n\nHybrid Synthesis complete. Final Score: 2.5816166895213297\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

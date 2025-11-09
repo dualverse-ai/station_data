@@ -1,0 +1,91 @@
+{
+  "id": "800",
+  "author": "Sophia III",
+  "research_task_id": "1",
+  "title": "Sophia III: DAQB Validation - kd Sweep (k-density=22, delta=0.15)",
+  "tags": [
+    "daqb",
+    "validation",
+    "k-density",
+    "praxis-ii",
+    "human-heart"
+  ],
+  "abstract": "Continuing DAQB validation for Praxis II on the Human Heart dataset. This is the final experiment in the `k_density` sweep, setting `k_density = 22` and `delta = 0.15`. The pipeline wraps Praxis's recommended DAQB, combining Feature-Weighted PCA (FWPCA) embedding with Adaptive Residualization (BRBG) for initial embedding correction and density-adaptive graph construction for improved batch integration.",
+  "submitted_tick": 510,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport anndata as ad\nimport scanpy as sc\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Utilities from daqb_recommended.py ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    from scipy import sparse as sp\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\n# --- build_density_adaptive_bbsg (from praxis/bbsg_density_adaptive.py) ---\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine', delta=0.15, k_density=30, rng_seed=0):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n\n    # Local density proxy (k-th NN distance, all batches)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, idx_all = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)        # 0 dense ... 1 sparse\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))        # e.g., 0.75 for 4 batches\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)     # [-delta, +delta]\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n\n    # Pre-build per-batch NN indices and distances\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    rng = np.random.RandomState(rng_seed)\n\n    batch_to_indices = {}\n    nn_models = {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask])\n        nn_models[j] = nn\n\n    nn_dists = {}\n    nn_idx_local = {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d\n        nn_idx_local[j] = ii\n\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n\n        # within-batch\n        d_i = nn_dists[bi][i]\n        ii = nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n\n        # other-batch allocation (distribute remainder to closest batches)\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = [(j, nn_dists[j][i][0]) for j in other_batches]\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1\n\n        for j in other_batches:\n            d_ij = nn_dists[j][i]\n            ii_j = nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n\n    rows = np.asarray(rows, dtype=np.int32)\n    cols = np.asarray(cols, dtype=np.int32)\n    dvals = np.asarray(dvals, dtype=np.float32)\n    \n    A = sp.coo_matrix((np.ones_like(dvals, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dvals.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\n# -------------------- eliminate_batch_effect_fn (adapted from daqb_recommended.py) --------------------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Sophia III: DAQB Validation - kd Sweep (k-density=22, delta=0.15)\")\n    \n    # Config for this validation run (as per Praxis II's request)\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    alpha_var = 0.5\n    delta = 0.15 # Fixed delta as requested\n    k_density = 22 # k_density for this sweep experiment\n    rng_seed = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch',\n                                n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC only) + neighbors\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # BRBG (PCA50 \u2192 batch ridge \u2192 adaptive shrinkage) to get Zcorr\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=rng_seed)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # DAQB graph via build_density_adaptive_bbsg (deterministic; binary edges + true distances)\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=k_density, rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761559455.4271512,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7338665514491555,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nSophia III: DAQB Validation - kd Sweep (k-density=22, delta=0.15)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c547fba8-acfa-4e5a-8991-843bff5ab72b/result_human.h5ad\n\nRESULT_UUID: c547fba8-acfa-4e5a-8991-843bff5ab72b\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.710\n  Graph_conn: 0.946  kBET: 0.791  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.759507  NMI: 0.710408\n  Graph_conn: 0.946867  kBET: 0.754404  iLISI: 0.931617  cLISI: 0.990158\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.760",
+          0.7595392852787066
+        ],
+        "NMI": [
+          "0.710",
+          0.710325937526433
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.94594988279469
+        ],
+        "kBET": [
+          "0.791",
+          0.7906651507185017
+        ],
+        "iLISI": [
+          "0.932",
+          0.9316168278563284
+        ],
+        "cLISI": [
+          "0.966",
+          0.9662137074893807
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761559842.2800539,
+      "evaluation_datetime": "2025-10-27T18:10:42.280055",
+      "sort_key": [
+        0.7338665514491555
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7338665514491555,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761559842.2966638,
+    "version_notified": "original",
+    "message": "Your research submission 'Sophia III: DAQB Validation - kd Sweep (k-density=22, delta=0.15)' (ID: 800) has been evaluated.\n\n**Score:** 0.7338665514491555\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.760\n**NMI:** 0.710\n**Graph_conn:** 0.946\n**kBET:** 0.791\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.710\n  Graph_conn: 0.946  kBET: 0.791  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.759507  NMI: 0.710408\n  Graph_conn: 0.946867  kBET: 0.754404  iLISI: 0.931617  cLISI: 0.990158\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nSophia III: DAQB Validation - kd Sweep (k-density=22, delta=0.15)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c547fba8-acfa-4e5a-8991-843bff5ab72b/result_human.h5ad\n\nRESULT_UUID: c547fba8-acfa-4e5a-8991-843bff5ab72b\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "id": "1953",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Ablation: Praxis X_emb + DAQB adapter (kd=22, k=50, \u03b4=0.10)",
+  "tags": [
+    "embedding",
+    "daqb",
+    "adapter",
+    "graphfwpca",
+    "ablation"
+  ],
+  "abstract": "Same as \u03b4=0.12 adapter ablation but with \u03b4=0.10 to test local-scale sensitivity; verifies DAQB restores mixing on Praxis embedding across nearby \u03b4.",
+  "submitted_tick": 1486,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.extend(['storage/shared', 'storage/praxis'])\nfrom adapters.apply_daqb_to_embedding import apply_daqb\nfrom sklearn.feature_selection import f_classif\n\ndef _to_dense_float32(X):\n    if sp.issparse(X):\n        return X.toarray().astype(np.float32, copy=False)\n    return np.asarray(X, dtype=np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    X = _to_dense_float32(adata.X)\n    y = adata.obs['batch'].astype('category').cat.codes.to_numpy()\n    f_scores, _ = f_classif(X, y)\n    finite = np.isfinite(f_scores)\n    max_finite = np.max(f_scores[finite]) if np.any(finite) else 1.0\n    f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=max_finite)\n    w = f_scores.astype(np.float32) / (np.mean(f_scores) + 1e-8)\n\n    Xw = X * w[None, :]\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    X_emb = np.asarray(ad_emb.obsm['X_pca'], dtype=np.float32)\n    adata.obsm['X_emb'] = X_emb\n\n    C, D = apply_daqb(\n        X_emb, batches=adata.obs['batch'].values,\n        k_total=50, kdensity=22, delta=0.10,\n        metric='cosine', cap=2.0, rng_seed=0\n    )\n    adata.obsp['connectivities'] = C.astype(np.float64)\n    adata.obsp['distances'] = D.astype(np.float64)\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {'n_neighbors': 50, 'method': 'DAQB(adapter)', 'metric': 'cosine'}\n    }\n    return adata\n",
+    "submitted_timestamp": 1761871018.5241816,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.30239893346726754,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7a15831c-8cf2-4f96-bec8-40315b2e1eed/result_human.h5ad\n\nRESULT_UUID: 7a15831c-8cf2-4f96-bec8-40315b2e1eed\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/sklearn/feature_selection/_univariate_selection.py:111: RuntimeWarning: invalid value encountered in divide\n  f = msb / msw\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.073  NMI: 0.136\n  Graph_conn: 0.627  kBET: 0.450  iLISI: 0.963  cLISI: 0.497\n  PCR: 0.000  Cell_cycle: 0.279\n\nRaw Scores (before normalization):\n  ASW_batch: 0.419329  ASW_label: 0.156231  ARI: 0.073230  NMI: 0.135929\n  Graph_conn: 0.633131  kBET: 0.433937  iLISI: 0.962631  cLISI: 0.853512\n  PCR: 0.000000  Cell_cycle: 0.246610",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.073",
+          0.07335577275662969
+        ],
+        "NMI": [
+          "0.136",
+          0.13568509782581892
+        ],
+        "Graph_conn": [
+          "0.627",
+          0.6268006890584931
+        ],
+        "kBET": [
+          "0.450",
+          0.4496657626943601
+        ],
+        "iLISI": [
+          "0.963",
+          0.9626307922272052
+        ],
+        "cLISI": [
+          "0.497",
+          0.49713504884349335
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.279",
+          0.27871617126667547
+        ]
+      },
+      "evaluation_timestamp": 1761871453.7481525,
+      "evaluation_datetime": "2025-10-31T08:44:13.748156",
+      "sort_key": [
+        0.30239893346726754
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.30239893346726754,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761871453.8390827,
+    "version_notified": "original",
+    "message": "Your research submission 'Ablation: Praxis X_emb + DAQB adapter (kd=22, k=50, \u03b4=0.10)' (ID: 1953) has been evaluated.\n\n**Score:** 0.30239893346726754\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.073\n**NMI:** 0.136\n**Graph_conn:** 0.627\n**kBET:** 0.450\n**iLISI:** 0.963\n**cLISI:** 0.497\n**PCR:** 0.000\n**Cell_cycle:** 0.279\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.073  NMI: 0.136\n  Graph_conn: 0.627  kBET: 0.450  iLISI: 0.963  cLISI: 0.497\n  PCR: 0.000  Cell_cycle: 0.279\n\nRaw Scores (before normalization):\n  ASW_batch: 0.419329  ASW_label: 0.156231  ARI: 0.073230  NMI: 0.135929\n  Graph_conn: 0.633131  kBET: 0.433937  iLISI: 0.962631  cLISI: 0.853512\n  PCR: 0.000000  Cell_cycle: 0.246610\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7a15831c-8cf2-4f96-bec8-40315b2e1eed/result_human.h5ad\n\nRESULT_UUID: 7a15831c-8cf2-4f96-bec8-40315b2e1eed\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/sklearn/feature_selection/_univariate_selection.py:111: RuntimeWarning: invalid value encountered in divide\n  f = msb / msw\n\n```"
+  }
+}

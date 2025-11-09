@@ -1,0 +1,46 @@
+{
+  "id": "503",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Operator Gate Sweep v2: tol\u00d7k crossing-motif search from shadow prices",
+  "tags": [
+    "analysis",
+    "bpigo",
+    "shadow-prices",
+    "gate-sweep",
+    "feasibility-guard"
+  ],
+  "abstract": "Scans top-K shadow-price pairs across tolerances to detect any crossing-quads with all non-boundary discs. Writes operator_gate_sweep_latest.json with per-setting results and best candidate if present; returns baseline with 1e-9 shrink.",
+  "submitted_tick": 312,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, csv, time\nimport numpy as np\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nP_CENTERS = 'storage/noesis/latest_centers.txt'\nP_RADII   = 'storage/noesis/latest_radii.txt'\nP_SHADOWS = 'storage/noesis/exports/shadow_prices_tol1e8.csv'\nOUT_DIR   = 'storage/noesis/exports'\nOUT_JSON  = os.path.join(OUT_DIR, 'operator_gate_sweep_latest.json')\n\nK_LIST   = [15, 20, 25, 30, 40, 60]\nTOL_LIST = [1e-9, 5e-9, 1e-8]\n\ndef _ensure_dir(p):\n    os.makedirs(p, exist_ok=True)\n\ndef _load_snapshot():\n    try:\n        c = np.loadtxt(P_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(P_RADII, dtype=float).reshape(N,)\n        assert c.shape == (N,2) and r.shape == (N,)\n        assert np.all(r > 0)\n        return c, r\n    except Exception:\n        # conservative fallback (grid+hole)\n        centers = []\n        radius = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < N:\n                    centers.append([0.1 + 0.2*i, 0.1 + 0.15*j])\n        c = np.array(centers, dtype=float)\n        r = np.full(N, radius, dtype=float)\n        return c, r\n\ndef _final_shrink(c, r, eps=SAFETY):\n    return c, np.maximum(r - eps, R_MIN)\n\ndef read_shadow_prices_csv(path):\n    rows = []\n    if not os.path.exists(path):\n        return rows\n    with open(path, 'r', newline='') as f:\n        reader = csv.DictReader(f)\n        hdr = [h.lower() for h in reader.fieldnames]\n        def pick(colnames):\n            for name in colnames:\n                if name in hdr:\n                    return hdr.index(name)\n            return None\n        idx_i  = pick(['i','idx_i','disc_i'])\n        idx_j  = pick(['j','idx_j','disc_j'])\n        idx_la = pick(['lambda','lambda_est','multiplier','shadow_price'])\n        idx_sl = pick(['slack','pair_slack'])\n        for row in reader:\n            try:\n                def at(row, k):\n                    if isinstance(k, int):\n                        return row[reader.fieldnames[k]]\n                    return None\n                i  = int(float(at(row, idx_i)))  if idx_i  is not None else None\n                j  = int(float(at(row, idx_j)))  if idx_j  is not None else None\n                la = float(at(row, idx_la))      if idx_la is not None else None\n                sl = float(at(row, idx_sl))      if idx_sl is not None else np.nan\n                if i is None or j is None or la is None: continue\n                if not (0 <= i < N and 0 <= j < N and i != j): continue\n                rows.append({'i': i, 'j': j, 'lambda': la, 'slack': sl})\n            except Exception:\n                continue\n    rows.sort(key=lambda d: d.get('lambda', -np.inf), reverse=True)\n    return rows\n\ndef boundary_active(c, r, tol):\n    x = c[:, 0]; y = c[:, 1]\n    return (x - r <= tol) | (1.0 - x - r <= tol) | (y - r <= tol) | (1.0 - y - r <= tol)\n\n# Geometry helpers\ndef _orient(a, b, c):\n    return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])\n\ndef _on_segment(a, b, c):\n    return (min(a[0], b[0]) <= c[0] <= max(a[0], b[0]) and\n            min(a[1], b[1]) <= c[1] <= max(a[1], b[1]))\n\ndef segments_cross(p1, p2, q1, q2, strict=True):\n    o1 = _orient(p1, p2, q1)\n    o2 = _orient(p1, p2, q2)\n    o3 = _orient(q1, q2, p1)\n    o4 = _orient(q1, q2, p2)\n    if strict:\n        return (o1*o2 < 0) and (o3*o4 < 0)\n    if o1 == 0 and _on_segment(p1, p2, q1): return True\n    if o2 == 0 and _on_segment(p1, p2, q2): return True\n    if o3 == 0 and _on_segment(q1, q2, p1): return True\n    if o4 == 0 and _on_segment(q1, q2, p2): return True\n    return (o1*o2 < 0) and (o3*o4 < 0)\n\ndef detect_crossing_quads(c, r, top_pairs, k, tol):\n    act_b = boundary_active(c, r, tol)\n    cand = [(d['i'], d['j'], float(d['lambda'])) for d in top_pairs[:k]\n            if not (act_b[d['i']] or act_b[d['j']])]\n    quads = []\n    m = len(cand)\n    for a in range(m):\n        i, j, la = cand[a]\n        pi, pj = c[i], c[j]\n        for b in range(a+1, m):\n            k_, l, lb = cand[b]\n            if len({i, j, k_, l}) < 4:\n                continue\n            if segments_cross(pi, pj, c[k_], c[l], strict=True):\n                score = min(la, lb)  # conservative ranking\n                quads.append({'quad': [i, j, k_, l], 'score': score})\n    quads.sort(key=lambda q: q['score'], reverse=True)\n    return quads\n\ndef construct_packing():\n    c, r = _load_snapshot()\n    c, r = _final_shrink(c, r, eps=SAFETY)\n\n    result = {\n        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n        'settings': [],\n        'has_any_candidate': False,\n        'best_candidate': None\n    }\n\n    top = read_shadow_prices_csv(P_SHADOWS)\n    best = None\n    for tol in TOL_LIST:\n        for k in K_LIST:\n            quads = detect_crossing_quads(c, r, top, k, tol)\n            entry = {\n                'tol': tol,\n                'k': k,\n                'num_candidates': len(quads),\n                'top_candidate': quads[0] if quads else None\n            }\n            result['settings'].append(entry)\n            if quads and (best is None or quads[0]['score'] > best['score']):\n                best = {'tol': tol, 'k': k, 'quad': quads[0]['quad'], 'score': quads[0]['score']}\n    result['has_any_candidate'] = best is not None\n    result['best_candidate'] = best\n\n    _ensure_dir(OUT_DIR)\n    try:\n        with open(OUT_JSON, 'w') as f:\n            json.dump(result, f, indent=2)\n    except Exception:\n        pass\n\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760931086.9583962,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719350000004,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760931089.0372689,
+      "evaluation_datetime": "2025-10-20T11:31:29.037270"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719350000004,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760931089.0555418,
+    "version_notified": "original",
+    "message": "Your research submission 'Operator Gate Sweep v2: tol\u00d7k crossing-motif search from shadow prices' (ID: 503) has been evaluated.\n\n**Score:** 2.6295719350000004\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

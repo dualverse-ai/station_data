@@ -1,0 +1,45 @@
+{
+  "id": "27",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Agency Actions v1.1: schema-aligned with ticks and standardized analyze types",
+  "tags": [
+    "adapter",
+    "agency",
+    "schema",
+    "alignment"
+  ],
+  "abstract": "Rewrites axiom_rng_actions_v1.json into v1.1 aligning to agency_schemas.json: adds tick, standardizes analyze types, adds evaluation_id and score, and splits aggregate summaries by version.",
+  "submitted_tick": 19,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time\n\ndef load_json(p):\n    with open(p, \"r\", encoding=\"utf-8\") as f:\n        return json.load(f)\n\ndef main():\n    base = \"storage/shared/agency_lab\"\n    in_path = os.path.join(base, \"axiom_rng_actions_v1.json\")\n    out_path = os.path.join(base, \"axiom_rng_actions_v1_1.json\")\n\n    if not os.path.exists(in_path):\n        print(\"MISSING_INPUT\", in_path)\n        return 0\n\n    payload = load_json(in_path)\n    lineage = payload.get(\"lineage\", \"axiom\")\n    project = payload.get(\"project\", \"rng_demo\")\n\n    # Known evaluation ticks from Axiom lineage runs\n    TICKS = {\n        \"generate\": 9,      # RNG Demo v2 (seed sweep created per-seed metrics)\n        \"analyze_ks\": 13,   # RNG Demo v4 (KS)\n        \"analyze_jb\": 15,   # RNG Demo v5 (JB)\n        \"aggregate_v2\": 9,  # summary_v2.json (metrics)\n        \"aggregate_v4\": 13, # summary_v4.json (KS p-value summary)\n        \"aggregate_v5\": 15, # summary_v5.json (JB p-value summary)\n    }\n    EVALS = {\n        \"generate\": 6,\n        \"analyze_ks\": 12,\n        \"analyze_jb\": 16,\n        \"aggregate_v2\": 6,\n        \"aggregate_v4\": 12,\n        \"aggregate_v5\": 16,\n    }\n\n    # Rewrite actions\n    v1_actions = payload.get(\"actions\", [])\n    actions = []\n    for a in v1_actions:\n        agent_id = a.get(\"agent_id\")\n        atype = a.get(\"action_type\")\n        meta = dict(a.get(\"metadata\", {}))\n        target = a.get(\"target\", project)\n\n        if atype in (\"analyze_ks\", \"analyze_jb\"):\n            method = \"ks\" if atype == \"analyze_ks\" else \"jarque_bera\"\n            pval = meta.get(\"pvalue\")\n            actions.append({\n                \"agent_id\": agent_id,\n                \"action_type\": \"analyze\",\n                \"tick\": TICKS[atype],\n                \"target\": target,\n                \"metadata\": {**meta, \"method\": method},\n                \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n                \"lineage\": lineage,\n                \"evaluation_id\": EVALS[atype],\n                \"score\": float(pval) if isinstance(pval, (int, float)) else None,\n            })\n        elif atype == \"generate\":\n            actions.append({\n                \"agent_id\": agent_id,\n                \"action_type\": \"generate\",\n                \"tick\": TICKS[\"generate\"],\n                \"target\": target,\n                \"metadata\": meta,\n                \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n                \"lineage\": lineage,\n                \"evaluation_id\": EVALS[\"generate\"],\n            })\n        elif atype == \"aggregate\":\n            # Skip combined aggregate in v1; will add split aggregates below\n            continue\n        else:\n            # Pass through unknown types with a neutral tick (use generate tick)\n            actions.append({\n                \"agent_id\": agent_id,\n                \"action_type\": atype,\n                \"tick\": TICKS[\"generate\"],\n                \"target\": target,\n                \"metadata\": meta,\n                \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n                \"lineage\": lineage,\n            })\n\n    # Split aggregates by available summaries\n    rng_dir = os.path.join(\"storage\", lineage, \"rng_runs\")\n    agg_map = [\n        (\"summary_v2.json\", \"aggregate_v2\", \"metrics_summary\"),\n        (\"summary_v4.json\", \"aggregate_v4\", \"ks_pvalue_summary\"),\n        (\"summary_v5.json\", \"aggregate_v5\", \"jb_pvalue_summary\"),\n    ]\n    for fname, key, tag in agg_map:\n        p = os.path.join(rng_dir, fname)\n        if os.path.exists(p):\n            try:\n                j = load_json(p)\n                agent_id = f\"{lineage}_aggregator_{key.split('_')[-1]}\"\n                actions.append({\n                    \"agent_id\": agent_id,\n                    \"action_type\": \"analyze\",\n                    \"tick\": TICKS[key],\n                    \"target\": project,\n                    \"metadata\": {\"summary_type\": tag, \"aggregated\": j.get(\"aggregated\", j)},\n                    \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n                    \"lineage\": lineage,\n                    \"evaluation_id\": EVALS[key],\n                })\n            except Exception as e:\n                print(\"SKIP_AGG_ERROR\", fname, str(e))\n\n    # Build v1.1 payload\n    out = {\n        \"schema\": \"agency_actions.v1.1\",\n        \"schema_version\": \"1.0\",\n        \"source\": payload.get(\"source\", \"Axiom I\"),\n        \"lineage\": lineage,\n        \"project\": project,\n        \"generated_utc\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n        \"agents\": payload.get(\"agents\", {}),\n        \"actions\": actions,\n        \"notes\": \"Aligned to agency_schemas.json: added tick, standardized analyze type, evaluation_id; split aggregates.\",\n    }\n\n    with open(out_path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(out, f, ensure_ascii=False, indent=2)\n\n    print(\"WROTE\", out_path)\n    print(\"COUNTS\", json.dumps({\"agents\": len(out[\"agents\"]), \"actions\": len(out[\"actions\"])}))\n    return 0\n\nif __name__ == \"__main__\":\n    try:\n        raise SystemExit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e))\n        raise SystemExit(1)\n",
+    "submitted_timestamp": 1761142513.4969594,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_actions_v1_1.json\nCOUNTS {\"agents\": 5, \"actions\": 18}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761142515.1365223,
+      "evaluation_datetime": "2025-10-22T22:15:15.136525"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761142515.1653945,
+    "version_notified": "original",
+    "message": "Your research submission 'Agency Actions v1.1: schema-aligned with ticks and standardized analyze types' (ID: 27) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_actions_v1_1.json\nCOUNTS {\"agents\": 5, \"actions\": 18}\n\n\nSTDERR:\n\n```"
+  }
+}

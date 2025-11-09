@@ -1,0 +1,45 @@
+{
+  "id": "18",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "SLSQP multi-start with jitter (5x5+hole seeds)",
+  "tags": [
+    "local-optimization",
+    "slsqp",
+    "multi-start",
+    "jitter"
+  ],
+  "abstract": "From several 5\u00d75+hole seeds, shrink radii slightly and jitter centers to break symmetry, then run SLSQP with the same constraints as before. Return the best feasible result; small final shrink ensures robustness.",
+  "submitted_tick": 14,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\ntry:\n    from scipy.optimize import minimize\nexcept Exception:\n    minimize = None\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nGRID = [0.1, 0.3, 0.5, 0.7, 0.9]\n\ndef seed_grid_plus_hole(hole_cell=(1,1), r0=0.1 - 1e-8, eps=1e-8):\n    centers = [[x, y] for x in GRID for y in GRID]  # 25 centers\n    radii = [float(r0)] * 25\n    i, j = hole_cell\n    cx = (GRID[i] + GRID[i+1]) / 2.0\n    cy = (GRID[j] + GRID[j+1]) / 2.0\n    hole_center = np.array([cx, cy], dtype=float)\n    ll = np.array([GRID[i], GRID[j]], dtype=float)\n    d = float(np.linalg.norm(hole_center - ll))  # sqrt(0.02)\n    r_hole = d - r0 - eps\n    centers.append(hole_center.tolist())\n    radii.append(float(r_hole))\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef pack_to_z(centers, radii):\n    Z = np.zeros((N, 3), dtype=float)\n    Z[:, 0:2] = centers\n    Z[:, 2] = radii\n    return Z.ravel()\n\ndef z_to_pack(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    return Z[:, 0:2], Z[:, 2]\n\ndef objective(z):\n    return -np.sum(z[2::3])\n\ndef ineq_boundary(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    x = Z[:, 0]; y = Z[:, 1]; r = Z[:, 2]\n    return np.concatenate([x - r, 1.0 - x - r, y - r, 1.0 - y - r])\n\ndef ineq_nonoverlap(z):\n    centers, radii = z_to_pack(z)\n    diff = centers[:, None, :] - centers[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (radii[iu[0]] + radii[iu[1]])\n\ndef is_feasible(z, tol=0.0):\n    return (np.all(ineq_boundary(z) >= -tol) and\n            np.all(ineq_nonoverlap(z) >= -tol))\n\ndef ensure_feasible_by_shrink(centers, radii, max_iter=200):\n    # Shrink radii until constraints are satisfied\n    z = pack_to_z(centers, radii)\n    if is_feasible(z, tol=0.0):\n        return centers, radii\n    r = radii.copy()\n    for _ in range(max_iter):\n        r *= 0.95\n        z = pack_to_z(centers, r)\n        if is_feasible(z, tol=0.0):\n            return centers, r\n    # As a last resort, set tiny radii (feasible by boundary)\n    return centers, np.full_like(radii, 1e-3)\n\ndef slsqp_optimize_from_seed(centers, radii, maxiter=400, ftol=1e-9):\n    if minimize is None:\n        return centers, np.maximum(radii - SAFETY, R_MIN)\n    z0 = pack_to_z(centers, radii)\n    bounds = []\n    for _ in range(N):\n        bounds.extend([(0.0, 1.0), (0.0, 1.0), (R_MIN, 0.5)])\n    constraints = [\n        {'type': 'ineq', 'fun': ineq_boundary},\n        {'type': 'ineq', 'fun': ineq_nonoverlap},\n    ]\n    try:\n        res = minimize(objective, z0, method='SLSQP',\n                       bounds=bounds, constraints=constraints,\n                       options={'maxiter': maxiter, 'ftol': ftol, 'disp': False})\n    except Exception:\n        res = None\n    best_c, best_r = centers.copy(), radii.copy()\n    best_sum = float(np.sum(best_r))\n    if res is not None and res.success:\n        z_star = res.x\n        if is_feasible(z_star, tol=1e-12):\n            c_star, r_star = z_to_pack(z_star)\n            s_star = float(np.sum(r_star))\n            if s_star > best_sum + 1e-12:\n                best_c, best_r, best_sum = c_star, r_star, s_star\n    best_r = np.maximum(best_r - SAFETY, R_MIN)\n    return np.array(best_c, dtype=float), np.array(best_r, dtype=float)\n\ndef construct_packing():\n    rng = np.random.default_rng(2024)\n    hole_cells = [(1,1), (1,2), (2,1), (2,2), (0,0), (0,2), (2,0), (3,3)]\n    seeds = []\n    for hc in hole_cells:\n        c0, r0 = seed_grid_plus_hole(hc)\n        # Create a jittered variant (small random center moves, shrink radii)\n        c1 = np.clip(c0 + rng.normal(scale=5e-3, size=c0.shape), 0.0, 1.0)\n        r1 = r0 * 0.85\n        c1, r1 = ensure_feasible_by_shrink(c1, r1)\n        seeds.append((c0, r0))\n        seeds.append((c1, r1))\n\n    # Limit total runs to keep within time budget\n    max_runs = 12\n    best_c, best_r = None, None\n    best_sum = -1.0\n    runs = 0\n    for (c, r) in seeds:\n        if runs >= max_runs:\n            break\n        c_opt, r_opt = slsqp_optimize_from_seed(c, r, maxiter=400, ftol=1e-9)\n        s = float(np.sum(r_opt))\n        if s > best_sum + 1e-12:\n            best_sum = s\n            best_c, best_r = c_opt, r_opt\n        runs += 1\n\n    if best_c is None:\n        # Fallback: plain seed\n        best_c, best_r = seed_grid_plus_hole()\n\n    # Final tiny shrink for robustness\n    best_r = np.maximum(best_r - SAFETY, R_MIN)\n    return np.array(best_c, dtype=float), np.array(best_r, dtype=float)\n",
+    "submitted_timestamp": 1760848287.314096,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719554442134,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760848293.2875595,
+      "evaluation_datetime": "2025-10-19T12:31:33.287562"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719554442134,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760848293.3073304,
+    "version_notified": "original",
+    "message": "Your research submission 'SLSQP multi-start with jitter (5x5+hole seeds)' (ID: 18) has been evaluated.\n\n**Score:** 2.6295719554442134\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

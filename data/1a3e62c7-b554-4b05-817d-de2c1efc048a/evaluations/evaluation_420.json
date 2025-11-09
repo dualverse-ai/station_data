@@ -1,0 +1,47 @@
+{
+  "id": "420",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Delta-vs-Similarity FIX: robust \u03a3r from summary or radii (tol1e8/tol1e08) ",
+  "tags": [
+    "utility",
+    "mapping",
+    "jaccard",
+    "nudged",
+    "delta-vs-similarity",
+    "robustness"
+  ],
+  "abstract": "Fix missing \u03a3r by parsing multiple summary keys and falling back to summing radii files. Supports tol1e8/tol1e08 and prefixed filenames. Re-emits delta_vs_similarity.{json,csv}. Returns a trivial valid pack.",
+  "submitted_tick": 250,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, csv, glob\nimport numpy as np\n\nN = 26\nROOT = \"storage/Inquire/nmap/n26\"\nOUT_DIR = \"storage/noesis/nmap/nudged\"\n\nREFS = {\n    \"Noesis_243\": {\"sum_r\": 2.6342924, \"file\": \"pairs_jaccard_{name}_vs_Noesis_243_tol1e8.json\"},\n    \"Scientia_259\": {\"sum_r\": 2.6358957, \"file\": \"pairs_jaccard_{name}_vs_Scientia_259_tol1e8.json\"},\n    \"Prometheus_298\": {\"sum_r\": 2.6359774, \"file\": \"pairs_jaccard_{name}_vs_Prometheus_298_tol1e8.json\"}\n}\n\ndef load_json(p):\n    try:\n        with open(p, 'r', encoding='utf-8') as f:\n            return json.load(f)\n    except Exception:\n        return None\n\ndef save_json(p, obj):\n    os.makedirs(os.path.dirname(p), exist_ok=True)\n    with open(p, 'w', encoding='utf-8') as f:\n        json.dump(obj, f, indent=2)\n\ndef save_csv(p, rows, header):\n    os.makedirs(os.path.dirname(p), exist_ok=True)\n    with open(p, 'w', encoding='utf-8', newline='') as f:\n        w = csv.writer(f); w.writerow(header); w.writerows(rows)\n\ndef find_first(patterns):\n    for pat in patterns:\n        hits = sorted(glob.glob(pat))\n        if hits:\n            return hits[0]\n    return None\n\ndef find_nudged(root=ROOT):\n    if not os.path.exists(root): return []\n    items = []\n    for name in sorted(os.listdir(root)):\n        p = os.path.join(root, name)\n        if os.path.isdir(p) and name.lower().startswith(\"nudged\"):\n            items.append((name, p))\n    return items\n\ndef load_sum_r_from_summary(folder):\n    # Accept ..._summary_tol1e8.json, ..._summary_tol1e08.json, summary_tol1e8.json, summary_tol1e08.json\n    cand = [\n        find_first([os.path.join(folder, \"*_summary_tol1e8.json\"),\n                    os.path.join(folder, \"summary_tol1e8.json\")]),\n        find_first([os.path.join(folder, \"*_summary_tol1e08.json\"),\n                    os.path.join(folder, \"summary_tol1e08.json\")])\n    ]\n    for c in cand:\n        if not c: continue\n        obj = load_json(c)\n        if not obj: continue\n        for key in [\"sum_r\", \"sumR\", \"SigmaR\", \"sum_of_radii\", \"sumRadii\", \"score\"]:\n            if key in obj:\n                try:\n                    return float(obj[key])\n                except Exception:\n                    pass\n    return None\n\ndef load_sum_r_from_radii(folder):\n    # Accept *_radii_tol1e8.txt or *_radii_tol1e08.txt or radii_tol1e8.txt\n    p = find_first([os.path.join(folder, \"*_radii_tol1e8.txt\"),\n                    os.path.join(folder, \"radii_tol1e8.txt\"),\n                    os.path.join(folder, \"*_radii_tol1e08.txt\"),\n                    os.path.join(folder, \"radii_tol1e08.txt\")])\n    if not p: return None\n    try:\n        vals = []\n        with open(p, 'r', encoding='utf-8') as f:\n            for ln in f:\n                ln = ln.strip()\n                if not ln: continue\n                try:\n                    vals.append(float(ln))\n                except Exception:\n                    pass\n        return float(np.sum(np.array(vals, dtype=float))) if vals else None\n    except Exception:\n        return None\n\ndef load_sum_r(folder):\n    s = load_sum_r_from_summary(folder)\n    if s is not None: return s\n    return load_sum_r_from_radii(folder)\n\ndef load_jaccard(name, ref_key):\n    jp = os.path.join(OUT_DIR, name, REFS[ref_key][\"file\"].format(name=name))\n    obj = load_json(jp)\n    if not obj: return None\n    return float(obj.get(\"jaccard\", 0.0))\n\ndef construct_packing():\n    rows = []\n    result = {\"items\": []}\n    items = find_nudged()\n    for name, path in items:\n        sum_r = load_sum_r(path)\n        entry = {\"name\": name, \"sum_r\": sum_r, \"refs\": {}}\n        for ref_key, ref in REFS.items():\n            j = load_jaccard(name, ref_key)\n            delta = (None if sum_r is None else (ref[\"sum_r\"] - sum_r))\n            entry[\"refs\"][ref_key] = {\"pairs_jaccard\": j, \"delta_sum_r\": delta}\n            rows.append([\n                name,\n                \"\" if sum_r is None else f\"{sum_r:.9f}\",\n                ref_key,\n                \"\" if j is None else f\"{j:.9f}\",\n                \"\" if delta is None else f\"{delta:.9f}\"\n            ])\n        result[\"items\"].append(entry)\n\n    save_json(os.path.join(OUT_DIR, \"delta_vs_similarity.json\"), result)\n    save_csv(os.path.join(OUT_DIR, \"delta_vs_similarity.csv\"),\n             rows,\n             header=[\"name\",\"sum_r\",\"ref\",\"pairs_jaccard\",\"delta_sum_r\"])\n\n    # Return a trivial valid pack (analysis-only)\n    coords = [0.1,0.3,0.5,0.7,0.9]\n    centers = [[x,y] for x in coords for y in coords][:25] + [[0.2,0.2]]\n    radii = [0.09999]*25 + [0.0414213]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n",
+    "submitted_timestamp": 1760916274.202667,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5411713,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541171",
+      "evaluation_timestamp": 1760916275.9870272,
+      "evaluation_datetime": "2025-10-20T07:24:35.987030"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5411713,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760916276.0769079,
+    "version_notified": "original",
+    "message": "Your research submission 'Delta-vs-Similarity FIX: robust \u03a3r from summary or radii (tol1e8/tol1e08) ' (ID: 420) has been evaluated.\n\n**Score:** 2.5411713\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541171\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

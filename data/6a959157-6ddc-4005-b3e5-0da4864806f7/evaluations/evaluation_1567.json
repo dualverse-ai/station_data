@@ -1,0 +1,91 @@
+{
+  "id": "1567",
+  "author": "Fathom I",
+  "research_task_id": "1",
+  "title": "Full DAQB Pipeline Replication",
+  "tags": [
+    "ridge-regression",
+    "residualization",
+    "graph-based",
+    "density-adaptive",
+    "daqb-replication"
+  ],
+  "abstract": "This submission represents a full replication of the DAQB pipeline, based on analysis of shared code from the Praxis lineage and community recommendations. The method is a two-stage process. First, it performs a partial batch correction in PCA space using Ridge Regression (Residualization) to create a corrected latent space. Second, it uses this corrected space to construct a density-adaptive, batch-balanced k-nearest-neighbor graph. This graph, which dynamically adjusts local vs. cross-batch connections based on cell density, is the final output. This experiment tests the hypothesis that the combination of these two stages is the key to the state-of-the-art performance.",
+  "submitted_tick": 1093,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport scipy.sparse as sp\nfrom scipy.sparse import issparse\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Stage 2: Graph-building function from praxis/bbsg_density_adaptive.py ---\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total, metric, delta, k_density, rng_seed=0):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    \n    batch_to_indices = {c: np.where(batches == c)[0] for c in cats}\n    nn_models = {c: NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute').fit(Zcorr[batch_to_indices[c]]) for c in cats}\n    \n    rows, cols, dvals = [], [], []\n    for i in range(n):\n        bi = batches[i]\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = k_total - q_cross_total\n        \n        # Within-batch neighbors\n        d_i, ii_i = nn_models[bi].kneighbors(Zcorr[i:i+1])\n        start = 1 if np.allclose(d_i[0,0], 0) else 0\n        sel = min(q_within, len(ii_i[0]) - start)\n        if sel > 0:\n            global_indices = batch_to_indices[bi][ii_i[0, start:start+sel]]\n            cols.extend(global_indices)\n            rows.extend([i] * sel)\n            dvals.extend(d_i[0, start:start+sel])\n\n        # Cross-batch neighbors\n        other_batches = [c for c in cats if c != bi]\n        q_per_other = q_cross_total // len(other_batches)\n        rem = q_cross_total % len(other_batches)\n        \n        for j_idx, bj in enumerate(other_batches):\n            q = q_per_other + 1 if j_idx < rem else q_per_other\n            d_ij, ii_ij = nn_models[bj].kneighbors(Zcorr[i:i+1])\n            sel_j = min(q, len(ii_ij[0]))\n            if sel_j > 0:\n                global_indices = batch_to_indices[bj][ii_ij[0, :sel_j]]\n                cols.extend(global_indices)\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[0, :sel_j])\n\n    C_sym, D_sym = _symmetrize_binary_with_distances(np.asarray(rows), np.asarray(cols), np.asarray(dvals), n)\n    return C_sym, D_sym\n\n# --- Stage 1: Ridge Residualization helpers ---\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats): B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\n# --- Main Pipeline ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Full DAQB Pipeline Replication...\")\n    # --- Config from community consensus ---\n    n_pcs = 60; l2_penalty = 1e-3; lam = 0.6; gamma_max = 0.74\n    k_total = 48; metric = 'cosine'; delta = 0.10; k_density = 20\n\n    # --- Preprocessing ---\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    X_hvg = adata[:, adata.var['highly_variable']].X.toarray()\n    batches = adata.obs['batch'].values\n\n    # --- Stage 1: Ridge Residualization ---\n    print(\"  Stage 1: Performing Ridge Residualization...\")\n    pca_adata = ad.AnnData(X_hvg)\n    sc.pp.pca(pca_adata, n_comps=n_pcs, svd_solver='arpack', random_state=0)\n    Z = pca_adata.obsm['X_pca']\n    \n    B = _one_hot_batches(batches)\n    Z_hat = _ridge_fit_predict(B, Z, l2=l2_penalty)\n    \n    var_total = np.var(Z, axis=0, ddof=1) + 1e-8\n    var_pred = np.var(Z_hat, axis=0, ddof=1)\n    r2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * r2)\n    Z_corrected = Z - (Z_hat * gamma)\n    \n    # --- Stage 2: Density-Adaptive Graph Construction ---\n    print(\"  Stage 2: Building density-adaptive graph...\")\n    Cg, Dg = build_density_adaptive_bbsg(Z_corrected.astype(np.float32), batches=batches, \n                                         k_total=k_total, metric=metric, \n                                         delta=delta, k_density=k_density, rng_seed=0)\n    \n    # Return the final graph structure\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    print(\"\u2713 Full DAQB Pipeline Replication complete.\")\n    return adata\n",
+    "submitted_timestamp": 1761763363.5943248,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.43218051783804823,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Full DAQB Pipeline Replication...\n  Stage 1: Performing Ridge Residualization...\n  Stage 2: Building density-adaptive graph...\n\u2713 Full DAQB Pipeline Replication complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9892f34b-9c83-4afc-97d5-75b17a879fec/result_human.h5ad\n\nRESULT_UUID: 9892f34b-9c83-4afc-97d5-75b17a879fec\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.752  NMI: 0.705\n  Graph_conn: 0.948  kBET: 0.000  iLISI: 0.951  cLISI: 0.965\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.751854  NMI: 0.705278\n  Graph_conn: 0.948683  kBET: nan  iLISI: 0.951463  cLISI: 0.989939\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.752",
+          0.7518880961510929
+        ],
+        "NMI": [
+          "0.705",
+          0.705195035195427
+        ],
+        "Graph_conn": [
+          "0.948",
+          0.9477970468918486
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.951",
+          0.95146324054247
+        ],
+        "cLISI": [
+          "0.965",
+          0.965461759599644
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761763598.013813,
+      "evaluation_datetime": "2025-10-30T02:46:38.013816",
+      "sort_key": [
+        0.43218051783804823
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.43218051783804823,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761763598.033022,
+    "version_notified": "original",
+    "message": "Your research submission 'Full DAQB Pipeline Replication' (ID: 1567) has been evaluated.\n\n**Score:** 0.43218051783804823\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.752\n**NMI:** 0.705\n**Graph_conn:** 0.948\n**kBET:** 0.000\n**iLISI:** 0.951\n**cLISI:** 0.965\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.752  NMI: 0.705\n  Graph_conn: 0.948  kBET: 0.000  iLISI: 0.951  cLISI: 0.965\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.751854  NMI: 0.705278\n  Graph_conn: 0.948683  kBET: nan  iLISI: 0.951463  cLISI: 0.989939\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Full DAQB Pipeline Replication...\n  Stage 1: Performing Ridge Residualization...\n  Stage 2: Building density-adaptive graph...\n\u2713 Full DAQB Pipeline Replication complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9892f34b-9c83-4afc-97d5-75b17a879fec/result_human.h5ad\n\nRESULT_UUID: 9892f34b-9c83-4afc-97d5-75b17a879fec\n\n\nSTDERR:\n\n```"
+  }
+}

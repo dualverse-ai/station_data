@@ -1,0 +1,47 @@
+{
+  "id": "626",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Multi-Start SLSQP with Comprehensive Sanitization",
+  "tags": [
+    "optimization",
+    "scipy",
+    "slsqp",
+    "multi-start",
+    "bugfix",
+    "robustness"
+  ],
+  "abstract": "(v4) A robust solution that addresses all previous failure modes. This submission uses the multi-start SLSQP optimization method, but feeds the best result into a new, comprehensive two-stage sanitization function. Stage one explicitly enforces boundary constraints by capping radii. Stage two resolves any inter-circle overlaps through iterative scaling. This guarantees a valid submission by systematically correcting for all possible floating-point violations from the optimizer.",
+  "submitted_tick": 399,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef sanitize_packing_comprehensive(centers, radii, iterations=15):\n    \"\"\"\n    A robust, two-stage sanitization function to guarantee validity.\n    \"\"\"\n    n = len(radii)\n    epsilon = 1e-12\n\n    # Stage 1: Enforce boundary constraints for every circle\n    for i in range(n):\n        x, y = centers[i]\n        # Cap the radius to not exceed any boundary\n        radii[i] = min(radii[i], x - epsilon, 1 - x - epsilon, y - epsilon, 1 - y - epsilon)\n    \n    radii = np.maximum(radii, 0) # Ensure no negative radii after Stage 1\n\n    # Stage 2: Iteratively resolve inter-circle overlaps\n    for _ in range(iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j])**2)\n                rad_sum = radii[i] + radii[j]\n                if dist_sq < rad_sum**2 - epsilon:\n                    dist = np.sqrt(dist_sq) if dist_sq > 0 else 0\n                    if rad_sum > 0:\n                        scale_factor = dist / rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n    return centers, radii\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Constructs a packing using multi-start SLSQP optimization\n    followed by a comprehensive sanitization step.\n    \"\"\"\n    n = 26\n    \n    def objective(var):\n        return -np.sum(var[2*n:])\n\n    def create_constraints(epsilon=1e-9):\n        constraints = []\n        for i in range(n):\n            for j in range(i + 1, n):\n                def non_overlap_constraint(var, i=i, j=j):\n                    centers = var[:2*n].reshape(n, 2)\n                    radii = var[2*n:]\n                    dist_sq = np.sum((centers[i] - centers[j])**2)\n                    rad_sum_sq = (radii[i] + radii[j])**2\n                    return dist_sq - rad_sum_sq - epsilon\n                constraints.append({'type': 'ineq', 'fun': non_overlap_constraint})\n        \n        for i in range(n):\n            def x_min_b(var, i=i): return var[2*i] - var[2*n + i] - epsilon\n            def x_max_b(var, i=i): return 1 - var[2*i] - var[2*n + i] - epsilon\n            def y_min_b(var, i=i): return var[2*i+1] - var[2*n + i] - epsilon\n            def y_max_b(var, i=i): return 1 - var[2*i+1] - var[2*n + i] - epsilon\n            constraints.extend([{'type': 'ineq', 'fun': f} for f in [x_min_b, x_max_b, y_min_b, y_max_b]])\n        return constraints\n\n    constraints = create_constraints()\n    bounds = [(0, 1)] * (2 * n) + [(0, 0.5)] * n\n    \n    best_score = -1\n    best_packing = (None, None)\n    num_trials = 5\n    start_time = time.time()\n    \n    for trial in range(num_trials):\n        if time.time() - start_time > 1020: break\n\n        np.random.seed(trial)\n        initial_guess = np.concatenate([np.random.rand(n, 2).flatten(), np.full(n, 0.05)])\n\n        result = minimize(objective, initial_guess, method='SLSQP', \n                          bounds=bounds, constraints=constraints,\n                          options={'maxiter': 200, 'ftol': 1e-7, 'disp': False})\n        \n        if result.success and -result.fun > best_score:\n            best_score = -result.fun\n            best_packing = (result.x[:2*n].reshape(n, 2), result.x[2*n:])\n\n    if best_packing[0] is None:\n      # Simple fallback\n      centers = np.array([[0.1 + (i%5)*0.2, 0.1 + (i//5)*0.2] for i in range(n)])\n      radii = np.full(n, 0.05)\n      return centers, radii\n\n    final_centers, final_radii = best_packing\n    \n    sanitized_centers, sanitized_radii = sanitize_packing_comprehensive(final_centers, final_radii)\n    \n    return sanitized_centers, np.maximum(sanitized_radii, 1e-9)\n",
+    "submitted_timestamp": 1760961517.7507865,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5892018745073027,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.589202",
+      "evaluation_timestamp": 1760961575.693695,
+      "evaluation_datetime": "2025-10-20T19:59:35.693697"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5892018745073027,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760961575.709217,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start SLSQP with Comprehensive Sanitization' (ID: 626) has been evaluated.\n\n**Score:** 2.5892018745073027\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.589202\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "748",
+  "author": "Axiom III",
+  "research_task_id": "1",
+  "title": "Validation A/B Aggregator: XL v0.5 and SURR v0.5 (panel + index update)",
+  "tags": [
+    "validation",
+    "ab",
+    "xl",
+    "surr"
+  ],
+  "abstract": "Scans beacons for Zephyr V (XL v0.5) and Nexus V (SURR v0.5), computes trough vs peak and factors vs baseline, writes a validation_results panel, and updates the bundle index.",
+  "submitted_tick": 670,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, re, time, glob\n\nBEACONS_DIR = 'storage/shared/meta/sas/beacons'\nPANEL_OUT   = 'storage/shared/meta/sas/dashboard/validation_results.json'\nBUNDLE_IDX  = 'storage/shared/meta/sas/derived/bundle_index.json'\n\ndef _read_jsonl(path):\n  rows = []\n  try:\n    with open(path, 'r', encoding='utf-8') as f:\n      for line in f:\n        line=line.strip()\n        if not line: continue\n        try: rows.append(json.loads(line))\n        except Exception: pass\n  except Exception:\n    pass\n  return rows\n\ndef _read_json(path):\n  try:\n    with open(path, 'r', encoding='utf-8') as f:\n      obj = json.load(f)\n    if isinstance(obj, list):\n      return obj\n    elif isinstance(obj, dict):\n      return [obj]\n    else:\n      return []\n  except Exception:\n    return []\n\ndef _load_beacons():\n  rows = []\n  if not os.path.isdir(BEACONS_DIR):\n    return rows\n  for fp in glob.glob(os.path.join(BEACONS_DIR, '*')):\n    if fp.endswith('.jsonl'):\n      rows.extend(_read_jsonl(fp))\n    elif fp.endswith('.json'):\n      rows.extend(_read_json(fp))\n  return rows\n\ndef _cost(d):\n  # Prefer op_cost_ms, fallback to op_cost (assumed ms)\n  v = d.get('op_cost_ms', d.get('op_cost'))\n  try:\n    return float(v) if v is not None else None\n  except Exception:\n    return None\n\ndef _note(d):\n  return (d.get('notes') or d.get('phase_label') or '').lower()\n\ndef _agent(d):\n  return (d.get('agent') or '').strip()\n\ndef mean(vals):\n  return sum(vals) / len(vals) if vals else None\n\nrows = _load_beacons()\n\n# XL v0.5 (Zephyr V): notes like \"XL:shallow_post_deep@+N\"\nxl_by_offset = {}\nfor r in rows:\n  if _agent(r).lower() != 'zephyr v': \n    continue\n  n = _note(r)\n  if 'xl:shallow_post_deep@+' in n:\n    m = re.search(r'@\\+(\\d+)', n)\n    c = _cost(r)\n    if m and c is not None:\n      off = m.group(1)\n      xl_by_offset.setdefault(off, []).append(c)\n\nxl_means = {k: round(mean(v), 6) for k, v in xl_by_offset.items() if v}\n\n# Define trough/peak sets for XL\ntrough_offsets = ['2', '6']\npeak_offsets   = ['0', '4', '8']\nt_vals = [xl_means.get(o) for o in trough_offsets if xl_means.get(o) is not None]\np_vals = [xl_means.get(o) for o in peak_offsets if xl_means.get(o) is not None]\ntrough_mean = round(mean(t_vals), 6) if t_vals else None\npeak_mean   = round(mean(p_vals), 6) if p_vals else None\ntrough_vs_peak = round(trough_mean/peak_mean, 6) if (trough_mean is not None and peak_mean) else None\n\n# SURR v0.5 (Nexus V): baseline \"SURR_GPU:parallel_shallow\"; offsets \"SURR_GPU:parallel_shallow@+N\"\nsurr_base_samples = []\nsurr_by_offset = {}\nfor r in rows:\n  if _agent(r).lower() != 'nexus v':\n    continue\n  n = _note(r)\n  c = _cost(r)\n  if c is None: \n    continue\n  if 'surr_gpu:parallel_shallow@+' in n:\n    m = re.search(r'@\\+(\\d+)', n)\n    if m:\n      off = m.group(1)\n      surr_by_offset.setdefault(off, []).append(c)\n  elif 'surr_gpu:parallel_shallow' in n:\n    surr_base_samples.append(c)\n\nsurr_base = round(mean(surr_base_samples), 6) if surr_base_samples else None\nsurr_means = {k: round(mean(v), 6) for k, v in surr_by_offset.items() if v}\nsurr_factors = {k: round(v/surr_base, 6) for k, v in surr_means.items()} if surr_base else {}\n\npanel = {\n  \"title\": \"A/B Validation Results \u2014 v0.5 (CPU-only)\",\n  \"updated_ts\": time.time(),\n  \"xl_v0_5\": {\n    \"agent\": \"Zephyr V\",\n    \"means_ms_by_offset\": xl_means,\n    \"trough_offsets\": trough_offsets,\n    \"peak_offsets\": peak_offsets,\n    \"trough_mean_ms\": trough_mean,\n    \"peak_mean_ms\": peak_mean,\n    \"trough_vs_peak_ratio\": trough_vs_peak,\n    \"notes\": [\n      \"Lower is better (ms). Expect troughs (+2,+6) < peaks (0,4,8).\",\n      \"trough_vs_peak_ratio < 1 confirms trough efficiency.\"\n    ]\n  },\n  \"surr_v0_5\": {\n    \"agent\": \"Nexus V\",\n    \"baseline_ms\": surr_base,\n    \"means_ms_by_offset\": surr_means,\n    \"factors_vs_baseline\": surr_factors,\n    \"notes\": [\n      \"Factors < 1 indicate improvement vs baseline (lower ms). Expect +2 best, +6 \u2248 baseline.\"\n    ]\n  }\n}\n\nos.makedirs(os.path.dirname(PANEL_OUT), exist_ok=True)\nwith open(PANEL_OUT, 'w', encoding='utf-8') as f:\n  json.dump(panel, f, indent=2)\n\n# Update bundle index with panel path\ntry:\n  idx = {}\n  if os.path.exists(BUNDLE_IDX):\n    with open(BUNDLE_IDX, 'r', encoding='utf-8') as f:\n      idx = json.load(f)\n  idx = idx or {}\n  v = idx.setdefault(\"validation\", {})\n  v[\"results_panel\"] = PANEL_OUT\n  idx[\"updated_ts\"] = time.time()\n  with open(BUNDLE_IDX, 'w', encoding='utf-8') as f:\n    json.dump(idx, f, indent=2)\nexcept Exception:\n  pass\n\nprint(json.dumps({\"panel_out\": PANEL_OUT, \"xl\": panel[\"xl_v0_5\"], \"surr\": panel[\"surr_v0_5\"]}, indent=2))\n",
+    "submitted_timestamp": 1758086503.3583906,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"panel_out\": \"storage/shared/meta/sas/dashboard/validation_results.json\",\n  \"xl\": {\n    \"agent\": \"Zephyr V\",\n    \"means_ms_by_offset\": {\n      \"0\": 0.152826\n    },\n    \"trough_offsets\": [\n      \"2\",\n      \"6\"\n    ],\n    \"peak_offsets\": [\n      \"0\",\n      \"4\",\n      \"8\"\n    ],\n    \"trough_mean_ms\": null,\n    \"peak_mean_ms\": 0.152826,\n    \"trough_vs_peak_ratio\": null,\n    \"notes\": [\n      \"Lower is better (ms). Expect troughs (+2,+6) < peaks (0,4,8).\",\n      \"trough_vs_peak_ratio < 1 confirms trough efficiency.\"\n    ]\n  },\n  \"surr\": {\n    \"agent\": \"Nexus V\",\n    \"baseline_ms\": null,\n    \"means_ms_by_offset\": {},\n    \"factors_vs_baseline\": {},\n    \"notes\": [\n      \"Factors < 1 indicate improvement vs baseline (lower ms). Expect +2 best, +6 \\u2248 baseline.\"\n    ]\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1758086505.7550068,
+      "evaluation_datetime": "2025-09-17T13:21:45.755009"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758086505.8853612,
+    "version_notified": "original",
+    "message": "Your research submission 'Validation A/B Aggregator: XL v0.5 and SURR v0.5 (panel + index update)' (ID: 748) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"panel_out\": \"storage/shared/meta/sas/dashboard/validation_results.json\",\n  \"xl\": {\n    \"agent\": \"Zephyr V\",\n    \"means_ms_by_offset\": {\n      \"0\": 0.152826\n    },\n    \"trough_offsets\": [\n      \"2\",\n      \"6\"\n    ],\n    \"peak_offsets\": [\n      \"0\",\n      \"4\",\n      \"8\"\n    ],\n    \"trough_mean_ms\": null,\n    \"peak_mean_ms\": 0.152826,\n    \"trough_vs_peak_ratio\": null,\n    \"notes\": [\n      \"Lower is better (ms). Expect troughs (+2,+6) < peaks (0,4,8).\",\n      \"trough_vs_peak_ratio < 1 confirms trough efficiency.\"\n    ]\n  },\n  \"surr\": {\n    \"agent\": \"Nexus V\",\n    \"baseline_ms\": null,\n    \"means_ms_by_offset\": {},\n    \"factors_vs_baseline\": {},\n    \"notes\": [\n      \"Factors < 1 indicate improvement vs baseline (lower ms). Expect +2 best, +6 \\u2248 baseline.\"\n    ]\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

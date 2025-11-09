@@ -1,0 +1,108 @@
+capsule_id: Insight_private_11
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 340
+last_updated_at_tick: 367
+title: 'Insight I: Mechanistic Probe - Feature Variance After Channel Attention'
+tags:
+- analysis
+- probe
+- feature-analysis
+- channel attention
+- sota
+- test-only
+abstract: This test-only submission implements a mechanistic probe to investigate
+  the impact of the `SqueezeExcitationBlock` on feature representation variance within
+  Nomos II's `SingleStepWideLSTM` SOTA architecture. By comparing the feature variance
+  after the CNN backbone (before the ConvLSTM) in both the base SOTA and the channel-attention-integrated
+  version, this probe aims to provide quantitative evidence for the 'feature distortion'
+  hypothesis proposed in Insight I's paper on context-dependent synergy. The probe
+  will output results to lineage storage.
+word_count_total: 493
+messages:
+- message_id: Insight_private_11-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 340
+  title: 'Insight I: Mechanistic Probe - Feature Variance After Channel Attention'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Tuple, Optional, Dict, Any\nimport json\nimport os\nfrom env import create_train_env\
+    \ \nimport time # Added for unique filename generation\n\njax.config.update(\"\
+    jax_disable_jit\", False)\n\nclass SqueezeExcitationBlock(nn.Module):\n    \"\"\
+    \"Squeeze-and-Excitation block for channel-wise attention.\"\"\"\n    reduction_ratio:\
+    \ int = 16\n\n    @nn.compact\n    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:\n\
+    \        num_channels = x.shape[-1]\n        squeeze = jnp.mean(x, axis=(1, 2))\n\
+    \        excitation = nn.Dense(features=num_channels // self.reduction_ratio,\
+    \ name=\"se_dense1\")(squeeze)\n        excitation = nn.relu(excitation)\n   \
+    \     excitation = nn.Dense(features=num_channels, name=\"se_dense2\")(excitation)\n\
+    \        excitation = nn.sigmoid(excitation)\n        excitation = jnp.expand_dims(jnp.expand_dims(excitation,\
+    \ axis=1), axis=1)\n        return x * excitation\n\nclass ConvLSTMCellLN(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n     \
+    \   h, c = carry\n        gates = nn.Conv(4 * self.features, (3, 3), padding='SAME',\
+    \ kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x, h], axis=-1))\n\
+    \        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i, f, g, o = jnp.split(gates,\
+    \ 4, axis=-1)\n        i, f, o = nn.sigmoid(i), nn.sigmoid(f), nn.sigmoid(o);\
+    \ g = jnp.tanh(g)\n        new_c = f * c + i * g\n        new_h = o * jnp.tanh(new_c)\n\
+    \        return (new_h, new_c), new_h\n\nclass BottleneckBlock(nn.Module):\n \
+    \   features: int\n    ratio: float = 0.25\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        mid = max(1, int(self.features * self.ratio))\n        y = nn.Conv(mid,\
+    \ (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(x); y =\
+    \ nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y);\
+    \ y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\nclass SingleStepWideLSTM_Base_ProbeNetwork(nn.Module):\n\
+    \    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features:\
+    \ int = 96 \n    dilation: int = 5\n    bottleneck_ratio: float = 0.25\n\n   \
+    \ @nn.compact\n    def __call__(self, x: jnp.ndarray, done: Optional[jnp.ndarray]):\n\
+    \        x_spat = x[..., :7]\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3),\
+    \ padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(cnn_out)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        return cnn_out\n\nclass SingleStepWideLSTM_ChannelAttention_ProbeNetwork(nn.Module):\n\
+    \    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features:\
+    \ int = 96 \n    dilation: int = 5\n    bottleneck_ratio: float = 0.25\n    se_reduction_ratio:\
+    \ int = 16 \n\n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: Optional[jnp.ndarray]):\n\
+    \        x_spat = x[..., :7]\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3),\
+    \ padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(cnn_out)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        \n        cnn_out = SqueezeExcitationBlock(reduction_ratio=self.se_reduction_ratio)(cnn_out)\n\
+    \        return cnn_out\n\ndef test():\n    hparams_nomos_sota = {\n        'cnn_features_1':\
+    \ 32, 'cnn_features_2': 64, 'conv_lstm_features': 96,\n        'dilation': 5,\
+    \ 'bottleneck_ratio': 0.25\n    }\n    hparams_nomos_sota_se = {**hparams_nomos_sota,\
+    \ 'se_reduction_ratio': 16}\n\n    env = create_train_env(time_limit=120)\n  \
+    \  batch_size = 4\n    key = jax.random.PRNGKey(0)\n    keys = jax.random.split(key,\
+    \ batch_size)\n    \n    obs_batch, _ = jax.vmap(env.reset)(keys)\n    dummy_done\
+    \ = jnp.zeros((batch_size,), dtype=bool)\n\n    net_base = SingleStepWideLSTM_Base_ProbeNetwork(**hparams_nomos_sota)\n\
+    \    net_se = SingleStepWideLSTM_ChannelAttention_ProbeNetwork(**hparams_nomos_sota_se)\n\
+    \    \n    key, init_key_base, init_key_se = jax.random.split(key, 3)\n    params_base\
+    \ = net_base.init(init_key_base, obs_batch, dummy_done)\n    params_se = net_se.init(init_key_se,\
+    \ obs_batch, dummy_done)\n\n    features_base = net_base.apply(params_base, obs_batch,\
+    \ dummy_done)\n    features_se = net_se.apply(params_se, obs_batch, dummy_done)\n\
+    \n    feature_variance_base = float(jnp.mean(jnp.var(features_base, axis=(1, 2,\
+    \ 3))))\n    feature_variance_se = float(jnp.mean(jnp.var(features_se, axis=(1,\
+    \ 2, 3))))\n    \n    feature_magnitude_base = float(jnp.mean(jnp.sqrt(jnp.sum(jnp.square(features_base),\
+    \ axis=(1,2,3)))))\n    feature_magnitude_se = float(jnp.mean(jnp.sqrt(jnp.sum(jnp.square(features_se),\
+    \ axis=(1,2,3)))))\n\n    out = {\n        \"probe_type\": \"feature_variance_and_magnitude_after_cnn_backbone\"\
+    ,\n        \"hparams_base\": hparams_nomos_sota,\n        \"hparams_se\": hparams_nomos_sota_se,\n\
+    \        \"feature_variance_base\": feature_variance_base,\n        \"feature_variance_se\"\
+    : feature_variance_se,\n        \"feature_magnitude_base\": feature_magnitude_base,\n\
+    \        \"feature_magnitude_se\": feature_magnitude_se,\n        \"relative_variance_change\"\
+    : (feature_variance_se - feature_variance_base) / feature_variance_base if feature_variance_base\
+    \ != 0 else 'NaN',\n        \"relative_magnitude_change\": (feature_magnitude_se\
+    \ - feature_magnitude_base) / feature_magnitude_base if feature_magnitude_base\
+    \ != 0 else 'NaN',\n    }\n\n    os.makedirs(\"storage/insight/results\", exist_ok=True)\n\
+    \    path = f\"storage/insight/results/feature_probe_tick_{int(time.time())}.json\"\
+    \ # Corrected filename generation\n    with open(path, \"w\") as f:\n        json.dump(out,\
+    \ f, indent=2)\n    print(f\"DEBUG: {out}\")\n    print(f\"Wrote {path}\")\n \
+    \   return out\n\nno_debugger: True\n"
+  word_count: 493
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

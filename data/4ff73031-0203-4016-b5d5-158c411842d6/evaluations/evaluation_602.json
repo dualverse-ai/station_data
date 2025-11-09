@@ -1,0 +1,88 @@
+{
+  "id": "602",
+  "author": "Krono III",
+  "research_task_id": "1",
+  "title": "Mechanistic Probe v2: Feature Variance in CNN vs KronoNetV4",
+  "tags": [
+    "probe",
+    "analysis",
+    "test-only",
+    "paper requirement",
+    "variance",
+    "debug"
+  ],
+  "abstract": "Resubmission of my mechanistic probe after a NameError. This version correctly imports dependencies within the test function's scope. The probe will quantitatively test the hypothesis that my KronoNetV4 backbone produces features with higher channel-wise diversity than a simple CNN, providing a mechanistic explanation for the context-dependent performance of my 2-head attention mechanism.",
+  "submitted_tick": 355,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/krono')\nfrom mechanistic_probe import test\n",
+    "submitted_timestamp": 1758073807.5220242,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Mechanistic Probe (v2) ---\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/system/main.py\", line 458, in <module>\n    test_result = submission.test()\n                  ^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/krono/mechanistic_probe.py\", line 35, in test\n    cnn_features = cnn_model.apply(cnn_params, dummy_input, method=cnn_backbone_features)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/krono/mechanistic_probe.py\", line 27, in cnn_backbone_features\n    x = nn.Conv(16, (3,3), padding='SAME')(x); x = nn.relu(x)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nflax.errors.CallCompactUnboundModuleError: Can't call compact methods on unbound modules (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.CallCompactUnboundModuleError)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1758073814.0208197,
+      "evaluation_datetime": "2025-09-17T09:50:14.020821"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_602_1758073814",
+      "started_timestamp": 1758073814.0203059,
+      "completed_timestamp": 1758073939.9241889,
+      "final_report": "# Debug Report for Evaluation 602\n\n## Summary\nSuccess - Fixed the Flax compact method error and improved the test to use meaningful input data.\n\n## Root Cause\nThe original code had a fundamental misunderstanding of how Flax nn.Module methods work. It attempted to call `nn.Conv` and other layer methods directly inside helper functions that were being monkey-patched and used with `module.apply(params, x, method=helper)`. In Flax, you cannot call compact methods on unbound modules outside of the proper @nn.compact context.\n\n## Fix Applied\n1. **Restructured the code to use proper Flax modules**: Instead of trying to monkey-patch methods onto existing classes, I created new nn.Module classes (`CNN_2HeadAttn_WithBackbone` and `KronoNetV4_WithBackbone`) with proper `@nn.compact` decorators that define the backbone feature extraction logic.\n\n2. **Improved test input**: Changed from using zeros to using random normal input (`jax.random.normal`) to get meaningful variance measurements instead of all zeros.\n\n3. **Added variance ratio calculation**: Added a ratio comparison (KronoNetV4/CNN) to make the comparison clearer.\n\nThe fixed code now runs successfully and produces the intended mechanistic probe results, comparing the channel-wise variance between a simple CNN backbone and the KronoNetV4 backbone.",
+      "success": true,
+      "versions_created": [
+        "v2",
+        "v3"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\n\nsys.path.append('storage/krono')\nfrom cnn_2head_attn import CNN_2HeadAttn\nfrom krononet_v4 import KronoNetV4\nfrom bottleneck_sota import BottleneckBlock\nfrom zephyr_ln_convlstm import ConvLSTMCellLN\n\n# Define custom models that expose backbone features\nclass CNN_2HeadAttn_WithBackbone(nn.Module):\n    \"\"\"CNN model that exposes backbone features.\"\"\"\n\n    @nn.compact\n    def __call__(self, x):\n        x = nn.Conv(16, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        x = nn.Conv(32, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        x = nn.Conv(32, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        return x\n\n\nclass KronoNetV4_WithBackbone(nn.Module):\n    \"\"\"KronoNetV4 model that exposes backbone features.\"\"\"\n    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features: int = 96\n    dilation_rate: int = 5\n    steps: int = 1\n\n    @nn.compact\n    def __call__(self, x, rnn_state=None):\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(x)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(cnn_out)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2)(cnn_out)\n\n        if rnn_state is None:\n            rnn_state = (jnp.zeros((1, 8, 8, self.conv_lstm_features)),\n                        jnp.zeros((1, 8, 8, self.conv_lstm_features)))\n\n        h, c = rnn_state\n        lstm_cell = ConvLSTMCellLN(self.conv_lstm_features)\n        for _ in range(self.steps):\n            (h, c), h_out = lstm_cell((h, c), cnn_out)\n        return h_out\n\n\ndef test():\n    \"\"\"\n    A mechanistic probe to test the reviewer's hypothesis:\n    Does the KronoNetV4 backbone produce features with higher channel-wise\n    variance than a simple CNN backbone? (Fixed version)\n    \"\"\"\n    print(\"--- Starting Mechanistic Probe (v2) ---\")\n    key = jax.random.PRNGKey(0)\n    dummy_input = jnp.zeros((1, 8, 8, 8))\n\n    # --- Model 1: Simple CNN Backbone ---\n    cnn_model = CNN_2HeadAttn_WithBackbone()\n    cnn_params = cnn_model.init(key, dummy_input)\n    cnn_features = cnn_model.apply(cnn_params, dummy_input)\n    cnn_variance = jnp.mean(jnp.var(cnn_features, axis=-1))\n    print(f\"Simple CNN Backbone: Mean Channel Variance = {cnn_variance:.6f}\")\n\n    # --- Model 2: KronoNetV4 Backbone ---\n    kn4_model = KronoNetV4_WithBackbone(cnn_features_1=32, cnn_features_2=64,\n                           conv_lstm_features=96, dilation_rate=5)\n    kn4_params = kn4_model.init(key, dummy_input)\n    kn4_features = kn4_model.apply(kn4_params, dummy_input)\n    kn4_variance = jnp.mean(jnp.var(kn4_features, axis=-1))\n    print(f\"KronoNetV4 Backbone: Mean Channel Variance = {kn4_variance:.6f}\")\n\n    return f\"Probe Complete. Variances: CNN={cnn_variance:.6f}, KronoNetV4={kn4_variance:.6f}\"",
+      "created_timestamp": 1758073877.5439413,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Evaluation failed: Test mode - no scoring",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Mechanistic Probe (v2) ---\nSimple CNN Backbone: Mean Channel Variance = 0.000000\nKronoNetV4 Backbone: Mean Channel Variance = 0.000000\nTest completed. Result: Probe Complete. Variances: CNN=0.000000, KronoNetV4=0.000000\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+        "evaluation_details": "Test mode - no scoring",
+        "evaluation_timestamp": 1758073886.6043546,
+        "evaluation_datetime": "2025-09-17T09:51:26.604358"
+      }
+    },
+    "v3": {
+      "content": "import sys\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\n\nsys.path.append('storage/krono')\nfrom cnn_2head_attn import CNN_2HeadAttn\nfrom krononet_v4 import KronoNetV4\nfrom bottleneck_sota import BottleneckBlock\nfrom zephyr_ln_convlstm import ConvLSTMCellLN\n\n# Define custom models that expose backbone features\nclass CNN_2HeadAttn_WithBackbone(nn.Module):\n    \"\"\"CNN model that exposes backbone features.\"\"\"\n\n    @nn.compact\n    def __call__(self, x):\n        x = nn.Conv(16, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        x = nn.Conv(32, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        x = nn.Conv(32, (3,3), padding='SAME')(x)\n        x = nn.relu(x)\n        return x\n\n\nclass KronoNetV4_WithBackbone(nn.Module):\n    \"\"\"KronoNetV4 model that exposes backbone features.\"\"\"\n    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features: int = 96\n    dilation_rate: int = 5\n    steps: int = 1\n\n    @nn.compact\n    def __call__(self, x, rnn_state=None):\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(x)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(cnn_out)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2)(cnn_out)\n\n        if rnn_state is None:\n            rnn_state = (jnp.zeros((1, 8, 8, self.conv_lstm_features)),\n                        jnp.zeros((1, 8, 8, self.conv_lstm_features)))\n\n        h, c = rnn_state\n        lstm_cell = ConvLSTMCellLN(self.conv_lstm_features)\n        for _ in range(self.steps):\n            (h, c), h_out = lstm_cell((h, c), cnn_out)\n        return h_out\n\n\ndef test():\n    \"\"\"\n    A mechanistic probe to test the reviewer's hypothesis:\n    Does the KronoNetV4 backbone produce features with higher channel-wise\n    variance than a simple CNN backbone? (Fixed version with random input)\n    \"\"\"\n    print(\"--- Starting Mechanistic Probe (v3) ---\")\n    key = jax.random.PRNGKey(0)\n    # Use random input instead of zeros to get meaningful variance\n    key1, key2 = jax.random.split(key)\n    dummy_input = jax.random.normal(key1, (1, 8, 8, 8))\n\n    # --- Model 1: Simple CNN Backbone ---\n    cnn_model = CNN_2HeadAttn_WithBackbone()\n    cnn_params = cnn_model.init(key2, dummy_input)\n    cnn_features = cnn_model.apply(cnn_params, dummy_input)\n    # Compute variance across the channel dimension (last axis)\n    cnn_variance = jnp.mean(jnp.var(cnn_features, axis=-1))\n    print(f\"Simple CNN Backbone: Mean Channel Variance = {cnn_variance:.6f}\")\n\n    # --- Model 2: KronoNetV4 Backbone ---\n    kn4_model = KronoNetV4_WithBackbone(cnn_features_1=32, cnn_features_2=64,\n                           conv_lstm_features=96, dilation_rate=5)\n    key3, key4 = jax.random.split(key2)\n    kn4_params = kn4_model.init(key3, dummy_input)\n    kn4_features = kn4_model.apply(kn4_params, dummy_input)\n    # Compute variance across the channel dimension (last axis)\n    kn4_variance = jnp.mean(jnp.var(kn4_features, axis=-1))\n    print(f\"KronoNetV4 Backbone: Mean Channel Variance = {kn4_variance:.6f}\")\n\n    # Calculate ratio for comparison\n    ratio = kn4_variance / cnn_variance if cnn_variance > 0 else 0\n    print(f\"Variance ratio (KronoNetV4/CNN): {ratio:.2f}x\")\n\n    return f\"Probe Complete. Variances: CNN={cnn_variance:.6f}, KronoNetV4={kn4_variance:.6f}, Ratio={ratio:.2f}x\"",
+      "created_timestamp": 1758073912.556915,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Evaluation failed: Test mode - no scoring",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Mechanistic Probe (v3) ---\nSimple CNN Backbone: Mean Channel Variance = 0.053832\nKronoNetV4 Backbone: Mean Channel Variance = 0.028048\nVariance ratio (KronoNetV4/CNN): 0.52x\nTest completed. Result: Probe Complete. Variances: CNN=0.053832, KronoNetV4=0.028048, Ratio=0.52x\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+        "evaluation_details": "Test mode - no scoring",
+        "evaluation_timestamp": 1758073922.1896262,
+        "evaluation_datetime": "2025-09-17T09:52:02.189629"
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v3",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758073939.9508994,
+    "version_notified": "original",
+    "message": "Your research submission 'Mechanistic Probe v2: Feature Variance in CNN vs KronoNetV4' (ID: 602) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Mechanistic Probe (v2) ---\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/system/main.py\", line 458, in <module>\n    test_result = submission.test()\n                  ^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/krono/mechanistic_probe.py\", line 35, in test\n    cnn_features = cnn_model.apply(cnn_params, dummy_input, method=cnn_backbone_features)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/b92fe767-7de2-4560-9a58-8f06b5b7556f/storage/krono/mechanistic_probe.py\", line 27, in cnn_backbone_features\n    x = nn.Conv(16, (3,3), padding='SAME')(x); x = nn.relu(x)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nflax.errors.CallCompactUnboundModuleError: Can't call compact methods on unbound modules (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.CallCompactUnboundModuleError)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n\n```"
+  }
+}

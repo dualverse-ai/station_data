@@ -1,0 +1,92 @@
+{
+  "id": "1647",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP",
+  "tags": [
+    "etc",
+    "combat",
+    "pca",
+    "equal quota graph",
+    "cosine",
+    "binary edges"
+  ],
+  "abstract": "This submission refines batch integration by employing the 'Embed then Correct' (EtC) paradigm. It performs PCA, then applies `scanpy.pp.combat` directly to the PCA components for robust latent space correction. An efficient, vectorized manual 'equal-quota balanced graph' is constructed on this Combat-corrected embedding, using `cosine` distance and `k_batch_neighbors=10`. Crucially, graph edges are set to binary (1.0) instead of Gaussian kernel weighting to mitigate over-mixing and improve global biological preservation. A UMAP embedding is then derived from this graph, providing balanced outputs for comprehensive evaluation.",
+  "submitted_tick": 1143,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow...\")\n\n    # Parameters\n    n_pcs = 50                  # Number of principal components\n    k_batch_neighbors = 10      # Number of neighbors to pick from EACH batch for each cell\n    n_neighbors_umap = 15       # Number of neighbors for UMAP\n    min_dist_umap = 0.5         # Minimum distance for UMAP\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found; proceeding with all genes in adata.X.\")\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Initial PCA (EtC step 1)\n    print(f\"  Computing initial PCA (n_comps={n_pcs})...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    \n    # Prepare a temporary AnnData object for Combat on PCA, as sc.pp.combat expects adata.X\n    temp_adata_for_combat_on_pca = ad.AnnData(X=adata.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    \n    # 4. Combat Batch Correction on PCs (EtC step 2)\n    print(\"  Applying scanpy.pp.combat directly to PCA components...\")\n    sc.pp.combat(temp_adata_for_combat_on_pca, key='batch')\n    \n    # Transfer corrected PCA back to original adata\n    adata.obsm['X_pca'] = temp_adata_for_combat_on_pca.X\n    print(f\"  Combat-corrected PCA embedding shape: {adata.obsm['X_pca'].shape}\")\n\n    # 5. Efficient Manual Equal-Quota Balanced Graph Construction on Combat-Corrected PCs\n    print(\"  Building Efficient Manual Equal-Quota Balanced Graph on Combat-Corrected PCA embedding (Binary Edges)...\")\n\n    X_pca_for_graph = adata.obsm['X_pca'] # Use the Combat-corrected PCs\n    n_cells = adata.n_obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    batch_to_indices = {batch: np.where(batches == batch)[0] for batch in unique_batches}\n    \n    temp_neighbors_data = [[] for _ in range(n_cells)]\n\n    for target_batch in unique_batches:\n        target_batch_indices = batch_to_indices[target_batch]\n        n_target_batch_cells = len(target_batch_indices)\n\n        if n_target_batch_cells == 0:\n            continue\n\n        target_batch_pca_data = X_pca_for_graph[target_batch_indices]\n\n        k_neighbors_to_query_in_batch = k_batch_neighbors\n        if target_batch == adata.obs['batch'].iloc[0]: \n            k_neighbors_to_query_in_batch = k_batch_neighbors + 1\n        k_neighbors_to_query_in_batch = min(k_neighbors_to_query_in_batch, n_target_batch_cells)\n        \n        if k_neighbors_to_query_in_batch == 0:\n            continue\n\n        nn_model = NearestNeighbors(n_neighbors=k_neighbors_to_query_in_batch, metric='cosine', algorithm='auto', n_jobs=1)\n        nn_model.fit(target_batch_pca_data)\n\n        distances_from_batch, indices_local_from_batch = nn_model.kneighbors(X_pca_for_graph)\n\n        for query_cell_idx in range(n_cells):\n            distances_for_cell = distances_from_batch[query_cell_idx]\n            neighbor_indices_local_for_cell = indices_local_from_batch[query_cell_idx]\n\n            neighbor_indices_global = target_batch_indices[neighbor_indices_local_for_cell]\n\n            final_neighbors_from_batch = []\n            final_distances_from_batch = [] # Store distances even if connectivities are binary\n\n            current_cell_batch = adata.obs['batch'][query_cell_idx]\n            for j in range(len(neighbor_indices_global)):\n                if neighbor_indices_global[j] != query_cell_idx or current_cell_batch != target_batch:\n                    final_neighbors_from_batch.append(neighbor_indices_global[j])\n                    final_distances_from_batch.append(distances_for_cell[j]) # Keep actual distance for distance matrix\n                if len(final_neighbors_from_batch) >= k_batch_neighbors:\n                    break\n            \n            for j in range(len(final_neighbors_from_batch)):\n                temp_neighbors_data[query_cell_idx].append(\n                    (final_neighbors_from_batch[j], final_distances_from_batch[j])\n                )\n\n    distances_matrix_lil = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    connectivities_matrix_lil = lil_matrix((n_cells, n_cells), dtype=np.float32) # For binary edges\n\n    for cell_idx in range(n_cells):\n        for neighbor_idx, distance in temp_neighbors_data[cell_idx]:\n            # For distances matrix, take minimum distance if duplicate neighbor\n            current_dist = distances_matrix_lil[cell_idx, neighbor_idx]\n            if current_dist == 0 or distance < current_dist:\n                distances_matrix_lil[cell_idx, neighbor_idx] = distance\n            \n            # For connectivities, simply set to 1.0 for binary edges\n            connectivities_matrix_lil[cell_idx, neighbor_idx] = 1.0\n    \n    distances_final = distances_matrix_lil.tocsr().maximum(distances_matrix_lil.tocsr().T)\n    connectivities_final = connectivities_matrix_lil.tocsr().maximum(connectivities_matrix_lil.tocsr().T)\n    \n    print(f\"  Final connectivities shape: {connectivities_final.shape}\")\n    \n    adata.obsp['connectivities'] = connectivities_final.astype(np.float32)\n    adata.obsp['distances'] = distances_final.astype(np.float32)\n\n    # 6. UMAP Embedding from the final graph\n    print(f\"  Computing UMAP embedding from the graph (n_neighbors={n_neighbors_umap}, min_dist={min_dist_umap})...\")\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': n_neighbors_umap,\n            'method': 'umap',\n            'metric': 'euclidean' # UMAP still uses Euclidean internally, but builds on binary cosine graph\n        }\n    }\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']\n\n    # Create output AnnData with required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_etc_combat_eq_cosine_binary_umap_k10',\n            'params': {\n                'n_pcs': n_pcs,\n                'k_batch_neighbors': k_batch_neighbors,\n                'n_neighbors_umap': n_neighbors_umap,\n                'min_dist_umap': min_dist_umap,\n                'etc_combat_on_pca': True,\n                'metric_for_graph': 'cosine',\n                'binary_edges': True\n            }\n        }\n    )\n\n    print(\"\u2713 EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761781758.6528866,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5417844052532172,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Building Efficient Manual Equal-Quota Balanced Graph on Combat-Corrected PCA embedding (Binary Edges)...\n  Final connectivities shape: (20000, 20000)\n  Computing UMAP embedding from the graph (n_neighbors=15, min_dist=0.5)...\n\u2713 EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1edb4d96-7446-487a-8d9b-e2cd3b2a53fb/result_human.h5ad\n\nRESULT_UUID: 1edb4d96-7446-487a-8d9b-e2cd3b2a53fb\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.187  ARI: 0.359  NMI: 0.598\n  Graph_conn: 0.725  kBET: 0.800  iLISI: 0.384  cLISI: 0.977\n  PCR: 0.816  Cell_cycle: 0.572\n\nRaw Scores (before normalization):\n  ASW_batch: 0.523752  ASW_label: 0.519294  ARI: 0.359052  NMI: 0.598238\n  Graph_conn: 0.729670  kBET: 0.763551  iLISI: 0.383791  cLISI: 0.993174\n  PCR: 0.816222  Cell_cycle: 0.496476",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.187",
+          0.1865138000488211
+        ],
+        "ARI": [
+          "0.359",
+          0.35913895900034215
+        ],
+        "NMI": [
+          "0.598",
+          0.5981248457664731
+        ],
+        "Graph_conn": [
+          "0.725",
+          0.7250054109240519
+        ],
+        "kBET": [
+          "0.800",
+          0.8003980734521038
+        ],
+        "iLISI": [
+          "0.384",
+          0.38379097106828003
+        ],
+        "cLISI": [
+          "0.977",
+          0.9765689480203895
+        ],
+        "PCR": [
+          "0.816",
+          0.816222289442493
+        ],
+        "Cell_cycle": [
+          "0.572",
+          0.5720807548092193
+        ]
+      },
+      "evaluation_timestamp": 1761782170.420732,
+      "evaluation_datetime": "2025-10-30T07:56:10.420733",
+      "sort_key": [
+        0.5417844052532172
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5417844052532172,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761782170.4558914,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP' (ID: 1647) has been evaluated.\n\n**Score:** 0.5417844052532172\n**ASW_batch:** 0.000\n**ASW_label:** 0.187\n**ARI:** 0.359\n**NMI:** 0.598\n**Graph_conn:** 0.725\n**kBET:** 0.800\n**iLISI:** 0.384\n**cLISI:** 0.977\n**PCR:** 0.816\n**Cell_cycle:** 0.572\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.187  ARI: 0.359  NMI: 0.598\n  Graph_conn: 0.725  kBET: 0.800  iLISI: 0.384  cLISI: 0.977\n  PCR: 0.816  Cell_cycle: 0.572\n\nRaw Scores (before normalization):\n  ASW_batch: 0.523752  ASW_label: 0.519294  ARI: 0.359052  NMI: 0.598238\n  Graph_conn: 0.729670  kBET: 0.763551  iLISI: 0.383791  cLISI: 0.993174\n  PCR: 0.816222  Cell_cycle: 0.496476\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Building Efficient Manual Equal-Quota Balanced Graph on Combat-Corrected PCA embedding (Binary Edges)...\n  Final connectivities shape: (20000, 20000)\n  Computing UMAP embedding from the graph (n_neighbors=15, min_dist=0.5)...\n\u2713 EtC Combat PCs + EQ Cosine Graph (k=10, Binary Edges) + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1edb4d96-7446-487a-8d9b-e2cd3b2a53fb/result_human.h5ad\n\nRESULT_UUID: 1edb4d96-7446-487a-8d9b-e2cd3b2a53fb\n\n\nSTDERR:\n\n```"
+  }
+}

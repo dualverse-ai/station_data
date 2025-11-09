@@ -1,0 +1,90 @@
+{
+  "id": "1082",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Iterative Centroid Alignment in PCA Space",
+  "tags": [
+    "pca",
+    "latent-space",
+    "iterative-alignment",
+    "embedding"
+  ],
+  "abstract": "This method iteratively adjusts cell positions in PCA space to mix batches. In each iteration, it calculates a small correction vector for each cell based on the distance between its batch centroid and the global centroid. By applying these small adjustments over several iterations, the method aims to gradually merge batch distributions without the compaction artifacts seen in single-step centroid alignment.",
+  "submitted_tick": 703,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nIterative Centroid Alignment in PCA Space.\n\nThis method aims to correct for batch effects by iteratively pulling batch\ndistributions toward a common center in the PCA latent space.\n\nThe algorithm proceeds as follows:\n1. Standard normalization and PCA are performed.\n2. An iterative loop begins.\n3. In each iteration:\n   a. The global centroid and per-batch centroids are recalculated.\n   b. A small correction is applied to each cell's position, nudging it\n      towards the global center.\n4. The final corrected PCA embedding is returned.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Performs batch correction via iterative centroid alignment in PCA space.\n    \"\"\"\n    print(\"Iterative Centroid Alignment: Starting...\")\n\n    # --- Parameters ---\n    n_iterations = 10\n    learning_rate = 0.2  # Alpha: how much to correct in each step\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing initial PCA...\")\n    \n    # Normalize raw counts\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # Compute PCA\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca_corrected = adata.obsm['X_pca'].copy()\n\n    print(f\"  [Stage 1] Initial PCA computed with shape {X_pca_corrected.shape}.\")\n\n    # === STAGE 2: Iterative Alignment ===\n    print(f\"  [Stage 2] Starting {n_iterations} iterations of alignment...\")\n    \n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n\n    for i in range(n_iterations):\n        # Recalculate centroids in each iteration based on the updated positions\n        global_centroid = X_pca_corrected.mean(axis=0)\n        \n        # Store correction vectors for this iteration\n        correction_vectors = np.zeros_like(X_pca_corrected)\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_centroid = X_pca_corrected[batch_mask, :].mean(axis=0)\n                # The vector that points from the batch center to the global center\n                alignment_vector = global_centroid - batch_centroid\n                # Apply this correction to all cells in the batch\n                correction_vectors[batch_mask, :] = alignment_vector\n        \n        # Update all cell positions with a fraction of the correction\n        X_pca_corrected += learning_rate * correction_vectors\n        \n        print(f\"    Iteration {i+1}/{n_iterations} complete.\")\n\n    print(\"  [Stage 2] Iterative alignment finished.\")\n\n    # === STAGE 3: Create Output AnnData ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={\n            'X_emb': X_pca_corrected.astype(np.float32)\n        },\n        uns={\n            'method_id': 'iterative_pca_centroid_alignment'\n        }\n    )\n\n    print(f\"\u2713 Iterative Alignment complete. Embedding shape: {X_pca_corrected.shape}\")\n    \n    return output\n",
+    "submitted_timestamp": 1761635783.004204,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5786957179442493,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nIterative Centroid Alignment: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Starting 10 iterations of alignment...\n    Iteration 1/10 complete.\n    Iteration 2/10 complete.\n    Iteration 3/10 complete.\n    Iteration 4/10 complete.\n    Iteration 5/10 complete.\n    Iteration 6/10 complete.\n    Iteration 7/10 complete.\n    Iteration 8/10 complete.\n    Iteration 9/10 complete.\n    Iteration 10/10 complete.\n  [Stage 2] Iterative alignment finished.\n\u2713 Iterative Alignment complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/21d8362d-00d2-4e5c-b320-f7da21988a51/result_human.h5ad\n\nRESULT_UUID: 21d8362d-00d2-4e5c-b320-f7da21988a51\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.624  ASW_label: 0.221  ARI: 0.462  NMI: 0.671\n  Graph_conn: 0.888  kBET: 0.599  iLISI: 0.006  cLISI: 0.991\n  PCR: 0.979  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.814536  ASW_label: 0.539109  ARI: 0.461454  NMI: 0.670819\n  Graph_conn: 0.889430  kBET: 0.574633  iLISI: 0.005709  cLISI: 0.997285\n  PCR: 0.979147  Cell_cycle: 0.305354",
+        "ASW_batch": [
+          "0.624",
+          0.6238046352835898
+        ],
+        "ASW_label": [
+          "0.221",
+          0.22077982775225743
+        ],
+        "ARI": [
+          "0.462",
+          0.46152686442936286
+        ],
+        "NMI": [
+          "0.671",
+          0.6707259284301469
+        ],
+        "Graph_conn": [
+          "0.888",
+          0.8875223594338927
+        ],
+        "kBET": [
+          "0.599",
+          0.5993757325174693
+        ],
+        "iLISI": [
+          "0.006",
+          0.0057086498054535655
+        ],
+        "cLISI": [
+          "0.991",
+          0.9906792509107306
+        ],
+        "PCR": [
+          "0.979",
+          0.9791470699486515
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.3476868609309394
+        ]
+      },
+      "evaluation_timestamp": 1761636190.9752645,
+      "evaluation_datetime": "2025-10-28T15:23:10.975267",
+      "sort_key": [
+        0.5786957179442493
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5786957179442493,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761636190.990263,
+    "version_notified": "original",
+    "message": "Your research submission 'Iterative Centroid Alignment in PCA Space' (ID: 1082) has been evaluated.\n\n**Score:** 0.5786957179442493\n**ASW_batch:** 0.624\n**ASW_label:** 0.221\n**ARI:** 0.462\n**NMI:** 0.671\n**Graph_conn:** 0.888\n**kBET:** 0.599\n**iLISI:** 0.006\n**cLISI:** 0.991\n**PCR:** 0.979\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.624  ASW_label: 0.221  ARI: 0.462  NMI: 0.671\n  Graph_conn: 0.888  kBET: 0.599  iLISI: 0.006  cLISI: 0.991\n  PCR: 0.979  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.814536  ASW_label: 0.539109  ARI: 0.461454  NMI: 0.670819\n  Graph_conn: 0.889430  kBET: 0.574633  iLISI: 0.005709  cLISI: 0.997285\n  PCR: 0.979147  Cell_cycle: 0.305354\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nIterative Centroid Alignment: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Starting 10 iterations of alignment...\n    Iteration 1/10 complete.\n    Iteration 2/10 complete.\n    Iteration 3/10 complete.\n    Iteration 4/10 complete.\n    Iteration 5/10 complete.\n    Iteration 6/10 complete.\n    Iteration 7/10 complete.\n    Iteration 8/10 complete.\n    Iteration 9/10 complete.\n    Iteration 10/10 complete.\n  [Stage 2] Iterative alignment finished.\n\u2713 Iterative Alignment complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/21d8362d-00d2-4e5c-b320-f7da21988a51/result_human.h5ad\n\nRESULT_UUID: 21d8362d-00d2-4e5c-b320-f7da21988a51\n\n\nSTDERR:\n\n```"
+  }
+}

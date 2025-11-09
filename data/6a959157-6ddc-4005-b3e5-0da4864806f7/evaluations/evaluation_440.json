@@ -1,0 +1,50 @@
+{
+  "id": "440",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "EtC-BRBG-CCR: Cluster-Conditional Residualized Graph (k=48, n_clusters=64)",
+  "tags": [
+    "embed-then-correct",
+    "pca60",
+    "combat",
+    "residualization",
+    "balanced-knn",
+    "clustering"
+  ],
+  "abstract": "Embed: PCA(60) on HVGs \u2192 ComBat on PC scores (EtC). Graph: PCA(50) on HVGs \u2192 cluster-conditional residualization (CCR) of PCs using per-cluster ridge vs batch labels, then equal-quota balanced kNN (k=48, cosine). Hypothesis: local (cluster-wise) residualization removes confounded batch signal without over-correcting shared biology, improving kBET/iLISI while preserving ARI/NMI.",
+  "submitted_tick": 254,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom praxis.graph_ccr import build_ccr_graph\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    n_clusters = 64\n    l2 = 1e-3\n    gamma_max = 0.6\n    lam_r2 = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding path: PCA(60) on HVGs \u2192 ComBat on PC scores (EtC)\n    ad_emb = adata.copy()\n    ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    X_emb = np.asarray(ad_pc.X, dtype=np.float32)\n    adata.obsm['X_emb'] = X_emb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # Graph path: PCA(50) on HVGs \u2192 CCR \u2192 balanced kNN\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n\n    Zcorr, Cg, Dg = build_ccr_graph(Zg, batches, n_clusters=n_clusters, l2=l2,\n                                    gamma_max=gamma_max, lam_r2=lam_r2,\n                                    k_total=k_total, metric=metric, random_state=random_state)\n\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n\n    return adata\n",
+    "submitted_timestamp": 1761476465.601019,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: ERROR: Could not import submission for test check: No module named 'praxis'",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nERROR: Could not import submission for test check: No module named 'praxis'\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpoucwr98t/storage/system/main.py\", line 48, in main\n    import submission\n  File \"/tmp/tmpoucwr98t/submission.py\", line 5, in <module>\n    from praxis.graph_ccr import build_ccr_graph\nModuleNotFoundError: No module named 'praxis'\n",
+      "evaluation_details": "ERROR: Could not import submission for test check: No module named 'praxis'",
+      "evaluation_timestamp": 1761476469.1540105,
+      "evaluation_datetime": "2025-10-26T19:01:09.154012",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761476469.2503664,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC-BRBG-CCR: Cluster-Conditional Residualized Graph (k=48, n_clusters=64)' (ID: 440) evaluation failed.\n\n**Error Summary:** Evaluation failed: ERROR: Could not import submission for test check: No module named 'praxis'\n\n\n**Import Error Diagnosis:**\n- Check that imported files exist in your storage\n- Verify file paths in sys.path.append() statements\n- Use `/execute_action{storage list}` to check your files\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nERROR: Could not import submission for test check: No module named 'praxis'\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpoucwr98t/storage/system/main.py\", line 48, in main\n    import submission\n  File \"/tmp/tmpoucwr98t/submission.py\", line 5, in <module>\n    from praxis.graph_ccr import build_ccr_graph\nModuleNotFoundError: No module named 'praxis'\n\n```"
+  }
+}

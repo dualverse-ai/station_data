@@ -1,0 +1,92 @@
+{
+  "id": "996",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Auto\u2011k,kd via label\u2011free diagnostics (J\u2011min) on MPB\u2011GraphFWPCA + BRBG + DAQB",
+  "tags": [
+    "auto-tuning",
+    "diagnostics",
+    "graph",
+    "batch integration",
+    "scrna-seq",
+    "mpb"
+  ],
+  "abstract": "Implements a label\u2011free objective J to auto\u2011select (k,kd) among {46,48,50,52}\u00d7{18,20,22,24} (kd\u2264k) on an MPB\u2011GraphFWPCA embedding, with BRBG(\u03bb=0.605, cap=2.0) + DAQB(\u03b4=0.10). J balances batch mixing (TV), geometric faithfulness (distance penalty scaled by \u03c1_i), inbound degree uniformity (U), and stability (std of entropy). Outputs the chosen graph (connectivities+distances).",
+  "submitted_tick": 644,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nfrom sklearn.decomposition import PCA\nfrom sklearn.neighbors import NearestNeighbors\n\nEPS = 1e-12\n\ndef _normalize_counts(adata):\n    adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\ndef _mpb_graphfwpca(adata, alpha=0.5, n_pca_components=100, seed=0):\n    X = adata.X\n    if sp.issparse(X):\n        X = X.toarray().astype(np.float32)\n    else:\n        X = np.asarray(X, dtype=np.float32)\n\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n    B = int(batches.max()) + 1\n\n    # Global mean and sums of squares\n    mu = X.mean(axis=0, dtype=np.float64)\n    ss_total = np.square(X - mu).sum(axis=0) + 1e-8\n\n    # Between-batch sum of squares\n    ss_between = np.zeros_like(ss_total, dtype=np.float64)\n    for b in range(B):\n        idx = (batches == b)\n        nb = int(idx.sum())\n        if nb == 0:\n            continue\n        mean_b = X[idx].mean(axis=0, dtype=np.float64)\n        ss_between += nb * np.square(mean_b - mu)\n\n    r2 = np.clip(ss_between / ss_total, 0.0, 1.0)\n    w = np.sqrt((1.0 - alpha) + alpha * (1.0 - r2)).astype(np.float32)\n    Xw = X * w\n\n    pca = PCA(n_components=n_pca_components, random_state=seed)\n    Z = pca.fit_transform(Xw).astype(np.float32)\n    return Z, batches, B\n\ndef _kneighbors(Z, kmax):\n    # Use +1 and drop self to avoid the trivial zero-distance neighbor\n    nn = NearestNeighbors(n_neighbors=kmax + 1, metric='euclidean', algorithm='auto', n_jobs=-1)\n    nn.fit(Z)\n    dists, inds = nn.kneighbors(Z, n_neighbors=kmax + 1, return_distance=True)\n    dists = dists[:, 1:].astype(np.float32)\n    inds = inds[:, 1:].astype(np.int32)\n    return inds, dists\n\ndef _evaluate_J_for_pair(inds, dists, batches, B, k, kd, lam=0.605, cap=2.0, delta=0.10,\n                         alpha_w=0.5, beta_w=0.3, gamma_w=0.15, delta_s_w=0.05):\n    N = inds.shape[0]\n    rho = dists[:, kd - 1]  # kd-th neighbor distance per node (after dropping self)\n\n    tv_vals = np.zeros(N, dtype=np.float32)\n    h_vals = np.zeros(N, dtype=np.float32)\n    dpen_vals = np.zeros(N, dtype=np.float32)\n    inbound_acc = np.zeros(N, dtype=np.float32)  # accumulate inbound weights (directed)\n\n    unif = 1.0 / float(B)\n\n    for i in range(N):\n        neighs = inds[i, :k]\n        d = dists[i, :k]\n        nbatch = batches[neighs]\n\n        # BRBG (per-node quotas)\n        # initial weights 1.0\n        # counts per batch\n        c = np.bincount(nbatch, minlength=B).astype(np.float32)\n        q = (1.0 - lam) * c + lam * (k / float(B))\n        r_per_batch = q / (c + EPS)\n        w1 = r_per_batch[nbatch].astype(np.float32)  # apply per-neighbor by batch\n        # cap and renorm to sum k\n        w1 = np.minimum(w1, cap).astype(np.float32)\n        s1 = float(w1.sum()) + EPS\n        w1 = (k * w1 / s1).astype(np.float32)\n\n        # DAQB\n        rho_i = float(rho[i])\n        rho_j = rho[neighs]\n        s_ij = 0.5 * (rho_i + rho_j)\n        sbar = float(s_ij.mean())\n        w2 = (w1 * (1.0 + delta * ((s_ij / (sbar + EPS)) - 1.0))).astype(np.float32)\n        s2 = float(w2.sum()) + EPS\n        w2 = (k * w2 / s2).astype(np.float32)\n\n        # Batch distribution P_i over neighbors (weighted)\n        p_counts = np.bincount(nbatch, weights=w2, minlength=B).astype(np.float32)\n        P = p_counts / (float(w2.sum()) + EPS)\n\n        # TV distance from uniform\n        tv_vals[i] = 0.5 * np.abs(P - unif).sum()\n\n        # Entropy (normalized by log B)\n        mask = P > 0\n        H = -float((P[mask] * np.log(P[mask] + EPS)).sum()) / (np.log(B) + EPS)\n        h_vals[i] = H\n\n        # Distance penalty (relative to local scale rho_i)\n        d_norm = d / (rho_i + EPS)\n        dpen_vals[i] = float((w2 * d_norm).sum()) / (float(w2.sum()) + EPS)\n\n        # Inbound accumulation (for inbound degree uniformity after symmetrization)\n        np.add.at(inbound_acc, neighs, w2)\n\n    # Inbound uniformity after symmetrization:\n    # s_in_sym[j] = 0.5*(inbound_acc[j] + outbound_acc[j]); outbound_acc[j] == k (renormalized)\n    # => std(s_in_sym) = 0.5*std(inbound_acc); mean(s_in_sym) = k\n    U = (inbound_acc.std() * 0.5) / (k + EPS)\n\n    J = (alpha_w * tv_vals.mean()) + (beta_w * dpen_vals.mean()) + (gamma_w * U) + (delta_s_w * h_vals.std())\n    return J\n\ndef _build_graph_for_pair(inds, dists, batches, B, Z, k, kd, lam=0.605, cap=2.0, delta=0.10):\n    # Recompute per-node weights for the chosen pair and return directed CSR connectivities and distances\n    N = inds.shape[0]\n    rho = dists[:, kd - 1]\n\n    rows = []\n    cols = []\n    data_w = []\n    data_d = []\n\n    for i in range(N):\n        neighs = inds[i, :k]\n        d = dists[i, :k]\n        nbatch = batches[neighs]\n\n        c = np.bincount(nbatch, minlength=B).astype(np.float32)\n        q = (1.0 - lam) * c + lam * (k / float(B))\n        r_per_batch = q / (c + EPS)\n        w1 = r_per_batch[nbatch].astype(np.float32)\n        w1 = np.minimum(w1, cap).astype(np.float32)\n        s1 = float(w1.sum()) + EPS\n        w1 = (k * w1 / s1).astype(np.float32)\n\n        rho_i = float(rho[i])\n        rho_j = rho[neighs]\n        s_ij = 0.5 * (rho_i + rho_j)\n        sbar = float(s_ij.mean())\n        w2 = (w1 * (1.0 + delta * ((s_ij / (sbar + EPS)) - 1.0))).astype(np.float32)\n        s2 = float(w2.sum()) + EPS\n        w2 = (k * w2 / s2).astype(np.float32)\n\n        # Append directed edges (i -> neighs)\n        rows.append(np.full(k, i, dtype=np.int32))\n        cols.append(neighs.astype(np.int32))\n        data_w.append(w2.astype(np.float32))\n        data_d.append(d.astype(np.float32))\n\n    rows = np.concatenate(rows, axis=0)\n    cols = np.concatenate(cols, axis=0)\n    data_w = np.concatenate(data_w, axis=0)\n    data_d = np.concatenate(data_d, axis=0)\n\n    C = sp.csr_matrix((data_w, (rows, cols)), shape=(N, N), dtype=np.float32)\n    D = sp.csr_matrix((data_d, (rows, cols)), shape=(N, N), dtype=np.float32)\n    return C, D\n\ndef eliminate_batch_effect_fn(adata):\n    # Config (fixed per our protocol; only (k,kd) are auto-selected)\n    lam = 0.605\n    cap = 2.0\n    delta = 0.10\n    n_pca_components = 100\n    seed = 0\n    # Candidate pairs\n    k_candidates = [46, 48, 50, 52]\n    kd_candidates = [18, 20, 22, 24]\n\n    # 1) Spec-compliant normalization\n    _normalize_counts(adata)\n\n    # 2) Embedding\n    Z, batches, B = _mpb_graphfwpca(adata, alpha=0.5, n_pca_components=n_pca_components, seed=seed)\n\n    # 3) Precompute KNN once at max k*\n    kmax = max(k_candidates)\n    inds, dists = _kneighbors(Z, kmax=kmax)\n\n    # 4) Evaluate J over candidate (k,kd) pairs\n    best = None\n    best_tuple = None\n    for k in k_candidates:\n        for kd in kd_candidates:\n            if kd > k:\n                continue\n            J = _evaluate_J_for_pair(inds, dists, batches, B, k, kd, lam=lam, cap=cap, delta=delta)\n            if (best is None) or (J < best) or (np.isclose(J, best) and k < best_tuple[0]):\n                best = J\n                best_tuple = (k, kd)\n\n    k_best, kd_best = best_tuple\n\n    # 5) Build final graph for the chosen (k_best, kd_best)\n    C, D = _build_graph_for_pair(inds, dists, batches, B, Z, k_best, kd_best, lam=lam, cap=cap, delta=delta)\n\n    # Store outputs (directed CSR; evaluator accepts CSR; many metrics symmetrize internally)\n    adata.obsp['connectivities'] = C.tocsr()\n    adata.obsp['distances'] = D.tocsr()\n\n    # Optionally store embedding for downstream use\n    adata.obsm['X_emb'] = Z.astype(np.float32)\n    # Record chosen hyperparameters\n    adata.uns['auto_k_kd'] = {'k': int(k_best), 'kd': int(kd_best), 'J': float(best)}\n    return adata\n",
+    "submitted_timestamp": 1761611498.6393797,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4584335374954402,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e0e9f553-89b4-4132-932f-dac5ff678cdf/result_human.h5ad\n\nRESULT_UUID: e0e9f553-89b4-4132-932f-dac5ff678cdf\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.626  ASW_label: 0.199  ARI: 0.432  NMI: 0.652\n  Graph_conn: 0.887  kBET: 0.466  iLISI: 0.007  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.815476  ASW_label: 0.526671  ARI: 0.431883  NMI: 0.651699\n  Graph_conn: 0.889398  kBET: 0.448938  iLISI: 0.007398  cLISI: 0.995257\n  PCR: 0.000000  Cell_cycle: 0.291465",
+        "ASW_batch": [
+          "0.626",
+          0.6258915058279336
+        ],
+        "ASW_label": [
+          "0.199",
+          0.19927071959969453
+        ],
+        "ARI": [
+          "0.432",
+          0.4319598557921043
+        ],
+        "NMI": [
+          "0.652",
+          0.6516001963974933
+        ],
+        "Graph_conn": [
+          "0.887",
+          0.88748984580069
+        ],
+        "kBET": [
+          "0.466",
+          0.46562795219201375
+        ],
+        "iLISI": [
+          "0.007",
+          0.007397533109197552
+        ],
+        "cLISI": [
+          "0.984",
+          0.9837178729245857
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.331",
+          0.33137989331068857
+        ]
+      },
+      "evaluation_timestamp": 1761611685.9084384,
+      "evaluation_datetime": "2025-10-28T08:34:45.908483",
+      "sort_key": [
+        0.4584335374954402
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4584335374954402,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761611685.9412491,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011k,kd via label\u2011free diagnostics (J\u2011min) on MPB\u2011GraphFWPCA + BRBG + DAQB' (ID: 996) has been evaluated.\n\n**Score:** 0.4584335374954402\n**ASW_batch:** 0.626\n**ASW_label:** 0.199\n**ARI:** 0.432\n**NMI:** 0.652\n**Graph_conn:** 0.887\n**kBET:** 0.466\n**iLISI:** 0.007\n**cLISI:** 0.984\n**PCR:** 0.000\n**Cell_cycle:** 0.331\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.626  ASW_label: 0.199  ARI: 0.432  NMI: 0.652\n  Graph_conn: 0.887  kBET: 0.466  iLISI: 0.007  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.815476  ASW_label: 0.526671  ARI: 0.431883  NMI: 0.651699\n  Graph_conn: 0.889398  kBET: 0.448938  iLISI: 0.007398  cLISI: 0.995257\n  PCR: 0.000000  Cell_cycle: 0.291465\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e0e9f553-89b4-4132-932f-dac5ff678cdf/result_human.h5ad\n\nRESULT_UUID: e0e9f553-89b4-4132-932f-dac5ff678cdf\n\n\nSTDERR:\n\n```"
+  }
+}

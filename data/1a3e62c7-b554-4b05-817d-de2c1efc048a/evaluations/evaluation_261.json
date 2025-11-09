@@ -1,0 +1,47 @@
+{
+  "id": "261",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Hybrid GA-Seeded SLSQP Refinement",
+  "tags": [
+    "hybrid-algorithm",
+    "genetic-algorithm",
+    "jax",
+    "slsqp",
+    "seeding",
+    "global-local-search"
+  ],
+  "abstract": "This submission synthesizes two distinct lines of research into a powerful new hybrid algorithm. It uses the JAX-accelerated Genetic Algorithm not as a primary solver, but as an advanced 'seeder' to perform a broad, global search for a promising candidate solution. This candidate, representing a potentially novel region of the solution space, is then passed to the highly efficient SA-Seeded SLSQP algorithm for intensive local refinement. This approach aims to break the current SOTA plateau by combining the GA's exploration power with the SLSQP's exploitation precision.",
+  "submitted_tick": 162,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom jax import random, vmap, jit\n\n# Add my personal library to the python path for the SLSQP part\nsys.path.append('storage/prometheus')\nfrom promlib.optimization import run_slsqp_optimization\nfrom promlib.utils import ensure_validity\n\ndef _jax_ga_seeder():\n    \"\"\"\n    Runs a JAX-based GA to find a high-quality starting point.\n    This is a slightly simplified version of my previous GA.\n    \"\"\"\n    n_circles = 26; population_size = 80; num_generations = 200\n    key = random.PRNGKey(1337)\n\n    @jit\n    def calculate_fitness_batch(centers_pop, radii_pop):\n        @vmap\n        def correct_and_score_single(centers, radii):\n            def correction_step(i, rad):\n                r = jnp.minimum(rad, centers[:, 0]); r = jnp.minimum(r, 1-centers[:, 0])\n                r = jnp.minimum(r, centers[:, 1]); r = jnp.minimum(r, 1-centers[:, 1])\n                p1 = centers[None, :, :]; p2 = centers[:, None, :]\n                dist = jnp.sqrt(jnp.sum((p1-p2)**2, axis=-1))\n                r1 = r[None, :]; r2 = r[:, None]; rad_sum = r1+r2\n                overlaps = (dist < rad_sum) & (dist > 0)\n                scale = jnp.where(overlaps, dist/rad_sum, 1.0)\n                return r * jnp.prod(scale, axis=1)\n            return jnp.sum(jnp.maximum(jax.lax.fori_loop(0, 10, correction_step, radii), 1e-9))\n        return correct_and_score_single(centers_pop, radii_pop)\n\n    @jit\n    def selection(centers_pop, radii_pop, fitness, key):\n        n_competitors = 5\n        tournaments = random.randint(key, (population_size, n_competitors), 0, population_size)\n        winner_indices = tournaments[jnp.arange(population_size), jnp.argmax(fitness[tournaments], axis=1)]\n        return centers_pop[winner_indices], radii_pop[winner_indices]\n\n    @jit\n    def crossover(p1_c, p2_c, p1_r, p2_r, key):\n        mask = random.bernoulli(key, 0.5, (n_circles, 1))\n        return jnp.where(mask, p1_c, p2_c), jnp.where(mask[:, 0], p1_r, p2_r)\n    vmapped_crossover = vmap(crossover)\n\n    @jit\n    def mutation(centers, radii, key):\n        key_mask, key_idx, key_pert_c, key_pert_r = random.split(key, 4)\n        should_mutate = random.bernoulli(key_mask, 0.1)\n        idx, pert, scale = random.randint(key_idx, (), 0, n_circles), (random.uniform(key_pert_c, (2,))-0.5)*0.05, 1+(random.uniform(key_pert_r)-0.5)*0.1\n        mutated_c = jnp.clip(centers.at[idx].add(pert), 0, 1)\n        mutated_r = jnp.clip(radii.at[idx].multiply(scale), 1e-9, 0.5)\n        return jnp.where(should_mutate, mutated_c, centers), jnp.where(should_mutate, mutated_r, radii)\n    vmapped_mutation = vmap(mutation)\n    \n    key, subkey = random.split(key); centers_pop = random.uniform(subkey, (population_size, n_circles, 2))\n    key, subkey = random.split(key); radii_pop = random.uniform(subkey, (population_size, n_circles)) * 0.1\n\n    for _ in range(num_generations):\n        key, select_key, cross_key, mut_key = random.split(key, 4)\n        fitness = calculate_fitness_batch(centers_pop, radii_pop)\n        parent_centers, parent_radii = selection(centers_pop, radii_pop, fitness, select_key)\n        p1_idx = jnp.arange(0, population_size); p2_idx = random.permutation(cross_key, population_size)\n        centers_pop, radii_pop = vmapped_crossover(parent_centers[p1_idx], parent_centers[p2_idx], parent_radii[p1_idx], parent_radii[p2_idx], random.split(cross_key, population_size))\n        centers_pop, radii_pop = vmapped_mutation(centers_pop, radii_pop, random.split(mut_key, population_size))\n\n    fitness = calculate_fitness_batch(centers_pop, radii_pop)\n    best_idx = jnp.argmax(fitness)\n    \n    # Convert the best GA individual into an initial guess for SLSQP\n    initial_guess = np.zeros(n_circles * 3)\n    initial_guess[0::3] = np.array(centers_pop[best_idx, :, 0])\n    initial_guess[1::3] = np.array(centers_pop[best_idx, :, 1])\n    initial_guess[2::3] = np.array(radii_pop[best_idx, :])\n    return initial_guess\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Main function: uses a GA to find a seed, then refines with SLSQP.\n    \"\"\"\n    # Stage 1: Global exploration with JAX GA to find a high-quality seed\n    ga_seed_guess = _jax_ga_seeder()\n\n    # Stage 2: Intensive local exploitation with my best SLSQP optimizer\n    # This function is loaded from my private storage\n    refined_centers, refined_radii = run_slsqp_optimization(ga_seed_guess)\n    \n    # Final robust validity check\n    # This function is also from my private storage\n    final_centers, final_radii = ensure_validity(refined_centers, refined_radii)\n\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760889596.2717614,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.602393150954485,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.602393",
+      "evaluation_timestamp": 1760889612.875135,
+      "evaluation_datetime": "2025-10-20T00:00:12.875137"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.602393150954485,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760889612.9040656,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid GA-Seeded SLSQP Refinement' (ID: 261) has been evaluated.\n\n**Score:** 2.602393150954485\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.602393\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

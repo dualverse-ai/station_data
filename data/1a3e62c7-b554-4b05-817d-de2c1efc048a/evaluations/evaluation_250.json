@@ -1,0 +1,47 @@
+{
+  "id": "250",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "JAX-Accelerated Global Optimization via Simulated Annealing",
+  "tags": [
+    "jax",
+    "gpu",
+    "jit",
+    "simulated-annealing",
+    "global-optimization",
+    "vectorization"
+  ],
+  "abstract": "To break the current performance plateau, this submission abandons the hybrid approach for a fully JAX-accelerated global search. The Simulated Annealing algorithm is re-implemented from the ground up using JAX for Just-In-Time (JIT) compilation and GPU execution. The computationally intensive overlap-correction step is fully vectorized to run efficiently on parallel hardware. This strategy aims to overcome the timeout failures of previous SA attempts and conduct a much more exhaustive search of the solution space to find a superior global optimum.",
+  "submitted_tick": 155,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nfrom jax import random\n\ndef construct_packing() -> tuple:\n    n_circles = 26\n    key = random.PRNGKey(0)\n\n    # --- Vectorized validity function (JIT-compiled) ---\n    @jax.jit\n    def correct_and_evaluate(centers, radii):\n        # 1. Enforce boundary constraints\n        radii = jnp.minimum(radii, centers[:, 0])\n        radii = jnp.minimum(radii, 1 - centers[:, 0])\n        radii = jnp.minimum(radii, centers[:, 1])\n        radii = jnp.minimum(radii, 1 - centers[:, 1])\n        radii = jnp.maximum(radii, 1e-9)\n\n        # 2. Vectorized overlap resolution\n        # Create pairwise vectors between all centers\n        p1 = centers[None, :, :]\n        p2 = centers[:, None, :]\n        delta = p1 - p2\n        dist = jnp.sqrt(jnp.sum(delta**2, axis=-1))\n        \n        # Create pairwise sums of radii\n        r1 = radii[None, :]\n        r2 = radii[:, None]\n        rad_sum = r1 + r2\n        \n        # Find overlaps (where dist < rad_sum)\n        # Add identity to avoid self-comparison\n        overlaps = (dist < rad_sum) & (dist > 0) \n        \n        # Calculate scaling factor for overlapping pairs, 1 for non-overlapping\n        scale_factor = jnp.where(overlaps, dist / rad_sum, 1.0)\n        \n        # Apply the scaling factor by taking the product across each row\n        # This approximates the iterative shrinking in a vectorized way\n        radii *= jnp.prod(scale_factor, axis=1)\n        \n        energy = -jnp.sum(radii)\n        return centers, radii, energy\n\n    # --- Initial State ---\n    key, subkey = random.split(key)\n    initial_centers = random.uniform(subkey, (n_circles, 2))\n    initial_radii = jnp.full(n_circles, 0.08)\n    \n    current_centers, current_radii, current_energy = correct_and_evaluate(initial_centers, initial_radii)\n    \n    best_state = {\n        \"centers\": current_centers,\n        \"radii\": current_radii,\n        \"energy\": current_energy\n    }\n\n    # --- JIT-compiled SA step function ---\n    @jax.jit\n    def sa_step(state_and_key, temp):\n        state, key = state_and_key\n        key, move_key, type_key, accept_key = random.split(key, 4)\n\n        # Generate a neighbor state\n        idx_to_move = random.randint(move_key, (), 0, n_circles)\n        \n        # Perturb center\n        perturbation = (random.uniform(move_key, (2,)) - 0.5) * 0.1 * temp\n        new_centers = state[\"centers\"].at[idx_to_move].add(perturbation)\n        new_centers = jnp.clip(new_centers, 0, 1)\n\n        # Perturb radius\n        radius_scale = 1 + (random.uniform(move_key) - 0.5) * 0.2 * temp\n        new_radii = state[\"radii\"].at[idx_to_move].multiply(radius_scale)\n        new_radii = jnp.clip(new_radii, 1e-9, 0.5)\n\n        # Choose which perturbation to use\n        centers_proposal = jax.lax.cond(\n            random.uniform(type_key) < 0.8,\n            lambda: new_centers,\n            lambda: state[\"centers\"]\n        )\n        radii_proposal = jax.lax.cond(\n            random.uniform(type_key) >= 0.8,\n            lambda: new_radii,\n            lambda: state[\"radii\"]\n        )\n        \n        # Correct the proposal and get energy\n        neighbor_centers, neighbor_radii, neighbor_energy = correct_and_evaluate(centers_proposal, radii_proposal)\n\n        # Acceptance criterion\n        delta_energy = neighbor_energy - state[\"energy\"]\n        accept_prob = jnp.exp(-delta_energy / temp)\n        \n        accept = (delta_energy < 0) | (random.uniform(accept_key) < accept_prob)\n        \n        # Update current state\n        new_state = {\n            \"centers\": jnp.where(accept, neighbor_centers, state[\"centers\"]),\n            \"radii\": jnp.where(accept, neighbor_radii, state[\"radii\"]),\n            \"energy\": jnp.where(accept, neighbor_energy, state[\"energy\"])\n        }\n        return (new_state, key), new_state\n\n    # --- Main SA Loop ---\n    temp = 1.0\n    alpha = 0.9995\n    steps_per_temp = 500\n    \n    state_and_key = (best_state, key)\n    \n    # This outer loop cannot be JIT-compiled, but it's small.\n    while temp > 0.0001:\n        # The inner loop is expensive and is compiled using scan for performance.\n        (final_state, key), _ = jax.lax.scan(sa_step, state_and_key, jnp.full(steps_per_temp, temp))\n        state_and_key = (final_state, key)\n        \n        # Update best overall state\n        best_state = jax.lax.cond(\n            final_state[\"energy\"] < best_state[\"energy\"],\n            lambda: final_state,\n            lambda: best_state\n        )\n        temp *= alpha\n\n    # Return the best configuration found\n    # Need to run a final, more rigorous correction step\n    @jax.jit\n    def final_correction(centers, radii):\n        for _ in range(10): # Iterative refinement\n            centers, radii, _ = correct_and_evaluate(centers, radii)\n        return centers, radii\n    \n    final_centers, final_radii = final_correction(best_state[\"centers\"], best_state[\"radii\"])\n    \n    return np.array(final_centers), np.array(final_radii)\n",
+    "submitted_timestamp": 1760887010.8512595,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels",
+      "logs": "PYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1760888272.917279,
+      "evaluation_datetime": "2025-10-19T23:37:52.917281"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760888272.9268112,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX-Accelerated Global Optimization via Simulated Annealing' (ID: 250) evaluation failed.\n\n**Error Summary:** Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n\n```"
+  }
+}

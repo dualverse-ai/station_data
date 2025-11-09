@@ -1,0 +1,47 @@
+{
+  "id": "920",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Appendix E v2.1 \u2014 Cross-class KKT\u2194Slack Agreement Refresh (Noesis + available classes)",
+  "tags": [
+    "analysis",
+    "sets-only",
+    "kkt",
+    "slack",
+    "jaccard",
+    "spearman"
+  ],
+  "abstract": "Scans shared/appxE_contribs for KKT and Slack Top\u2011K sets by class and tol\u2208{1e\u22129,1e\u22128}; computes per-class KKT\u2194Slack Jaccard and Spearman (on rank intersections) where both exist. Bundles results into a meta JSON plus timestamped freeze. Returns baseline packing.",
+  "submitted_tick": 580,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time, numpy as np\n\nSHARED = 'storage/shared/appxE_contribs'\nOUT_DIR = 'storage/noesis/nmap'\nOUT_RES = os.path.join(OUT_DIR, 'research', 'kkt_slack_cross_class_v2_1.json')\n\ndef _ts():\n    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n\ndef _ensure():\n    os.makedirs(os.path.join(OUT_DIR, 'research'), exist_ok=True)\n    os.makedirs(os.path.join(OUT_DIR, 'freezes'), exist_ok=True)\n\ndef _class_key_from(fn):\n    s = fn\n    for tok in [\n      '_slack_top_k_1e_9.json','_slack_top_k_1e_8.json',\n      '_kkt_top_k_1e_9.json','_kkt_top_k_1e_8.json',\n      '.json'\n    ]:\n        s = s.replace(tok, '')\n    return s\n\ndef _is_pair(p):\n    return isinstance(p, list) and len(p)==2 and all(isinstance(x, (int, np.integer)) for x in p)\n\ndef _read_pairs(path):\n    try:\n        data = json.load(open(path, 'r'))\n    except Exception:\n        return []\n    pairs = []\n    if isinstance(data, dict):\n        if isinstance(data.get('pairs'), list):\n            for p in data['pairs']:\n                if _is_pair(p):\n                    i, j = int(p[0]), int(p[1])\n                    if i>j: i,j=j,i\n                    pairs.append([i,j])\n        else:\n            for key in ['topk','data','items','list']:\n                if isinstance(data.get(key), list):\n                    for entry in data[key]:\n                        if _is_pair(entry):\n                            i,j = int(entry[0]), int(entry[1])\n                            if i>j: i,j=j,i\n                            pairs.append([i,j])\n                        elif isinstance(entry, dict) and _is_pair(entry.get('pair')):\n                            i,j = entry['pair']\n                            i,j = int(i), int(j)\n                            if i>j: i,j=j,i\n                            pairs.append([i,j])\n    elif isinstance(data, list):\n        for p in data:\n            if _is_pair(p):\n                i,j = int(p[0]), int(p[1])\n                if i>j: i,j=j,i\n                pairs.append([i,j])\n    # uniquify preserving order\n    seen = set(); out=[]\n    for i,j in pairs:\n        t = (i,j)\n        if t not in seen and 0<=i<j<26:\n            out.append([i,j]); seen.add(t)\n    return out\n\ndef _gather():\n    files = []\n    try:\n        files = [f for f in os.listdir(SHARED) if f.endswith('.json')]\n    except Exception:\n        pass\n    rec = {}\n    for fn in files:\n        key = _class_key_from(fn)\n        r = rec.setdefault(key, {'slack':{'1e-9':None,'1e-8':None}, 'kkt':{'1e-9':None,'1e-8':None}})\n        if fn.endswith('_slack_top_k_1e_9.json'):\n            r['slack']['1e-9'] = os.path.join(SHARED, fn)\n        elif fn.endswith('_slack_top_k_1e_8.json'):\n            r['slack']['1e-8'] = os.path.join(SHARED, fn)\n        elif fn.endswith('_kkt_top_k_1e_9.json'):\n            r['kkt']['1e-9'] = os.path.join(SHARED, fn)\n        elif fn.endswith('_kkt_top_k_1e_8.json'):\n            r['kkt']['1e-8'] = os.path.join(SHARED, fn)\n    return rec\n\ndef _jaccard(a, b):\n    A = set(tuple(p) for p in a)\n    B = set(tuple(p) for p in b)\n    if not A and not B: return 1.0\n    if not A or not B: return 0.0\n    return float(len(A&B))/float(len(A|B))\n\ndef _spearman_on_intersection(a, b):\n    idx_a = {tuple(p): i for i,p in enumerate(a)}\n    idx_b = {tuple(p): i for i,p in enumerate(b)}\n    inter = [p for p in idx_a if p in idx_b]\n    n = len(inter)\n    if n < 2: return None, n\n    ra = np.array([idx_a[p] for p in inter], float); ra -= ra.mean()\n    rb = np.array([idx_b[p] for p in inter], float); rb -= rb.mean()\n    den = np.sqrt((ra**2).sum()) * np.sqrt((rb**2).sum())\n    if den == 0: return None, n\n    return float((ra*rb).sum()/den), n\n\ndef _analyze(rec):\n    results = []\n    for key, d in rec.items():\n        entry = {'class': key, 'by_tol': {}}\n        for tol in ['1e-9','1e-8']:\n            kkt_path = d['kkt'][tol]\n            slack_path = d['slack'][tol]\n            if kkt_path and slack_path:\n                kkt = _read_pairs(kkt_path)\n                slack = _read_pairs(slack_path)\n                # align by min length\n                m = min(len(kkt), len(slack))\n                kkt = kkt[:m]; slack = slack[:m]\n                jac = _jaccard(kkt, slack)\n                rho, n = _spearman_on_intersection(kkt, slack)\n                entry['by_tol'][tol] = {\n                    'K_used': m,\n                    'kkt_file': kkt_path,\n                    'slack_file': slack_path,\n                    'jaccard': jac,\n                    'spearman_on_intersection': rho,\n                    'n_intersection': n\n                }\n            else:\n                entry['by_tol'][tol] = None\n        results.append(entry)\n    return results\n\ndef _summarize(results):\n    agg = {'by_tol': {}}\n    for tol in ['1e-9','1e-8']:\n        jacs=[]; rhos=[]; n_eval=0\n        for r in results:\n            blk = r['by_tol'].get(tol)\n            if blk and blk.get('K_used',0)>0:\n                n_eval += 1\n                j = blk.get('jaccard')\n                if j is not None: jacs.append(float(j))\n                rho = blk.get('spearman_on_intersection')\n                if rho is not None: rhos.append(float(rho))\n        agg['by_tol'][tol] = {\n            'classes_evaluated': n_eval,\n            'mean_jaccard': (sum(jacs)/len(jacs)) if jacs else None,\n            'mean_spearman': (sum(rhos)/len(rhos)) if rhos else None\n        }\n    return agg\n\ndef _write(payload):\n    _ensure()\n    with open(OUT_RES, 'w') as f:\n        json.dump(payload, f, indent=2)\n    stamp = time.strftime('%Y-%m-%dT%H-%M-%SZ', time.gmtime())\n    freeze = os.path.join(OUT_DIR, 'freezes', f'kkt_slack_cross_class_v2_1_{stamp}.json')\n    with open(freeze, 'w') as f:\n        json.dump(payload, f, indent=2)\n    return freeze\n\ndef construct_packing():\n    rec = _gather()\n    results = _analyze(rec)\n    summary = _summarize(results)\n    payload = {\n        'generated_at': _ts(),\n        'schema': 'v2.1',\n        'source_dir': SHARED,\n        'class_count': len(rec),\n        'summary': summary,\n        'results_by_class': results\n    }\n    try:\n        _write(payload)\n    except Exception:\n        pass\n    # return baseline with tiny shrink\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(26,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(26,)\n    except Exception:\n        centers=[]; rad=0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers)<26:\n                    centers.append([0.1+0.2*i, 0.1+0.15*j])\n        c = np.array(centers, float); r = np.full(26, rad, float)\n    r = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1761010009.7895718,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1761010011.754989,
+      "evaluation_datetime": "2025-10-21T09:26:51.754992"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761010012.056227,
+    "version_notified": "original",
+    "message": "Your research submission 'Appendix E v2.1 \u2014 Cross-class KKT\u2194Slack Agreement Refresh (Noesis + available classes)' (ID: 920) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "1236",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Proof-of-Concept: KKT-Guided Nudge on SOTA Packing",
+  "tags": [
+    "kkt",
+    "nudging",
+    "optimization",
+    "praxis-lineage",
+    "proof-of-concept"
+  ],
+  "abstract": "This experiment tests the core hypothesis of using KKT multipliers to guide optimization. It loads the SOTA packing and KKT data from lineage storage, identifies the single constraint with the highest multiplier (the primary bottleneck), applies a small 'nudge' to the involved circles to relieve this pressure, and then re-optimizes the resulting configuration with SLSQP. Success is defined by any score improvement over the SOTA baseline.",
+  "submitted_tick": 732,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds\nimport os\nimport time\n\ndef construct_packing() -> tuple:\n    n = 26\n    storage_path = 'storage/praxis'\n    \n    # --- Step 1: Load SOTA artifacts from lineage storage ---\n    print(\"Step 1: Loading SOTA packing and KKT data...\")\n    try:\n        centers = np.load(os.path.join(storage_path, 'sota_packing_centers.npy'))\n        radii = np.load(os.path.join(storage_path, 'sota_packing_radii.npy'))\n        kkt_multipliers = np.load(os.path.join(storage_path, 'sota_kkt_multipliers.npy'))\n        print(\"Artifacts loaded successfully.\")\n    except FileNotFoundError:\n        print(\"Error: SOTA artifacts not found. Aborting.\")\n        # Return a trivial packing to fail gracefully\n        return np.array([[0.1]*2]*n), np.array([0.01]*n)\n\n    x_initial = np.concatenate([centers.flatten(), radii])\n\n    # --- Step 2: Analyze KKT multipliers to find the top constraint ---\n    print(\"Step 2: Analyzing KKT multipliers...\")\n    \n    num_non_overlap = n * (n - 1) // 2\n    top_constraint_index = np.argmax(kkt_multipliers)\n    \n    x_nudged = x_initial.copy()\n    nudge_strength = 1e-5 # Hyperparameter defined in reflection\n\n    if top_constraint_index < num_non_overlap:\n        # It's a non-overlap constraint\n        # We need to map the flat index back to (i, j)\n        k = 0\n        i, j = -1, -1\n        for i_ in range(n):\n            for j_ in range(i_ + 1, n):\n                if k == top_constraint_index:\n                    i, j = i_, j_\n                    break\n                k += 1\n            if i != -1:\n                break\n        \n        print(f\"Top constraint is non-overlap between circles {i} and {j} (KKT value: {kkt_multipliers[top_constraint_index]})\")\n        \n        # --- Step 3a: Apply Nudge for non-overlap ---\n        print(f\"Step 3a: Applying nudge of strength {nudge_strength} to circles {i} and {j}.\")\n        center_i = x_nudged[2*i : 2*i+2]\n        center_j = x_nudged[2*j : 2*j+2]\n        \n        direction_vec = center_i - center_j\n        norm = np.linalg.norm(direction_vec)\n        if norm > 1e-9:\n            unit_vec = direction_vec / norm\n            x_nudged[2*i : 2*i+2] += unit_vec * nudge_strength\n            x_nudged[2*j : 2*j+2] -= unit_vec * nudge_strength\n        \n    else:\n        # It's a boundary constraint\n        boundary_index = top_constraint_index - num_non_overlap\n        circle_idx = boundary_index % n\n        boundary_type = boundary_index // n # 0:x_min, 1:x_max, 2:y_min, 3:y_max\n        \n        print(f\"Top constraint is a boundary for circle {circle_idx} (KKT value: {kkt_multipliers[top_constraint_index]})\")\n\n        # --- Step 3b: Apply Nudge for boundary ---\n        print(f\"Step 3b: Applying nudge of strength {nudge_strength} to circle {circle_idx}.\")\n        if boundary_type == 0: # x_min\n            x_nudged[2*circle_idx] += nudge_strength\n            print(\"Nudging away from x_min wall.\")\n        elif boundary_type == 1: # x_max\n            x_nudged[2*circle_idx] -= nudge_strength\n            print(\"Nudging away from x_max wall.\")\n        elif boundary_type == 2: # y_min\n            x_nudged[2*circle_idx+1] += nudge_strength\n            print(\"Nudging away from y_min wall.\")\n        else: # y_max\n            x_nudged[2*circle_idx+1] -= nudge_strength\n            print(\"Nudging away from y_max wall.\")\n\n    # --- Step 4: Re-optimize from the nudged position ---\n    print(\"Step 4: Re-optimizing from the nudged configuration using SLSQP...\")\n    epsilon = 1e-9\n    \n    def make_slsqp_constraints(x_vec):\n        constraints = []\n        for i in range(n):\n            for j in range(i + 1, n):\n                constraints.append({'type': 'ineq', 'fun': lambda x, i=i, j=j: np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2) - (x[2*n+i] + x[2*n+j])**2 - epsilon})\n        for i in range(n):\n            constraints.extend([\n                {'type': 'ineq', 'fun': lambda x, i=i: x[2*i] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: x[2*i+1] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i+1] - x[2*n+i] - epsilon}\n            ])\n        return constraints\n\n    bounds = Bounds([0]* (2*n) + [0.001]*n, [1]* (2*n) + [0.5]*n)\n    \n    def objective(x):\n        return -np.sum(x[2*n:])\n\n    result = minimize(objective, x_nudged, method='SLSQP', bounds=bounds,\n                      constraints=make_slsqp_constraints(x_nudged), options={'maxiter': 200, 'disp': True})\n\n    final_params = result.x\n    final_centers = final_params[:2*n].reshape(n, 2)\n    final_radii = final_params[2*n:]\n    \n    print(f\"Re-optimization complete. Final score: {-result.fun}\")\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1761097223.3995202,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6261254530491613,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading SOTA packing and KKT data...\nArtifacts loaded successfully.\nStep 2: Analyzing KKT multipliers...\nTop constraint is non-overlap between circles 9 and 15 (KKT value: 0.03947392753788541)\nStep 3a: Applying nudge of strength 1e-05 to circles 9 and 15.\nStep 4: Re-optimizing from the nudged configuration using SLSQP...\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.6261254530491613\n            Iterations: 1\n            Function evaluations: 80\n            Gradient evaluations: 1\nRe-optimization complete. Final score: 2.6261254530491613\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.626125",
+      "evaluation_timestamp": 1761097225.9825835,
+      "evaluation_datetime": "2025-10-22T09:40:25.982587"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6261254530491613,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761097226.011216,
+    "version_notified": "original",
+    "message": "Your research submission 'Proof-of-Concept: KKT-Guided Nudge on SOTA Packing' (ID: 1236) has been evaluated.\n\n**Score:** 2.6261254530491613\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.626125\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading SOTA packing and KKT data...\nArtifacts loaded successfully.\nStep 2: Analyzing KKT multipliers...\nTop constraint is non-overlap between circles 9 and 15 (KKT value: 0.03947392753788541)\nStep 3a: Applying nudge of strength 1e-05 to circles 9 and 15.\nStep 4: Re-optimizing from the nudged configuration using SLSQP...\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.6261254530491613\n            Iterations: 1\n            Function evaluations: 80\n            Gradient evaluations: 1\nRe-optimization complete. Final score: 2.6261254530491613\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

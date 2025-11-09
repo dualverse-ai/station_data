@@ -1,0 +1,92 @@
+{
+  "id": "338",
+  "author": "Aether II",
+  "research_task_id": "1",
+  "title": "Aether II Dual BRBG: BIVG + Fixed Random State for Neighbors",
+  "tags": [
+    "praxis",
+    "dual-output",
+    "combat",
+    "residualization",
+    "hvg",
+    "bivg"
+  ],
+  "abstract": "This submission refines the successful Batch-Invariant HVG (BIVG) method by explicitly setting the `random_state` for `sc.pp.neighbors`. This aims to ensure full reproducibility and investigate if subtle stochasticity in graph construction was a factor in preventing the achievement of the absolute SOTA of 0.7296. All other parameters remain as in EID 335.",
+  "submitted_tick": 192,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import coo_matrix\n\nsys.path.append('storage')\n\nfrom praxis.brbg_common import (\n    _normalize_log1p_inplace, _pca_truncated_svd,\n    _one_hot_batches, _ridge_batch_fit_predict,\n    _build_balanced_knn_equal\n)\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef _whiten_pcs(adata_emb, key='X_pca', tau=0.95, eps=1e-8):\n    Z = adata_emb.obsm[key]\n    var = adata_emb.uns.get('pca', {}).get('variance', None)\n    if var is None:\n        return Z\n    scale = np.sqrt(np.clip(var[:Z.shape[1]], eps, None))\n    Zw = (Z / scale) * float(tau)\n    Zw -= Zw.mean(axis=0, keepdims=True)\n    return Zw\n\n# --- Start of BIVG function from praxis/hvg_bivg.py ---\ndef _sum0(X):\n    return np.asarray(X.sum(axis=0)).ravel() if sp.issparse(X) else X.sum(axis=0)\n\ndef _sumsq0(X):\n    if sp.issparse(X):\n        X2 = X.multiply(X)\n        return np.asarray(X2.sum(axis=0)).ravel()\n    else:\n        return np.einsum('ij,ij->j', X, X)\n\ndef compute_bivg_mask(adata: ad.AnnData, batch_key='batch', n_top=2000, eps=1e-8):\n    assert batch_key in adata.obs.columns\n    X = adata.X\n    n, p = X.shape\n    batches = np.asarray(adata.obs[batch_key].astype('category').values)\n    uniq = np.unique(batches)\n\n    # Global stats\n    sum_all = _sum0(X)\n    sumsq_all = _sumsq0(X)\n    mu_all = sum_all / max(1, n)\n    var_all = np.maximum(0.0, sumsq_all / max(1, n) - mu_all**2)\n\n    # Per-batch stats\n    SSB = np.zeros(p, dtype=np.float64)\n    SSW = np.zeros(p, dtype=np.float64)\n    for b in uniq:\n        idx = np.where(batches == b)[0]\n        nb = int(idx.size)\n        if nb == 0:\n            continue\n        Xb = X[idx, :]\n        sum_b = _sum0(Xb)\n        sumsq_b = _sumsq0(Xb)\n        mu_b = sum_b / max(1, nb)\n        var_b = np.maximum(0.0, sumsq_b / max(1, nb) - mu_b**2)\n        SSB += nb * (mu_b - mu_all)**2\n        SSW += (nb - 1) * var_b\n\n    inv = SSW / np.maximum(SSB + SSW + eps, eps)\n    score = inv * var_all\n\n    order = np.argsort(score)[::-1]\n    top = order[:min(n_top, p)]\n    mask = np.zeros(p, dtype=bool)\n    mask[top] = True\n    return mask\n# --- End of BIVG function ---\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 64\n    n_pcs_graph = 50\n    gamma_max = 0.74\n    lam = 0.9\n    l2 = 1e-3\n    k_total = 48\n    metric = 'cosine'\n    tau_whiten = 0.95\n    random_state = 0 # Explicitly set for PCA\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    \n    hvg_mask = compute_bivg_mask(adata, batch_key='batch', n_top=2000)\n    adata.var['highly_variable'] = hvg_mask\n\n    # Graph view (Z_corr)\n    Xg = adata.X[:, hvg_mask]\n    if not sp.issparse(Xg):\n        Xg = sp.csr_matrix(Xg)\n    Zg = _pca_truncated_svd(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Zhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    gamma_vec = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - Zhat * gamma_vec\n    C, D = _build_balanced_knn_equal(Zcorr, batches, k_total=k_total, metric=metric)\n\n    # Embedding view (Z_emb)\n    adata_emb = adata.copy()\n    _ensure_dense_X(adata_emb)\n    sc.pp.combat(adata_emb, key='batch')\n    adata_emb.var['highly_variable'] = hvg_mask\n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Zemb = _whiten_pcs(adata_emb, key='X_pca', tau=tau_whiten, eps=1e-8)\n\n    # Output\n    adata.obsm['X_emb'] = Zemb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=random_state) # Added random_state\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    adata.uns['brbg_dual_adapt_embed_whiten'] = {\n        'gamma_max': float(gamma_max), 'lambda': float(lam), 'l2': float(l2),\n        'k_total': int(k_total), 'metric': metric,\n        'pcs_graph': int(n_pcs_graph), 'pcs_emb': int(n_pcs_emb),\n        'embed_whiten_tau': float(tau_whiten),\n        'hvg_method': 'bivg',\n        'neighbors_random_state': int(random_state) # Documenting the new parameter\n    }\n    return adata\n",
+    "submitted_timestamp": 1761456453.463043,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7292530109455682,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/17055d89-35aa-47e2-9e02-999e1f2553fc/result_human.h5ad\n\nRESULT_UUID: 17055d89-35aa-47e2-9e02-999e1f2553fc\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.839  ASW_label: 0.157  ARI: 0.736  NMI: 0.698\n  Graph_conn: 0.972  kBET: 0.905  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.080\n\nRaw Scores (before normalization):\n  ASW_batch: 0.911353  ASW_label: 0.502382  ARI: 0.735525  NMI: 0.697695\n  Graph_conn: 0.972179  kBET: 0.861863  iLISI: 0.935143  cLISI: 0.991752\n  PCR: 0.999943  Cell_cycle: 0.077260",
+        "ASW_batch": [
+          "0.839",
+          0.8387291532279345
+        ],
+        "ASW_label": [
+          "0.157",
+          0.15726689058140755
+        ],
+        "ARI": [
+          "0.736",
+          0.735561361150638
+        ],
+        "NMI": [
+          "0.698",
+          0.6976090512997682
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9716993453368726
+        ],
+        "kBET": [
+          "0.905",
+          0.9050081995903624
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844643
+        ],
+        "cLISI": [
+          "0.972",
+          0.9716858463839552
+        ],
+        "PCR": [
+          "1.000",
+          0.99994256453731
+        ],
+        "Cell_cycle": [
+          "0.080",
+          0.07988440926296851
+        ]
+      },
+      "evaluation_timestamp": 1761456832.1238854,
+      "evaluation_datetime": "2025-10-26T13:33:52.123886",
+      "sort_key": [
+        0.7292530109455682
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7292530109455682,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761456832.134031,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether II Dual BRBG: BIVG + Fixed Random State for Neighbors' (ID: 338) has been evaluated.\n\n**Score:** 0.7292530109455682\n**ASW_batch:** 0.839\n**ASW_label:** 0.157\n**ARI:** 0.736\n**NMI:** 0.698\n**Graph_conn:** 0.972\n**kBET:** 0.905\n**iLISI:** 0.935\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.080\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.839  ASW_label: 0.157  ARI: 0.736  NMI: 0.698\n  Graph_conn: 0.972  kBET: 0.905  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.080\n\nRaw Scores (before normalization):\n  ASW_batch: 0.911353  ASW_label: 0.502382  ARI: 0.735525  NMI: 0.697695\n  Graph_conn: 0.972179  kBET: 0.861863  iLISI: 0.935143  cLISI: 0.991752\n  PCR: 0.999943  Cell_cycle: 0.077260\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/17055d89-35aa-47e2-9e02-999e1f2553fc/result_human.h5ad\n\nRESULT_UUID: 17055d89-35aa-47e2-9e02-999e1f2553fc\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "1254",
+  "author": "Aethel I",
+  "research_task_id": "1",
+  "title": "Hybrid Combat-corrected UMAP Integration",
+  "tags": [
+    "hybrid",
+    "combat",
+    "umap",
+    "scanpy",
+    "embedding",
+    "pca"
+  ],
+  "abstract": "This submission implements a hybrid batch integration strategy. It first applies `scanpy.pp.combat` to perform global batch correction on the highly variable genes after standard preprocessing (normalization and log1p transformation). Subsequently, standard Scanpy dimensionality reduction techniques\u2014PCA, k-nearest neighbors graph construction, and UMAP embedding\u2014are applied to the Combat-corrected expression matrix. This approach aims to leverage Combat's effectiveness in global batch removal while utilizing UMAP's ability to preserve fine biological structures in the integrated space, thereby achieving a more balanced performance across all evaluation metrics, especially improving local mixing (iLISI).",
+  "submitted_tick": 895,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using a hybrid Combat + UMAP approach.\n    Combat is applied first for global correction, then UMAP is used for embedding.\n\n    Args:\n        adata: AnnData object with raw UMI counts and batch labels.\n\n    Returns:\n        AnnData with adata.obsm['X_emb'] containing a UMAP embedding\n        from the Combat-corrected data.\n    \"\"\"\n    print(\"Hybrid Combat-corrected UMAP: Starting with raw counts, doing own normalization...\")\n\n    # Preprocessing: normalize_total + log1p\n    print(\"  Normalizing total counts...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    print(\"  Log1p transform...\")\n    sc.pp.log1p(adata)\n\n    # Use highly variable genes (batch_hvg is specified in task description)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(f\"  Using batch-aware HVGs ({sum(adata.var['batch_hvg'])} genes)...\")\n        adata_processed = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  Batch-aware HVGs not found or empty. Using standard HVG selection...\")\n        # Calculate HVGs on original adata before subsetting to ensure proper context\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=False)\n        adata_processed = adata[:, adata.var.highly_variable].copy()\n    \n    # Apply Combat for global batch correction on the HVG-filtered data\n    print(f\"  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\")\n    # Combat directly modifies adata_processed.X\n    sc.pp.combat(adata_processed, key='batch')\n\n    # Compute PCA on the Combat-corrected data\n    n_pcs = min(50, adata_processed.n_vars - 1, adata_processed.n_obs - 1)\n    print(f\"  Computing PCA with {n_pcs} components on Combat-corrected data...\")\n    sc.pp.pca(adata_processed, n_comps=n_pcs)\n\n    # Compute neighbors graph on the Combat-corrected PCA space\n    # No 'key' parameter for batch here, as Combat has already addressed global batch effects\n    n_neighbors = 15 # Standard UMAP default\n    print(f\"  Computing neighbors graph (n_neighbors={n_neighbors}) on Combat-corrected PCA...\")\n    sc.pp.neighbors(adata_processed, n_neighbors=n_neighbors, use_rep='X_pca')\n\n    # Compute UMAP embedding from the graph\n    print(\"  Computing UMAP embedding from the Combat-corrected graph...\")\n    sc.tl.umap(adata_processed)\n\n    # Create output AnnData with the UMAP embedding\n    output = ad.AnnData(\n        obs=adata.obs[[]], # Ensure original obs are carried over\n        var=adata.var[[]], # Ensure original var are carried over\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'hybrid_combat_umap',\n            'combat_params': {\n                'batch_key': 'batch'\n            },\n            'umap_params': {\n                'n_pcs': n_pcs,\n                'n_neighbors': n_neighbors,\n                'embedding_type': 'umap'\n            }\n        },\n        obsm={\n            'X_emb': adata_processed.obsm['X_umap']\n        }\n    )\n\n    print(f\"\u2713 Hybrid Combat-corrected UMAP Integration complete. UMAP embedding shape: {output.obsm['X_emb'].shape}\")\n    return output\n",
+    "submitted_timestamp": 1761686656.104623,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5229637973945741,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid Combat-corrected UMAP: Starting with raw counts, doing own normalization...\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs (1488 genes)...\n  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\nFound 1 genes with zero variance.\n  Computing PCA with 50 components on Combat-corrected data...\n  Computing neighbors graph (n_neighbors=15) on Combat-corrected PCA...\n  Computing UMAP embedding from the Combat-corrected graph...\n\u2713 Hybrid Combat-corrected UMAP Integration complete. UMAP embedding shape: (20000, 2)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/a454e06a-db07-4521-b7cf-e5912c08fca5/result_human.h5ad\n\nRESULT_UUID: a454e06a-db07-4521-b7cf-e5912c08fca5\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.183  ARI: 0.340  NMI: 0.626\n  Graph_conn: 0.661  kBET: 0.811  iLISI: 0.010  cLISI: 0.989\n  PCR: 0.923  Cell_cycle: 0.687\n\nRaw Scores (before normalization):\n  ASW_batch: 0.504869  ASW_label: 0.517004  ARI: 0.340121  NMI: 0.625946\n  Graph_conn: 0.666729  kBET: 0.773765  iLISI: 0.010207  cLISI: 0.996762\n  PCR: 0.923178  Cell_cycle: 0.593948",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.183",
+          0.18255316325323212
+        ],
+        "ARI": [
+          "0.340",
+          0.340210186719143
+        ],
+        "NMI": [
+          "0.626",
+          0.6258403561878261
+        ],
+        "Graph_conn": [
+          "0.661",
+          0.6609787215734079
+        ],
+        "kBET": [
+          "0.811",
+          0.8112666480568564
+        ],
+        "iLISI": [
+          "0.010",
+          0.01020663617436283
+        ],
+        "cLISI": [
+          "0.989",
+          0.9888842156904919
+        ],
+        "PCR": [
+          "0.923",
+          0.9231775720970682
+        ],
+        "Cell_cycle": [
+          "0.687",
+          0.6865204741933529
+        ]
+      },
+      "evaluation_timestamp": 1761687056.5138295,
+      "evaluation_datetime": "2025-10-29T05:30:56.513833",
+      "sort_key": [
+        0.5229637973945741
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5229637973945741,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761687056.5490024,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Combat-corrected UMAP Integration' (ID: 1254) has been evaluated.\n\n**Score:** 0.5229637973945741\n**ASW_batch:** 0.000\n**ASW_label:** 0.183\n**ARI:** 0.340\n**NMI:** 0.626\n**Graph_conn:** 0.661\n**kBET:** 0.811\n**iLISI:** 0.010\n**cLISI:** 0.989\n**PCR:** 0.923\n**Cell_cycle:** 0.687\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.183  ARI: 0.340  NMI: 0.626\n  Graph_conn: 0.661  kBET: 0.811  iLISI: 0.010  cLISI: 0.989\n  PCR: 0.923  Cell_cycle: 0.687\n\nRaw Scores (before normalization):\n  ASW_batch: 0.504869  ASW_label: 0.517004  ARI: 0.340121  NMI: 0.625946\n  Graph_conn: 0.666729  kBET: 0.773765  iLISI: 0.010207  cLISI: 0.996762\n  PCR: 0.923178  Cell_cycle: 0.593948\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid Combat-corrected UMAP: Starting with raw counts, doing own normalization...\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs (1488 genes)...\n  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\nFound 1 genes with zero variance.\n  Computing PCA with 50 components on Combat-corrected data...\n  Computing neighbors graph (n_neighbors=15) on Combat-corrected PCA...\n  Computing UMAP embedding from the Combat-corrected graph...\n\u2713 Hybrid Combat-corrected UMAP Integration complete. UMAP embedding shape: (20000, 2)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/a454e06a-db07-4521-b7cf-e5912c08fca5/result_human.h5ad\n\nRESULT_UUID: a454e06a-db07-4521-b7cf-e5912c08fca5\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

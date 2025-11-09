@@ -1,0 +1,92 @@
+{
+  "id": "1479",
+  "author": "Aethel I",
+  "research_task_id": "1",
+  "title": "Aethel's SOTA Gen Test: Adaptive Local Correction on Pre-Normalized Data",
+  "tags": [
+    "sota",
+    "generalization",
+    "adaptive local correction",
+    "fwpca",
+    "brhvg",
+    "dual-path"
+  ],
+  "abstract": "This experiment serves as a generalization test for Aethel I's optimized Adaptive Local Correction SOTA pipeline (ID 1463, score 0.7454). It applies the pipeline to data sourced from `adata.layers['normalized']`, which contains pre-log-transformed counts, followed by total count re-normalization. This tests the method's robustness and general applicability to input data that has undergone a distinct initial preprocessing. The parameters used are the identified optimal settings: lam_override=0.62, delta=0.04, kdensity=18, k_total=50, and alpha_emb/g=0.5.",
+  "submitted_tick": 1051,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom typing import Tuple, Literal\n\n# --- Helper functions (from praxis_core.py and bbsg_density_adaptive.py) ---\n# Modified normalize_log1p_inplace to accept a flag for log1p application\ndef normalize_log1p_inplace_flexible(adata: ad.AnnData, target_sum: float = 1e4, apply_log1p: bool = True):\n    # For generalization test, we explicitly use adata.layers['normalized'] and bypass 'counts'\n    # For normal runs, we would check 'counts'\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    if apply_log1p:\n        sc.pp.log1p(adata)\n\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W  # Zhat\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine', delta=0.15, k_density=30, rng_seed=0):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, idx_all = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    rng = np.random.RandomState(rng_seed)\n    batch_to_indices = {}\n    nn_models = {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask])\n        nn_models[j] = nn\n    nn_dists = {}\n    nn_idx_local = {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d\n        nn_idx_local[j] = ii\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n        d_i = nn_dists[bi][i]\n        ii = nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = [(j, nn_dists[j][i][0]) for j in other_batches]\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij = nn_dists[j][i]\n            ii_j = nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n    rows = np.asarray(rows, dtype=np.int32)\n    cols = np.asarray(cols, dtype=np.int32)\n    dvals = np.asarray(dvals, dtype=np.float32)\n    C_sym, D_sym = _symmetrize_binary_with_distances(rows, cols, dvals, n)\n    return C_sym, D_sym\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    print(\"[Aethel's SOTA Gen Test] Adaptive Local Correction on Pre-Normalized Data\")\n\n    alpha_emb: float = 0.5\n    n_pcs_emb: int = 60\n    emb_n_neighbors: int = 15\n    alpha_g: float = 0.5\n    n_pcs_graph: int = 50\n    l2: float = 1e-3\n    gamma_max: float = 0.74\n    lam_override: float = 0.62 # Optimal from ID 1463\n    k_total: int = 50\n    kdensity: int = 18\n    delta: float = 0.04 # Optimal from ID 1470\n    metric: str = 'cosine'\n    cap: float = 2.0\n    rng_seed: int = 0 # Default seed\n\n    # --- Preprocessing for Generalization Test: Use adata.layers['normalized'] ---\n    print(\"  Generalization Test Preprocessing: Sourcing from adata.layers['normalized'] and re-normalizing (no log1p)...\")\n    adata.X = adata.layers['normalized'].copy() # Use pre-normalized, log-transformed data\n    normalize_log1p_inplace_flexible(adata, 1e4, apply_log1p=False) # Re-normalize total counts, skip log1p\n\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Path 1: Generate Embedding (X_emb) ---\n    print(\"  Generating Embedding (X_emb) via SOTA Embedding Path (+ FW-PCA, Combat)...\")\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    ad_pc_combat_input = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc_combat_input, key='batch')\n    X_emb_result = np.asarray(ad_pc_combat_input.X, dtype=np.float32)\n    \n    adata.obsm['X_emb'] = X_emb_result\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric, random_state=rng_seed)\n\n    # --- Path 2: Generate Graph (connectivities, distances) with Adaptive Local Correction ---\n    print(\"  Generating Graph (connectivities, distances) via SOTA Graph Path (+ FW-PCA, Adaptive Local Correction)...\")\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=rng_seed)\n\n    print(\"  Applying novel Adaptive Local Correction...\")\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    \n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric=metric, algorithm='brute')\n    nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True)\n    d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    normalized_dist = (d_k - d_min) / (d_max - d_min + 1e-8)\n    density_factor = 1.0 - normalized_dist\n    \n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    \n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n    Zcorr = Zg - (Zhat * gamma_local)\n    \n    print(f\"  Correction strength stats: Global_Gamma_Mean={np.mean(gamma_global):.3f}, Local_Gamma_Mean={np.mean(gamma_local):.3f}\")\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=kdensity,\n                                         rng_seed=rng_seed)\n\n    # --- Combine outputs into final AnnData ---\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'aethel_sota_gen_test_normalized',\n            'embedding_params': {\n                'alpha_emb': alpha_emb, 'n_pcs_emb': n_pcs_emb, 'metric': metric\n            },\n            'graph_params': {\n                'alpha_g': alpha_g, 'n_pcs_graph': n_pcs_graph, 'l2': l2,\n                'gamma_max': gamma_max, 'lam_override': lam_override,\n                'k_total': k_total, 'kdensity': kdensity, 'delta': delta,\n                'metric': metric, 'cap': cap\n            }\n        },\n        obsm={\n            'X_emb': adata.obsm['X_emb']\n        },\n        obsp={\n            'connectivities': Cg,\n            'distances': Dg\n        }\n    )\n    \n    output.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': k_total,\n            'method': 'bbsg',\n            'metric': metric,\n            'n_pcs': n_pcs_graph,\n            'k_density': kdensity,\n            'delta': delta\n        }\n    }\n\n    print(f\"\u2713 Aethel's SOTA Gen Test Complete. Embedding shape: {output.obsm['X_emb'].shape}, Graph connectivities shape: {output.obsp['connectivities'].shape}\")\n    return output\n",
+    "submitted_timestamp": 1761745939.1062634,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7189300494171358,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Aethel's SOTA Gen Test] Adaptive Local Correction on Pre-Normalized Data\n  Generalization Test Preprocessing: Sourcing from adata.layers['normalized'] and re-normalizing (no log1p)...\n  Generating Embedding (X_emb) via SOTA Embedding Path (+ FW-PCA, Combat)...\n  Generating Graph (connectivities, distances) via SOTA Graph Path (+ FW-PCA, Adaptive Local Correction)...\n  Applying novel Adaptive Local Correction...\n  Correction strength stats: Global_Gamma_Mean=0.028, Local_Gamma_Mean=0.021\n\u2713 Aethel's SOTA Gen Test Complete. Embedding shape: (20000, 60), Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e21443c6-b1ee-4cc4-bcc6-4de2042b3fc9/result_human.h5ad\n\nRESULT_UUID: e21443c6-b1ee-4cc4-bcc6-4de2042b3fc9\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.651  ASW_label: 0.241  ARI: 0.733  NMI: 0.696\n  Graph_conn: 0.961  kBET: 0.707  iLISI: 0.951  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.273\n\nRaw Scores (before normalization):\n  ASW_batch: 0.826593  ASW_label: 0.550995  ARI: 0.733339  NMI: 0.696408\n  Graph_conn: 0.961691  kBET: 0.676021  iLISI: 0.951364  cLISI: 0.992666\n  PCR: 0.999979  Cell_cycle: 0.241947",
+        "ASW_batch": [
+          "0.651",
+          0.6505698808404374
+        ],
+        "ASW_label": [
+          "0.241",
+          0.24133469963852808
+        ],
+        "ARI": [
+          "0.733",
+          0.7333754352901375
+        ],
+        "NMI": [
+          "0.696",
+          0.6963223081251497
+        ],
+        "Graph_conn": [
+          "0.961",
+          0.961030011176075
+        ],
+        "kBET": [
+          "0.707",
+          0.70725981075505
+        ],
+        "iLISI": [
+          "0.951",
+          0.951364175563464
+        ],
+        "cLISI": [
+          "0.975",
+          0.9748235571367125
+        ],
+        "PCR": [
+          "1.000",
+          0.9999793760325326
+        ],
+        "Cell_cycle": [
+          "0.273",
+          0.2732412396132705
+        ]
+      },
+      "evaluation_timestamp": 1761746388.8358157,
+      "evaluation_datetime": "2025-10-29T21:59:48.835817",
+      "sort_key": [
+        0.7189300494171358
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7189300494171358,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761746388.859249,
+    "version_notified": "original",
+    "message": "Your research submission 'Aethel's SOTA Gen Test: Adaptive Local Correction on Pre-Normalized Data' (ID: 1479) has been evaluated.\n\n**Score:** 0.7189300494171358\n**ASW_batch:** 0.651\n**ASW_label:** 0.241\n**ARI:** 0.733\n**NMI:** 0.696\n**Graph_conn:** 0.961\n**kBET:** 0.707\n**iLISI:** 0.951\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.273\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.651  ASW_label: 0.241  ARI: 0.733  NMI: 0.696\n  Graph_conn: 0.961  kBET: 0.707  iLISI: 0.951  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.273\n\nRaw Scores (before normalization):\n  ASW_batch: 0.826593  ASW_label: 0.550995  ARI: 0.733339  NMI: 0.696408\n  Graph_conn: 0.961691  kBET: 0.676021  iLISI: 0.951364  cLISI: 0.992666\n  PCR: 0.999979  Cell_cycle: 0.241947\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Aethel's SOTA Gen Test] Adaptive Local Correction on Pre-Normalized Data\n  Generalization Test Preprocessing: Sourcing from adata.layers['normalized'] and re-normalizing (no log1p)...\n  Generating Embedding (X_emb) via SOTA Embedding Path (+ FW-PCA, Combat)...\n  Generating Graph (connectivities, distances) via SOTA Graph Path (+ FW-PCA, Adaptive Local Correction)...\n  Applying novel Adaptive Local Correction...\n  Correction strength stats: Global_Gamma_Mean=0.028, Local_Gamma_Mean=0.021\n\u2713 Aethel's SOTA Gen Test Complete. Embedding shape: (20000, 60), Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e21443c6-b1ee-4cc4-bcc6-4de2042b3fc9/result_human.h5ad\n\nRESULT_UUID: e21443c6-b1ee-4cc4-bcc6-4de2042b3fc9\n\n\nSTDERR:\n\n```"
+  }
+}

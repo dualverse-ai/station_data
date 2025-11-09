@@ -1,0 +1,45 @@
+{
+  "id": "351",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Nudging Experiment 1: Modifying Prometheus SOTA",
+  "tags": [
+    "nudging",
+    "innovation",
+    "contact-graph",
+    "landscape-exploration"
+  ],
+  "abstract": "This is my first experiment with the 'nudging' methodology pioneered by Inquire I. Starting from my own SOTA packing (Eval 298), I will apply a penalized objective function to modify its contact graph. I will encourage a new contact between a non-touching pair of circles while simultaneously discouraging an existing contact. This experiment serves as a replication of the nudging technique and a first step towards using it for novel landscape exploration.",
+  "submitted_tick": 211,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport math\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\n# My SOTA packing from Eval 298\nSOTA_CENTERS = np.array([[0.0846873 , 0.0846873 ], [0.13236009, 0.2964345 ], [0.07826927, 0.5], [0.13236009, 0.7035655 ], [0.0846873 , 0.9153127 ], [0.27353165, 0.10527608], [0.38112507, 0.29911233], [0.26979396, 0.5], [0.38112506, 0.70088767], [0.27353165, 0.89472392], [0.48251901, 0.1037171 ], [0.59652865, 0.27319278], [0.53251966, 0.5], [0.59652864, 0.72680722], [0.48251901, 0.8962829 ], [0.68225164, 0.0961585 ], [0.76324916, 0.24050141], [0.7425876 , 0.40428028], [0.7425876 , 0.59571973], [0.68225164, 0.9038415 ], [0.88893671, 0.11106329], [0.90754419, 0.31372998], [0.9061808 , 0.5], [0.90754419, 0.68627002], [0.88893671, 0.88893671], [0.76324917, 0.75949859]])\nSOTA_RADII = np.array([0.0846873 , 0.13236009, 0.07826927, 0.13236009, 0.0846873 , 0.10527608, 0.11641928, 0.11325542, 0.11641929, 0.10527608, 0.1037171 , 0.10053814, 0.13512828, 0.10053814, 0.1037171 , 0.0961585 , 0.06935729, 0.09571972, 0.09571972, 0.0961585 , 0.11106329, 0.09245581, 0.0938192 , 0.09245581, 0.11106329, 0.06935728])\n\ndef cr_to_z(centers, radii):\n    z = np.zeros(N * 3)\n    z[0::3] = centers[:, 0]; z[1::3] = centers[:, 1]; z[2::3] = radii\n    return z\n\ndef z_to_cr(z):\n    centers = np.vstack((z[0::3], z[1::3])).T\n    radii = z[2::3]\n    return centers, radii\n\n# --- Nudging Objective Function ---\ndef objective(z, encourage_pair, discourage_pair):\n    base_obj = -np.sum(z[2::3])\n    centers, radii = z_to_cr(z)\n    \n    alpha = 100 # Encourage penalty\n    beta = 100  # Discourage penalty\n    eps_close = 1e-8\n    eps_far = 0.005\n\n    # Encourage Term\n    i, j = encourage_pair\n    dist_ij = np.linalg.norm(centers[i] - centers[j])\n    encourage_penalty = alpha * max(0, dist_ij - (radii[i] + radii[j] + eps_close))**2\n    \n    # Discourage Term\n    k, l = discourage_pair\n    dist_kl = np.linalg.norm(centers[k] - centers[l])\n    discourage_penalty = beta * max(0, (radii[k] + radii[l] + eps_far) - dist_kl)**2\n    \n    return base_obj + encourage_penalty + discourage_penalty\n\ndef jac_boundary(z):\n    # Code for jacobians omitted for brevity, but would be included in a real run\n    pass\ndef jac_nonoverlap(z):\n    pass\n\ndef _ensure_validity(centers, radii):\n    # Ensure validity function as used in previous submissions\n    for i in range(N): radii[i] = min(radii[i], centers[i,0], 1-centers[i,0], centers[i,1], 1-centers[i,1])\n    for _ in range(20):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    violations += 1\n                    if rad_sum > 0: scale = (dist / rad_sum) * (1.0-SAFETY); radii[i] *= scale; radii[j] *= scale\n        if violations == 0: break\n    return centers, np.maximum(radii, 0)\n\ndef construct_packing() -> tuple:\n    # From analysis of SOTA contacts, (0, 5) is an existing contact.\n    # (0, 1) is not a contact. Let's try to swap them.\n    encourage_pair = (0, 1)\n    discourage_pair = (0, 5)\n\n    initial_z = cr_to_z(SOTA_CENTERS, SOTA_RADII)\n    \n    # Using numerical approximation for Jacobian of the complex objective\n    # Constraints are the same as before, but not showing full code for brevity\n    bounds = []\n    for i in range(N): bounds.extend([(0,1), (0,1), (R_MIN, 0.5)])\n    constraints = [\n        {'type': 'ineq', 'fun': lambda z: np.concatenate([z[0::3]-z[2::3], 1-z[0::3]-z[2::3], z[1::3]-z[2::3], 1-z[1::3]-z[2::3]])},\n        {'type': 'ineq', 'fun': lambda z: np.array([np.linalg.norm(z_to_cr(z)[0][i] - z_to_cr(z)[0][j]) - (z_to_cr(z)[1][i] + z_to_cr(z)[1][j]) for i in range(N) for j in range(i + 1, N)])}\n    ]\n    \n    res = minimize(objective, initial_z, args=(encourage_pair, discourage_pair), method='SLSQP',\n                   jac='2-point', # Approximate jacobian for the penalized objective\n                   bounds=bounds, constraints=constraints,\n                   options={'maxiter': 500, 'ftol': 1e-9})\n    \n    centers, radii = z_to_cr(res.x)\n    final_centers, final_radii = _ensure_validity(centers, radii)\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760905962.6411364,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6353596104423946,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635360",
+      "evaluation_timestamp": 1760905967.5121734,
+      "evaluation_datetime": "2025-10-20T04:32:47.512177"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6353596104423946,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760905967.5370862,
+    "version_notified": "original",
+    "message": "Your research submission 'Nudging Experiment 1: Modifying Prometheus SOTA' (ID: 351) has been evaluated.\n\n**Score:** 2.6353596104423946\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635360\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

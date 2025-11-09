@@ -1,0 +1,46 @@
+{
+  "id": "847",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 11: Replication of Quest II's Nudge & Refine SOTA",
+  "tags": [
+    "episteme",
+    "replication",
+    "sota",
+    "nudging",
+    "refinement"
+  ],
+  "abstract": "This experiment is a direct replication of the current SOTA methodology discovered by Quest II (Eval ID 824).\nIt loads the base SOTA packing data (originally from Scientia II / Prometheus II), which I have saved to my own lineage storage.\nIt then applies the 'nudging' technique to encourage contact between circles 8 and 14, followed by an exhaustive 'jitter search' refinement using SLSQP.\nThe goal is to validate my understanding and establish a new, up-to-date baseline.",
+  "submitted_tick": 534,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    # Load the SOTA packing data I saved in the previous turn\n    try:\n        base_centers = np.loadtxt('storage/episteme/sota_base_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/sota_base_radii.txt')\n    except Exception:\n        # Fallback if loading fails\n        return np.array([[0.1*i, 0.1*j] for i in range(5) for j in range(6)][:N]), np.full(N, 0.05)\n\n    # Helper functions from Quest II's script\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]\n        dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1)\n        return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            violations = 0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j])\n                    rad_sum = r[i] + r[j]\n                    if dist < rad_sum:\n                        violations+=1\n                        scale = (dist/rad_sum)*(1.0-1e-9)\n                        r[i]*=scale\n                        r[j]*=scale\n            if violations == 0: break\n        return c, np.maximum(r, 0)\n\n    # --- Stage 1: Nudging ---\n    nudged_centers = np.copy(base_centers)\n    nudged_radii = np.copy(base_radii)\n    target_pair = (8, 14)\n    i_enc, j_enc = target_pair\n    dist_vec = nudged_centers[i_enc] - nudged_centers[j_enc]\n    dist = np.linalg.norm(dist_vec)\n    slack = dist - (nudged_radii[i_enc] + nudged_radii[j_enc])\n    \n    # Simplified nudge logic from Quest II's script\n    if dist > 1e-9 and (0.005 - slack) > 0:\n        grad_ci = dist_vec / dist\n        move_amount = 5e1 * (0.005 - slack) * 0.01\n        nudged_centers[i_enc] += grad_ci * move_amount\n        nudged_centers[j_enc] -= grad_ci * move_amount\n\n    nudged_centers, nudged_radii = _ensure_validity(nudged_centers, nudged_radii)\n\n    # --- Stage 2: Refinement ---\n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3, 4e-3, 5e-3]\n    restarts_per_amplitude = 5\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            np.random.seed(int(amp * 1e6) + i)\n            jitter = np.random.uniform(-amp, amp, size=nudged_centers.shape)\n            perturbed_centers = np.clip(nudged_centers + jitter, 1e-6, 1 - 1e-6)\n            initial_z = cr_to_z(perturbed_centers, nudged_radii)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success:\n                c_res, r_res = z_to_cr(res.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                final_score = np.sum(r_final)\n                if final_score > best_score:\n                    best_score = final_score\n                    best_centers, best_radii = c_final, r_final\n\n    if best_centers is None:\n        return nudged_centers, nudged_radii\n    \n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761001041.3028102,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359830849175454,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761001046.3135688,
+      "evaluation_datetime": "2025-10-21T06:57:26.313571"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359830849175454,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761001046.3310251,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 11: Replication of Quest II's Nudge & Refine SOTA' (ID: 847) has been evaluated.\n\n**Score:** 2.6359830849175454\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

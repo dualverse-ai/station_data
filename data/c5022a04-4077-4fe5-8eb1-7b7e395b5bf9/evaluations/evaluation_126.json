@@ -1,0 +1,45 @@
+{
+  "id": "126",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Multi-Start Hill Climbing with LP-Exact Radii Finalization",
+  "tags": [
+    "optimization",
+    "hill climbing",
+    "linear-programming",
+    "exact-radii"
+  ],
+  "abstract": "This submission significantly upgrades the `compute_max_radii` function by replacing the iterative heuristic with an exact Linear Programming (LP) solver (`scipy.optimize.linprog`). For any fixed configuration of circle centers, this LP guarantees the maximal sum of radii subject to non-overlap and boundary constraints, providing a mathematically optimal radius assignment. This LP-finalized `compute_max_radii` is then integrated into the aggressively-tuned multi-start hill-climbing framework, aiming to achieve a breakthrough in score by combining robust center optimization with exact radius determination. A fallback heuristic is included for robustness.",
+  "submitted_tick": 53,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\n\n# Original heuristic, kept as fallback\ndef compute_max_radii_heuristic(centers: np.ndarray) -> np.ndarray:\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7 \n  overlap_safety_margin = 1e-8 \n  min_positive_radius = 1e-9 \n\n  x_coords = centers[:, 0]\n  y_coords = centers[:, 1]\n  \n  radii = np.minimum.reduce([\n      x_coords - boundary_epsilon,\n      y_coords - boundary_epsilon,\n      1 - x_coords - boundary_epsilon,\n      1 - y_coords - boundary_epsilon\n  ])\n  radii = np.maximum(radii, min_positive_radius) \n\n  distances_sq = np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :])**2, axis=2)\n  np.fill_diagonal(distances_sq, np.inf)\n\n  for _ in range(40):\n    for i in range(n):\n      for j in range(i + 1, n):\n        dist_sq = distances_sq[i, j]\n        dist = np.sqrt(dist_sq) \n\n        rad_sum = radii[i] + radii[j]\n        \n        if dist < rad_sum + overlap_safety_margin: \n          if rad_sum > 0: \n            scale_factor = (dist - overlap_safety_margin) / rad_sum\n            if scale_factor > (min_positive_radius * 2 / rad_sum): \n              radii[i] *= scale_factor\n              radii[j] *= scale_factor\n            else: \n                radii[i] = min_positive_radius\n                radii[j] = min_positive_radius\n          else: \n              radii[i] = min_positive_radius\n              radii[j] = min_positive_radius\n\n  return np.maximum(radii, min_positive_radius)\n\n\ndef compute_max_radii(centers: np.ndarray) -> np.ndarray:\n  \"\"\"\n  Computes the maximum possible radii for a given set of circle centers\n  using Linear Programming (LP).\n\n  Args:\n    centers: (n, 2) array of (x, y) coordinates in [0, 1] x [0, 1].\n\n  Returns:\n    radii: (n,) array of non-negative radii, or fallback to heuristic if LP fails.\n  \"\"\"\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7\n  min_positive_radius = 1e-9\n\n  # Objective: Maximize sum(radii), so minimize -sum(radii)\n  c = -np.ones(n)\n\n  A_ub = [] # Inequality constraint matrix\n  b_ub = [] # Inequality constraint vector\n\n  # 1. Boundary constraints: r_i <= D\n  for i in range(n):\n      x, y = centers[i]\n      \n      # r_i <= x_i - boundary_epsilon\n      row_x1 = np.zeros(n)\n      row_x1[i] = 1\n      A_ub.append(row_x1)\n      b_ub.append(x - boundary_epsilon)\n\n      # r_i <= y_i - boundary_epsilon\n      row_y1 = np.zeros(n)\n      row_y1[i] = 1\n      A_ub.append(row_y1)\n      b_ub.append(y - boundary_epsilon)\n\n      # r_i <= 1 - x_i - boundary_epsilon\n      row_x2 = np.zeros(n)\n      row_x2[i] = 1\n      A_ub.append(row_x2)\n      b_ub.append(1 - x - boundary_epsilon)\n\n      # r_i <= 1 - y_i - boundary_epsilon\n      row_y2 = np.zeros(n)\n      row_y2[i] = 1\n      A_ub.append(row_y2)\n      b_ub.append(1 - y - boundary_epsilon)\n\n  # 2. Non-overlap constraints: r_i + r_j <= dist_ij\n  distances = np.linalg.norm(centers[:, np.newaxis, :] - centers[np.newaxis, :, :], axis=2)\n\n  for i in range(n):\n      for j in range(i + 1, n): # Only consider unique pairs\n          row_overlap = np.zeros(n)\n          row_overlap[i] = 1\n          row_overlap[j] = 1\n          A_ub.append(row_overlap)\n          b_ub.append(distances[i, j])\n\n  A_ub = np.array(A_ub)\n  b_ub = np.array(b_ub)\n\n  # Bounds for radii: r_i >= min_positive_radius\n  bounds = [(min_positive_radius, None) for _ in range(n)]\n\n  res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs', options={'presolve': True}) \n\n  if res.success:\n      return np.array(res.x)\n  else:\n      # Fallback to heuristic if LP solver fails (e.g., infeasible solution, numerical issues)\n      print(f\"LP failed for current centers: {res.message}. Falling back to heuristic.\")\n      return compute_max_radii_heuristic(centers)\n\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 32 circles in the unit square using an aggressively\n    tuned multi-start hill-climbing optimization approach, with LP-exact\n    radii finalization.\n\n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (32, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (32,) with radius of each circle\n    \"\"\"\n    n = 32\n    \n    # Multi-Start Hill Climbing Parameters (Aggressively Tuned)\n    num_restarts = 10 # Increased number of independent hill-climbing runs\n    num_iterations_per_run = 2000 # Increased iterations for each hill-climbing run\n    perturbation_strength = 0.01 # Standard deviation for Gaussian perturbation\n    clip_margin = 1e-7 # Margin for clipping centers\n\n    global_best_score = -np.inf\n    global_best_centers = None\n    global_best_radii = None\n\n    for restart_idx in range(num_restarts):\n        # Initialize centers randomly for each restart\n        current_centers = np.random.rand(n, 2)\n        # Use LP-based compute_max_radii\n        current_radii = compute_max_radii(current_centers)\n        current_score = np.sum(current_radii)\n\n        # Local hill-climbing optimization for this restart\n        for _ in range(num_iterations_per_run):\n            candidate_centers = current_centers + np.random.normal(0, perturbation_strength, (n, 2))\n            candidate_centers = np.clip(candidate_centers, clip_margin, 1 - clip_margin) \n\n            # Use LP-based compute_max_radii for candidate\n            candidate_radii = compute_max_radii(candidate_centers)\n            candidate_score = np.sum(candidate_radii)\n\n            if candidate_score > current_score:\n                current_score = candidate_score\n                current_centers = candidate_centers\n                current_radii = candidate_radii \n\n        # Update global best if this restart yielded a better score\n        if current_score > global_best_score:\n            global_best_score = current_score\n            global_best_centers = current_centers\n            global_best_radii = current_radii\n            \n    return global_best_centers, global_best_radii\n",
+    "submitted_timestamp": 1760794018.0526824,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.3782265831318257,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.378227",
+      "evaluation_timestamp": 1760794089.3676488,
+      "evaluation_datetime": "2025-10-18T21:28:09.367652"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.3782265831318257,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760794089.3923397,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start Hill Climbing with LP-Exact Radii Finalization' (ID: 126) has been evaluated.\n\n**Score:** 2.3782265831318257\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.378227\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

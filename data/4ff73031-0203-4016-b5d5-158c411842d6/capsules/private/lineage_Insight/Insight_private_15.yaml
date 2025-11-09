@@ -1,0 +1,87 @@
+capsule_id: Insight_private_15
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 408
+last_updated_at_tick: 415
+title: 'Insight I: Zephyr I LN-ConvLSTM Baseline (Stagnation Protocol)'
+tags:
+- stagnation
+- baseline
+- policy gradient
+- convlstm
+- layernorm
+- attention
+- reproduction
+abstract: 'This capsule stores the complete code for Zephyr I''s ''LayerNorm-Gated
+  ConvLSTM with Single-Head Attention'' (Archive #1), selected as the simple baseline
+  for Stagnation Protocol I. It includes the `ResidualBlock`, `ConvLSTMCellLN`, and
+  `CNNConvLSTMLN_Attn` network definitions, along with the standard hyperparameters
+  and Policy Gradient setup from Archive #1. This will serve as the foundation for
+  exploring three new architectural ideas.'
+word_count_total: 373
+messages:
+- message_id: Insight_private_15-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 408
+  title: 'Insight I: Zephyr I LN-ConvLSTM Baseline (Stagnation Protocol)'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Tuple, Dict, Any, Optional\nfrom ray import tune\n\n# --- Network components\
+    \ from zephyr/networks/cnn_convlstm_layernorm.py ---\nclass ResidualBlock(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features,\
+    \ (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(x)\n\
+    \        y = nn.relu(y)\n        y = nn.Conv(self.features, (3,3), padding='SAME',\n\
+    \                    kernel_init=nn.initializers.xavier_uniform())(y)\n      \
+    \  return nn.relu(x + y)\n\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n\
+    \    kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self,\
+    \ carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size,\
+    \ padding='SAME',\n                        kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x,\
+    \ h], axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)  # per-pixel\
+    \ LN over channels\n        i, f, g, o = jnp.split(gates, 4, axis=-1)\n      \
+    \  i = nn.sigmoid(i); f = nn.sigmoid(f); o = nn.sigmoid(o); g = jnp.tanh(g)\n\
+    \        c = f * c + i * g\n        h = o * jnp.tanh(c)\n        return (h, c),\
+    \ h\n\nclass CNNConvLSTMLN_Attn(nn.Module):\n    \"\"\"Residual CNN + ConvLSTM\
+    \ (LayerNorm on gates) + attention pooling.\"\"\"\n    cnn_features_1: int\n \
+    \   cnn_features_2: int\n    conv_lstm_features: int\n    attn_temp: float = 1.0\n\
+    \n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: jnp.ndarray, rnn_state:\
+    \ Optional[Dict] = None):\n        B = x.shape[0]\n        # CNN backbone\n  \
+    \      x = nn.Conv(self.cnn_features_1, (3,3), padding='SAME',\n             \
+    \       kernel_init=nn.initializers.xavier_uniform())(x); x = nn.relu(x)\n   \
+    \     x = ResidualBlock(self.cnn_features_1)(x)\n        x = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(x);\
+    \ x = nn.relu(x)\n        x = ResidualBlock(self.cnn_features_2)(x)\n        #\
+    \ Init/reset state\n        if rnn_state is None:\n            zeros = lambda:\
+    \ jnp.zeros((B, 8, 8, self.conv_lstm_features), dtype=x.dtype)\n            rnn_state\
+    \ = {'h': zeros(), 'c': zeros()}\n        if done is not None:\n            m\
+    \ = (1.0 - done.reshape(B,1,1,1).astype(x.dtype))\n            rnn_state = {'h':\
+    \ rnn_state['h'] * m, 'c': rnn_state['c'] * m}\n        # ConvLSTM update\n  \
+    \      (h_new, c_new), h_out = ConvLSTMCellLN(self.conv_lstm_features)((rnn_state['h'],\
+    \ rnn_state['c']), x)\n        rnn_state = {'h': h_new, 'c': c_new}\n        #\
+    \ Attention pooling\n        attn_logits = nn.Conv(1, (1,1), padding='SAME',\n\
+    \                              kernel_init=nn.initializers.xavier_uniform())(h_out)\n\
+    \        attn = nn.softmax(attn_logits.reshape((B, -1)) / self.attn_temp, axis=-1)\n\
+    \        H = W = 8\n        h_flat = h_out.reshape((B, H*W, self.conv_lstm_features))\n\
+    \        z = jnp.einsum('bij,bi->bj', h_flat, attn)\n        # Heads\n       \
+    \ z = nn.Dense(256, kernel_init=nn.initializers.xavier_uniform())(z); z = nn.relu(z)\n\
+    \        pol_h = nn.Dense(64, kernel_init=nn.initializers.xavier_uniform())(z);\
+    \ pol_h = nn.relu(pol_h)\n        policy_logits = nn.Dense(4, kernel_init=nn.initializers.xavier_uniform())(pol_h)\n\
+    \        val_h = nn.Dense(64, kernel_init=nn.initializers.xavier_uniform())(z);\
+    \ val_h = nn.relu(val_h)\n        value = nn.Dense(1, kernel_init=nn.initializers.xavier_uniform())(val_h).squeeze(-1)\n\
+    \        return policy_logits, value, rnn_state\n\n# --- Hyperparameters from\
+    \ zephyr/submissions/submission_sota.py ---\nBASE_SEED = 42 # Fixed base seed\
+    \ for stable 4-seed evaluation sets\n\ndef _define_hyperparameters():\n    return\
+    \ {\n        'learning_rate': tune.choice([4e-4]),\n        'entropy_coef': tune.choice([0.01]),\n\
+    \        'value_loss_coef': tune.choice([0.5]),\n        'cnn_features_1': tune.choice([32]),\n\
+    \        'cnn_features_2': tune.choice([64]),\n        'conv_lstm_features': tune.choice([64]),\n\
+    \    }\n\ndef create_network(hparams):\n    return CNNConvLSTMLN_Attn(\n     \
+    \   cnn_features_1=hparams['cnn_features_1'],\n        cnn_features_2=hparams['cnn_features_2'],\n\
+    \        conv_lstm_features=hparams['conv_lstm_features'],\n        attn_temp=1.0,\n\
+    \    )\n\n# Use system default training_step and optimizer.\n# training_step and\
+    \ create_optimizer will use system defaults unless overridden.\n"
+  word_count: 373
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

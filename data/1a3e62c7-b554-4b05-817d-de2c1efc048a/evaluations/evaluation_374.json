@@ -1,0 +1,46 @@
+{
+  "id": "374",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Utility: Re-emit Jaccards Prometheus_298 vs Noesis_243 and Scientia_259 (tol=1e-8)",
+  "tags": [
+    "utility",
+    "analysis-only",
+    "jaccard",
+    "nmap",
+    "reproducibility"
+  ],
+  "abstract": "Compute and write dedicated Jaccard files for Prometheus (Eval 298) vs Noesis_243 and Scientia_259 at tol=1e-8 using published active-set exports only. No eval-code peer reads of packings. Returns Noesis packing unchanged.",
+  "submitted_tick": 223,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\n\nN = 26\n\n# -------- IO helpers --------\ndef read_txt_matrix(path, shape):\n    try:\n        arr = np.loadtxt(path)\n        arr = np.array(arr, dtype=float).reshape(shape)\n        return arr\n    except Exception:\n        return None\n\ndef load_noesis_pack():\n    c = read_txt_matrix('storage/noesis/latest_centers.txt', (N, 2))\n    r = read_txt_matrix('storage/noesis/latest_radii.txt', (N,))\n    if c is not None and r is not None:\n        return c, r\n    # Fallback: grid + hole seed (tiny margins)\n    r0 = 0.1 - 1e-8\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    centers = [[x, y] for x in coords for y in coords]  # 25\n    hole = np.array([0.2, 0.2])\n    d = float(np.linalg.norm(hole - np.array([0.1, 0.1])))\n    r_hole = d - r0 - 1e-8\n    radii = [r0]*25 + [r_hole]\n    return np.array(centers, float), np.array(radii, float)\n\n# -------- parsing and canonicalization --------\ndef read_summary_index_base(folder):\n    # Prefer tol1e8, but accept tol1e08\n    for name in ['summary_tol1e8.json', 'summary_tol1e08.json']:\n        p = os.path.join(folder, name)\n        if os.path.isfile(p):\n            try:\n                with open(p, 'r') as f:\n                    js = json.load(f)\n                ib = js.get('index_base', None)\n                return 0 if ib == 0 else (1 if ib == 1 else None)\n            except Exception:\n                pass\n    return None\n\ndef canonicalize_label(lbl):\n    # Accept xL/xR/yB/yT or xmin/xmax/ymin/ymax\n    m = {'xmin':'xL','xmax':'xR','ymin':'yB','ymax':'yT',\n         'xl':'xL','xr':'xR','yb':'yB','yt':'yT',\n         'xL':'xL','xR':'xR','yB':'yB','yT':'yT'}\n    s = str(lbl).strip()\n    return m.get(s, s)\n\ndef read_boundary_csv(folder):\n    # Try both suffix styles\n    for fname in ['active_boundary_tol1e8.csv', 'active_boundary_tol1e08.csv']:\n        path = os.path.join(folder, fname)\n        if os.path.isfile(path):\n            break\n    else:\n        return set()\n    s = read_summary_index_base(folder)\n    S = set()\n    try:\n        with open(path, 'r') as f:\n            for ln, line in enumerate(f):\n                if ln == 0 and not line[:1].isdigit():\n                    continue  # header\n                parts = line.strip().split(',')\n                if len(parts) < 2:\n                    continue\n                i_raw, lbl_raw = parts[0].strip(), parts[1].strip()\n                if len(i_raw) == 0:\n                    continue\n                i = int(i_raw)\n                if s is None:\n                    # auto-detect 0 vs 1-based\n                    if i >= N:  # e.g., 26\n                        i -= 1\n                elif s == 1:\n                    i -= 1\n                lbl = canonicalize_label(lbl_raw)\n                if 0 <= i < N:\n                    S.add((i, lbl))\n    except Exception:\n        return set()\n    return S\n\ndef read_pairs_csv(folder):\n    for fname in ['active_pairs_tol1e8.csv', 'active_pairs_tol1e08.csv']:\n        path = os.path.join(folder, fname)\n        if os.path.isfile(path):\n            break\n    else:\n        return set()\n    s = read_summary_index_base(folder)\n    P = set()\n    try:\n        with open(path, 'r') as f:\n            for ln, line in enumerate(f):\n                if ln == 0 and not line[:1].isdigit():\n                    continue  # header\n                parts = line.strip().split(',')\n                if len(parts) < 2:\n                    continue\n                a_raw, b_raw = parts[0].strip(), parts[1].strip()\n                if not a_raw or not b_raw:\n                    continue\n                a = int(a_raw); b = int(b_raw)\n                if s is None:\n                    if max(a, b) >= N:\n                        a -= 1; b -= 1\n                elif s == 1:\n                    a -= 1; b -= 1\n                if a == b:\n                    continue\n                i, j = (a, b) if a < b else (b, a)\n                if 0 <= i < N and 0 <= j < N:\n                    P.add((i, j))\n    except Exception:\n        return set()\n    return P\n\ndef jaccard(A, B):\n    inter = len(A & B)\n    union = len(A | B)\n    J = (inter / union) if union > 0 else 0.0\n    return inter, union, J\n\ndef write_jaccard(out_base, bj, pj, sizes):\n    # JSON\n    js = {\n        'tolerance': '1e-8',\n        'boundary': {\n            'intersection': bj[0], 'union': bj[1], 'jaccard': round(bj[2], 6),\n            'sizes': sizes['boundary']\n        },\n        'pairs': {\n            'intersection': pj[0], 'union': pj[1], 'jaccard': round(pj[2], 6),\n            'sizes': sizes['pairs']\n        }\n    }\n    os.makedirs(os.path.dirname(out_base), exist_ok=True)\n    with open(out_base + '.json', 'w') as f:\n        json.dump(js, f, indent=2, sort_keys=True)\n    # CSV\n    with open(out_base + '.csv', 'w') as f:\n        f.write('type,intersection,union,jaccard,|A|,|B|\\n')\n        f.write(f'boundary,{bj[0]},{bj[1]},{bj[2]:.6f},{sizes[\"boundary\"][0]},{sizes[\"boundary\"][1]}\\n')\n        f.write(f'pairs,{pj[0]},{pj[1]},{pj[2]:.6f},{sizes[\"pairs\"][0]},{sizes[\"pairs\"][1]}\\n')\n\ndef construct_packing():\n    # Folders\n    prom = 'storage/Prometheus/nmap/n26'\n    noe  = 'storage/noesis/exports/sota_243'\n    sci  = 'storage/Scientia/nmap/n26'\n\n    # Read sets (robust to suffix/indexing)\n    Bp = read_boundary_csv(prom); Pp = read_pairs_csv(prom)\n    Bn = read_boundary_csv(noe);  Pn = read_pairs_csv(noe)\n    Bs = read_boundary_csv(sci);  Ps = read_pairs_csv(sci)\n\n    # Sizes for reporting\n    sizes_pn = {'boundary': (len(Bp), len(Bn)), 'pairs': (len(Pp), len(Pn))}\n    sizes_ps = {'boundary': (len(Bp), len(Bs)), 'pairs': (len(Pp), len(Ps))}\n\n    # Compute Jaccards\n    bj_pn = jaccard(Bp, Bn); pj_pn = jaccard(Pp, Pn)\n    bj_ps = jaccard(Bp, Bs); pj_ps = jaccard(Pp, Ps)\n\n    # Write outputs\n    out_dir = 'storage/noesis/nmap'\n    write_jaccard(os.path.join(out_dir, 'jaccard_prometheus_eval298_vs_sota243_tol1e8'),\n                  bj_pn, pj_pn, sizes_pn)\n    write_jaccard(os.path.join(out_dir, 'jaccard_prometheus_eval298_vs_scientia259_tol1e8'),\n                  bj_ps, pj_ps, sizes_ps)\n\n    # Log to stdout\n    print('[JACCARD] Prometheus_298 vs Noesis_243 @1e-8:',\n          f'Boundary J={bj_pn[2]:.6f} ({bj_pn[0]}/{bj_pn[1]}),',\n          f'Pairs J={pj_pn[2]:.6f} ({pj_pn[0]}/{pj_pn[1]})')\n    print('[JACCARD] Prometheus_298 vs Scientia_259 @1e-8:',\n          f'Boundary J={bj_ps[2]:.6f} ({bj_ps[0]}/{bj_ps[1]}),',\n          f'Pairs J={pj_ps[2]:.6f} ({pj_ps[0]}/{pj_ps[1]})')\n\n    # Return Noesis pack unchanged\n    centers, radii = load_noesis_pack()\n    return centers, radii\n",
+    "submitted_timestamp": 1760908350.337757,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719600000007,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[JACCARD] Prometheus_298 vs Noesis_243 @1e-8: Boundary J=1.000000 (20/20), Pairs J=0.666667 (46/69)\n[JACCARD] Prometheus_298 vs Scientia_259 @1e-8: Boundary J=1.000000 (20/20), Pairs J=0.642857 (45/70)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760908352.484997,
+      "evaluation_datetime": "2025-10-20T05:12:32.485000"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719600000007,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760908352.6414993,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Re-emit Jaccards Prometheus_298 vs Noesis_243 and Scientia_259 (tol=1e-8)' (ID: 374) has been evaluated.\n\n**Score:** 2.6295719600000007\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[JACCARD] Prometheus_298 vs Noesis_243 @1e-8: Boundary J=1.000000 (20/20), Pairs J=0.666667 (46/69)\n[JACCARD] Prometheus_298 vs Scientia_259 @1e-8: Boundary J=1.000000 (20/20), Pairs J=0.642857 (45/70)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

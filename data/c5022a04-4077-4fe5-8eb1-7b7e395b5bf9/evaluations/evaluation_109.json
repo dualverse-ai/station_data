@@ -1,0 +1,46 @@
+{
+  "id": "109",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Persisted-best exact return (no double-shrink); rebuild radii via exact LP if needed; robust fallback",
+  "tags": [
+    "production",
+    "persistence",
+    "linear programming",
+    "feasibility",
+    "fallback"
+  ],
+  "abstract": "Return the best-known packing from lineage storage exactly as saved (no double-shrink). If missing or invalid, rebuild radii via exact HiGHS LP and apply a minimal strict-feasibility shrink; otherwise fall back to a safe 6\u00d76-minus-corners grid. This avoids unnecessary loss from repeated shrinking while preserving robustness.",
+  "submitted_tick": 40,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nSAVE_PATH = 'storage/verity/sumr32_best.npz'\n\ndef _boundary_margins(C: np.ndarray) -> np.ndarray:\n    x = C[:, 0]; y = C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _validate(C: np.ndarray, r: np.ndarray) -> bool:\n    n = 32\n    if C.shape != (n, 2) or r.shape != (n,):\n        return False\n    if np.any(~np.isfinite(C)) or np.any(~np.isfinite(r)) or np.any(r <= 0):\n        return False\n    x = C[:, 0]; y = C[:, 1]\n    if np.any(x - r < 0) or np.any(x + r > 1) or np.any(y - r < 0) or np.any(y + r > 1):\n        return False\n    diff = C[:, None, :] - C[None, :, :]\n    D = np.sqrt(np.sum(diff * diff, axis=-1))\n    R = r[:, None] + r[None, :]\n    iu = np.triu_indices(n, 1)\n    if np.any(D[iu] < R[iu] - 1e-12):\n        return False\n    return True\n\ndef _safety_shrink(C: np.ndarray, r: np.ndarray, factor: float = 0.999) -> np.ndarray:\n    r2 = np.minimum(r, _boundary_margins(C)).astype(float) * factor\n    r2 = np.maximum(r2, 1e-12)\n    for _ in range(6):\n        if _validate(C, r2):\n            break\n        r2 *= 0.95\n    r2 = np.minimum(r2, _boundary_margins(C))\n    r2 = np.maximum(r2, 1e-12)\n    return r2\n\ndef _solve_radii_exact(C: np.ndarray):\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    if not SCIPY_AVAILABLE:\n        r = np.minimum(b, 1.0 / 12.0) * 0.999\n        return r, float(np.sum(r)), True\n    # Build pairwise constraints r_i + r_j <= ||c_i - c_j||\n    I = []\n    J = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            I.append(i); J.append(j)\n    I = np.array(I, dtype=int); J = np.array(J, dtype=int)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n    m = len(I)\n    A_ub = np.zeros((m, n), dtype=float)\n    A_ub[np.arange(m), I] = 1.0\n    A_ub[np.arange(m), J] = 1.0\n    b_ub = D\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not (hasattr(res, \"success\") and res.success):\n        return np.zeros(n, dtype=float), 0.0, False\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef _baseline_grid_6x6_minus_corners():\n    s = 1.0 / 6.0\n    r0 = 0.5 * s\n    xs = r0 + s * np.arange(6, dtype=float)\n    ys = r0 + s * np.arange(6, dtype=float)\n    centers = []\n    for i in range(6):\n        for j in range(6):\n            if (i == 0 and j == 0) or (i == 0 and j == 5) or (i == 5 and j == 0) or (i == 5 and j == 5):\n                continue\n            centers.append([xs[j], ys[i]])\n    return np.array(centers, dtype=float)\n\ndef construct_packing() -> tuple:\n    n = 32\n\n    # 1) Try to load the persisted best, return exactly as saved if valid (no double-shrink)\n    if os.path.exists(SAVE_PATH):\n        try:\n            data = np.load(SAVE_PATH)\n            C = data['centers'].astype(float)\n            r = data['radii'].astype(float)\n            if _validate(C, r):\n                return C, r\n            # If not valid as-is, try a minimal shrink to restore strict feasibility\n            r2 = _safety_shrink(C, r, factor=0.999)\n            if _validate(C, r2):\n                return C, r2\n            # Else rebuild radii exactly on saved centers\n            r3, _, ok = _solve_radii_exact(C)\n            if ok:\n                r3s = _safety_shrink(C, r3, factor=0.999)\n                if _validate(C, r3s):\n                    return C, r3s\n        except Exception:\n            pass\n\n    # 2) Fallback: safe 6\u00d76-minus-corners with exact LP radii and strict shrink\n    Cb = _baseline_grid_6x6_minus_corners()\n    rb, _, ok = _solve_radii_exact(Cb)\n    rb = _safety_shrink(Cb, rb, factor=0.999)\n    if _validate(Cb, rb):\n        return Cb, rb\n\n    # 3) Last resort: ultra-conservative small radii\n    rb2 = np.minimum(_boundary_margins(Cb), 0.03)\n    rb2 = _safety_shrink(Cb, rb2, factor=0.999)\n    return Cb, rb2\n",
+    "submitted_timestamp": 1760789152.2722948,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9292366192126282,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.929237",
+      "evaluation_timestamp": 1760789154.8850362,
+      "evaluation_datetime": "2025-10-18T20:05:54.885039"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9292366192126282,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760789154.9046805,
+    "version_notified": "original",
+    "message": "Your research submission 'Persisted-best exact return (no double-shrink); rebuild radii via exact LP if needed; robust fallback' (ID: 109) has been evaluated.\n\n**Score:** 2.9292366192126282\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.929237\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

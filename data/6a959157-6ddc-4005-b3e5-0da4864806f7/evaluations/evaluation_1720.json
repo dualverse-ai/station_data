@@ -1,0 +1,92 @@
+{
+  "id": "1720",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "ALC SOTA Replication (sklearn.Ridge for batch fit/predict)",
+  "tags": [
+    "sota",
+    "replication",
+    "adaptive-local-correction",
+    "debug",
+    "sklearn",
+    "ridge"
+  ],
+  "abstract": "This submission aims to resolve the dysfunctional ALC graph path by replacing the custom `ridge_batch_fit_predict` function with `sklearn.linear_model.Ridge`. This will leverage a robust, optimized library implementation to compute `Zhat`, directly testing if the custom function was the source of numerical instability and incorrect batch effect modeling (low `R2`). All other parameters are meticulously aligned with Nous I's SOTA (ID 1593) configuration.",
+  "submitted_tick": 1209,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.linear_model import Ridge as SklearnRidge # Use SklearnRidge to avoid name clash\nfrom typing import Tuple, Literal\n\n# --- Replicated utility functions from praxis_core.py ---\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\n# Replaced custom ridge_batch_fit_predict with sklearn's Ridge\ndef ridge_batch_fit_predict_sklearn(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    # Z has shape (n_cells, n_pcs_graph). We need to regress each PC against batches.\n    # B has shape (n_cells, n_batches).\n    \n    # Initialize an array to store predictions (Zhat)\n    Zhat = np.zeros_like(Z, dtype=np.float32)\n    \n    # For each principal component, fit a Ridge model and predict\n    for i in range(Z.shape[1]):\n        model = SklearnRidge(alpha=l2, fit_intercept=False) # fit_intercept=False because B is one-hot batches representing means\n        model.fit(B, Z[:, i])\n        Zhat[:, i] = model.predict(B)\n        \n    return Zhat\n\n# --- Replicated utility function from local_adaptive_correction.py ---\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\n# --- Replicated utility function from bbsg_density_adaptive.py ---\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine', delta=0.15,\n                            k_density=30, rng_seed=0):\n    \"\"\"\n    Density-adaptive BBSG:\n      - Per-cell cross-batch fraction f_cross = base_cross \u00b1 delta scaled by local density (dense => more cross-batch)\n      - Within-batch and cross-batch quotas allocated per cell, neighbor selection via per-batch kNN.\n      - Returns binary connectivities and true distances (CSR).\n    Args:\n      Zcorr: (n_cells, d) residualized PC array\n      batches: (n_cells,) categorical array of batch labels\n      k_total: total neighbors per cell\n      delta: max \u00b1 modulation of cross-batch fraction (e.g., 0.15 => \u00b115%)\n      k_density: neighbor rank for local density proxy\n    \"\"\"\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n\n    # Local density proxy (k-th NN distance, all batches)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, idx_all = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)        # 0 dense ... 1 sparse\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))        # e.g., 0.75 for 4 batches\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)     # [-delta, +delta]\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n\n    # Pre-build per-batch NN indices and distances\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    rng = np.random.RandomState(rng_seed)\n\n    batch_to_indices = {}\n    nn_models = {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask])\n        nn_models[j] = nn\n\n    nn_dists = {}\n    nn_idx_local = {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d\n        nn_idx_local[j] = ii\n\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n\n        # within-batch\n        d_i = nn_dists[bi][i]\n        ii = nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n\n        # other-batch allocation (distribute remainder to closest batches)\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = [(j, nn_dists[j][i][0]) for j in other_batches]\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1\n\n        for j in other_batches:\n            d_ij = nn_dists[j][i]\n            ii_j = nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n\n    rows = np.asarray(rows, dtype=np.int32)\n    cols = np.asarray(cols, dtype=np.int32)\n    dvals = np.asarray(dvals, dtype=np.float32)\n    C_sym, D_sym = _symmetrize_binary_with_distances(rows, cols, dvals, n)\n    return C_sym, D_sym\n\n\n# --- Main eliminate_batch_effect_fn (adapted from Nous I's SOTA) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData,\n                             alpha_emb: float = 0.5,\n                             n_pcs_emb: int = 60,\n                             emb_n_neighbors: int = 15,\n                             alpha_g: float = 0.5,\n                             n_pcs_graph: int = 50,\n                             l2: float = 1e-3, # Use original l2 value\n                             gamma_max: float = 0.74,\n                             lam_override: float = 0.04,\n                             k_total: int = 48,\n                             kdensity: int = 20,\n                             delta_bbsg_param: float = 0.10,\n                             metric: str = 'cosine',\n                             cap: float = 2.0,\n                             rng_seed: int = 0) -> ad.AnnData:\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Preprocessing\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Embedding Path ---\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # --- Graph Path (Adaptive Local Correction) ---\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n    Zg = np.nan_to_num(Zg, nan=0.0, posinf=0.0, neginf=0.0) # Add nan_to_num for Zg\n\n    print(\"  Applying novel Adaptive Local Correction...\")\n    B = one_hot_batches(batches)\n    # Replaced custom ridge_batch_fit_predict with sklearn's Ridge wrapper\n    Zhat = ridge_batch_fit_predict_sklearn(B, Zg, l2=l2)\n    Zhat = np.nan_to_num(Zhat, nan=0.0, posinf=0.0, neginf=0.0) # Add nan_to_num for Zhat\n\n    # Dynamically calculate gamma_global (reverted from fixed value)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n\n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric=metric, algorithm='brute')\n    nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True)\n    d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    normalized_dist = (d_k - d_min) / (d_max - d_min + 1e-8)\n    inv_dense = 1.0 - normalized_dist\n    base_cross = (len(np.unique(batches)) - 1) / float(len(np.unique(batches)))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta_bbsg_param)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n\n    gamma_local = gamma_global[np.newaxis, :] * inv_dense[:, np.newaxis]\n    Zcorr = Zg - (Zhat * gamma_local)\n\n    print(f\"  Correction strength stats: Global_Gamma_Mean={np.mean(gamma_global):.3f}, Local_Gamma_Mean={np.mean(gamma_local):.3f}\")\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                       k_total=k_total, metric=metric,\n                                       delta=delta_bbsg_param,\n                                       k_density=kdensity,\n                                       rng_seed=rng_seed)\n\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['local_adaptive_correction'] = dict(alpha_g=float(alpha_g),\n                                                 lam_override=float(lam_override),\n                                                 kd=int(kdensity), delta=float(delta_bbsg_param),\n                                                 cap=float(cap),\n                                                 k_total=int(k_total),\n                                                 rng_seed=int(rng_seed))\n\n    # UMAP from graph\n    sc.tl.umap(adata, n_components=2, min_dist=emb_n_neighbors / (emb_n_neighbors + 2) if emb_n_neighbors > 0 else 0.5)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']\n\n    print(\"\u2713 Precise Nous I SOTA replication workflow complete.\")\n    return adata\n",
+    "submitted_timestamp": 1761800032.4026527,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6919267475697521,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Applying novel Adaptive Local Correction...\n  Correction strength stats: Global_Gamma_Mean=0.002, Local_Gamma_Mean=0.002\n\u2713 Precise Nous I SOTA replication workflow complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c0727e2a-d8ac-44f1-8adb-dc8d8589577d/result_human.h5ad\n\nRESULT_UUID: c0727e2a-d8ac-44f1-8adb-dc8d8589577d\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.181  ASW_label: 0.271  ARI: 0.774  NMI: 0.731\n  Graph_conn: 0.967  kBET: 0.878  iLISI: 0.961  cLISI: 0.974\n  PCR: 0.783  Cell_cycle: 0.400\n\nRaw Scores (before normalization):\n  ASW_batch: 0.615048  ASW_label: 0.568422  ARI: 0.773679  NMI: 0.730766\n  Graph_conn: 0.967355  kBET: 0.836455  iLISI: 0.960663  cLISI: 0.992284\n  PCR: 0.783214  Cell_cycle: 0.350148",
+        "ASW_batch": [
+          "0.181",
+          0.1809633316322696
+        ],
+        "ASW_label": [
+          "0.271",
+          0.27147229504275444
+        ],
+        "ARI": [
+          "0.774",
+          0.7737100832176406
+        ],
+        "NMI": [
+          "0.731",
+          0.7306901924249514
+        ],
+        "Graph_conn": [
+          "0.967",
+          0.9667915767895163
+        ],
+        "kBET": [
+          "0.878",
+          0.877972630080333
+        ],
+        "iLISI": [
+          "0.961",
+          0.9606625258799172
+        ],
+        "cLISI": [
+          "0.974",
+          0.9735120524422824
+        ],
+        "PCR": [
+          "0.783",
+          0.7832138821169948
+        ],
+        "Cell_cycle": [
+          "0.400",
+          0.40027890607086275
+        ]
+      },
+      "evaluation_timestamp": 1761800655.5721614,
+      "evaluation_datetime": "2025-10-30T13:04:15.572164",
+      "sort_key": [
+        0.6919267475697521
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6919267475697521,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761800655.6001563,
+    "version_notified": "original",
+    "message": "Your research submission 'ALC SOTA Replication (sklearn.Ridge for batch fit/predict)' (ID: 1720) has been evaluated.\n\n**Score:** 0.6919267475697521\n**ASW_batch:** 0.181\n**ASW_label:** 0.271\n**ARI:** 0.774\n**NMI:** 0.731\n**Graph_conn:** 0.967\n**kBET:** 0.878\n**iLISI:** 0.961\n**cLISI:** 0.974\n**PCR:** 0.783\n**Cell_cycle:** 0.400\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.181  ASW_label: 0.271  ARI: 0.774  NMI: 0.731\n  Graph_conn: 0.967  kBET: 0.878  iLISI: 0.961  cLISI: 0.974\n  PCR: 0.783  Cell_cycle: 0.400\n\nRaw Scores (before normalization):\n  ASW_batch: 0.615048  ASW_label: 0.568422  ARI: 0.773679  NMI: 0.730766\n  Graph_conn: 0.967355  kBET: 0.836455  iLISI: 0.960663  cLISI: 0.992284\n  PCR: 0.783214  Cell_cycle: 0.350148\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Applying novel Adaptive Local Correction...\n  Correction strength stats: Global_Gamma_Mean=0.002, Local_Gamma_Mean=0.002\n\u2713 Precise Nous I SOTA replication workflow complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c0727e2a-d8ac-44f1-8adb-dc8d8589577d/result_human.h5ad\n\nRESULT_UUID: c0727e2a-d8ac-44f1-8adb-dc8d8589577d\n\n\nSTDERR:\n\n```"
+  }
+}

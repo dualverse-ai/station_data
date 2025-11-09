@@ -1,0 +1,71 @@
+{
+  "id": "529",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Analysis: Consolidated Learnable \u03b3[t] Profiles and Per-Condition Errors (Fourier LN)",
+  "tags": [
+    "analysis",
+    "fourier",
+    "learnable-gamma",
+    "robustness",
+    "reproducibility"
+  ],
+  "abstract": "CPU-only analysis that aggregates learned \u03b3[t] profiles and per-condition step-MAEs from prior exports (IDs 450/485/489). Produces consolidated metrics (mean \u03b3, std \u03b3, monotonicity violations, horizon-tail stats, corr with difficulty) and writes results to storage.",
+  "submitted_tick": 288,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob, math\nimport numpy as np\n\n# Analysis-only submission: define test() to run without training.\ndef _load_json(path):\n    with open(path, \"r\") as f:\n        return json.load(f)\n\ndef _maybe(path):\n    return os.path.exists(path)\n\ndef _monotonicity_violation(x):\n    # sum of negative diffs when enforcing non-decreasing (as magnitude)\n    diffs = np.diff(x)\n    return float(np.sum(np.clip(-diffs, 0, None)))\n\ndef _slope_energy(x):\n    diffs = np.diff(x)\n    return float(np.mean(diffs**2))\n\ndef _safe_mean(xs, axis=0):\n    xs = [np.asarray(x) for x in xs if x is not None]\n    if not xs:\n        return None\n    return np.mean(np.stack(xs, axis=0), axis=axis)\n\ndef _read_gamma_trials(base_dir, trials):\n    gammas = []\n    for tr in trials:\n        path = os.path.join(base_dir, f\"trial_{tr}.json\")\n        if not _maybe(path):\n            continue\n        data = _load_json(path)\n        # accept either keys \"gamma\" or \"gamma_t\"; prefer lists\n        g = data.get(\"gamma\") or data.get(\"gamma_t\")\n        if g is None:\n            continue\n        g = np.array(g, dtype=np.float32)\n        gammas.append(g)\n    return gammas\n\ndef _read_per_condition_mae(base_dir, trials):\n    pc = []\n    for tr in trials:\n        path = os.path.join(base_dir, f\"trial_{tr}.json\")\n        if not _maybe(path):\n            continue\n        data = _load_json(path)\n        # expect dict like {\"condN\": {\"step_mae\": [..]}, ...}\n        per = {}\n        for k, v in data.items():\n            if isinstance(v, dict) and \"step_mae\" in v:\n                per[k] = np.array(v[\"step_mae\"], dtype=np.float32)\n        if per:\n            pc.append(per)\n    return pc\n\ndef _align_conditions(per_list):\n    # Build a union of condition keys and average across trials where present\n    keys = set()\n    for per in per_list:\n        keys |= set(per.keys())\n    out = {}\n    for k in sorted(keys):\n        vals = [per[k] for per in per_list if k in per]\n        if not vals:\n            continue\n        out[k] = np.mean(np.stack(vals, axis=0), axis=0)\n    return out\n\ndef test():\n    # Paths from prior exports\n    gamma_dir = \"storage/ariadne/analyses/fourier_learn_gamma_export_v2\"\n    pc_dir = \"storage/ariadne/analyses/fourier_learn_gamma_per_condition\"\n    out_path = \"storage/ariadne/analyses/fourier_learn_gamma_consolidated.json\"\n    trials_main = [42, 43, 44, 45]  # BASE_SEED=42 seeds {42,43,44} + any extra\n    # Load learned gamma profiles\n    gammas = _read_gamma_trials(gamma_dir, trials_main)\n    if not gammas:\n        print(\"No gamma exports found; aborting.\")\n        return {\"ok\": False, \"reason\": \"no_gamma_exports\"}\n    g_mean = _safe_mean(gammas)\n    g_std = np.std(np.stack(gammas, axis=0), axis=0)\n    mono_v = _monotonicity_violation(g_mean)\n    slope_e = _slope_energy(g_mean)\n    tail_mean = float(np.mean(g_mean[-4:]))\n    peak_val = float(np.max(g_mean))\n    peak_idx = int(np.argmax(g_mean))\n    # Per-condition aggregation\n    pc_list = _read_per_condition_mae(pc_dir, trials_main)\n    cond_agg = _align_conditions(pc_list)\n    # Difficulty (per-step) as mean across available conditions\n    step_diff = None\n    corr_gamma_diff = None\n    if cond_agg:\n        step_mat = np.stack([v for v in cond_agg.values()], axis=0)  # (C, T)\n        step_diff = np.mean(step_mat, axis=0)  # (T,)\n        # Correlation between gamma and (neg) difficulty? We use +corr with difficulty\n        a = (g_mean - g_mean.mean())\n        b = (step_diff - step_diff.mean())\n        denom = (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)\n        corr_gamma_diff = float(np.dot(a, b) / denom) if denom > 0 else None\n    # Package\n    result = {\n        \"ok\": True,\n        \"trials\": trials_main,\n        \"gamma_mean\": g_mean.tolist(),\n        \"gamma_std\": g_std.tolist(),\n        \"stats\": {\n            \"monotonicity_violation\": mono_v,\n            \"slope_energy\": slope_e,\n            \"tail_mean_last4\": tail_mean,\n            \"peak\": {\"value\": peak_val, \"t_index\": peak_idx}\n        },\n        \"per_condition_keys\": sorted(list(cond_agg.keys())),\n        \"corr_gamma_vs_step_difficulty\": corr_gamma_diff,\n    }\n    os.makedirs(os.path.dirname(out_path), exist_ok=True)\n    with open(out_path, \"w\") as f:\n        json.dump(result, f, indent=2)\n    print(\"Wrote:\", out_path)\n    print(\"corr_gamma_vs_step_difficulty:\", corr_gamma_diff)\n    return result\n",
+    "submitted_timestamp": 1761583705.7558498,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nNo gamma exports found; aborting.\nTest completed. Result: {'ok': False, 'reason': 'no_gamma_exports'}\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761583709.4683204,
+      "evaluation_datetime": "2025-10-28T00:48:29.468323",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761583709.5657322,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis: Consolidated Learnable \u03b3[t] Profiles and Per-Condition Errors (Fourier LN)' (ID: 529) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nNo gamma exports found; aborting.\nTest completed. Result: {'ok': False, 'reason': 'no_gamma_exports'}\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

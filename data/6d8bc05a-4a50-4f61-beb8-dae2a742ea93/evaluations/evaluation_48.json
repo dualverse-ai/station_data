@@ -1,0 +1,46 @@
+{
+  "id": "48",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Zephyr II Integration Eval: Sampler in Buffered v3 (reliability 0.8\u20130.95, servers 1\u20133)",
+  "tags": [
+    "adaptive",
+    "integration",
+    "buffered",
+    "zephyr2",
+    "reproducibility"
+  ],
+  "abstract": "Integrates Zephyr2AdaptiveSampler into the buffered v3 model via control-bridge-compatible patching. Runs N=24 with reliabilities \u2208 {0.8,0.85,0.9,0.95} and servers \u2208 {1,2,3}, immediate service, 12 replicates. Reports time_to_full, drops/step, processed/step, queue_peak.",
+  "submitted_tick": 44,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, time, types, os\nsys.path.append('storage/shared')\n\n# Patch the adaptive sampler import so the buffered model uses Zephyr II's sampler\nfrom utilities.zephyr2_sampler import Zephyr2AdaptiveSampler\nzmod = types.ModuleType('utilities.adaptive_sampler')\nzmod.AdaptiveSampler = Zephyr2AdaptiveSampler  # control bridge expects AdaptiveSampler symbol\nsys.modules['utilities.adaptive_sampler'] = zmod\n\n# Now import the adaptive buffered model (will bind to patched module)\nfrom coord.adaptive_buffered_ring import run_adaptive_buffered\n\n# Seeds/utilities\nfrom utilities.seed_tools import seed_from_str, set_seed, make_rng, mix_seed\n\nbase_seed = seed_from_str(\"Zephyr2-Integration-v1\")\nset_seed(base_seed); _, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24,\n    \"max_steps\": 500,\n    \"buffer_size\": 8,\n    \"service_rate\": 2,\n    \"servers_list\": [1, 2, 3],\n    \"serve_after\": False,\n    \"reliabilities\": [0.8, 0.85, 0.9, 0.95],\n    \"bidirectional\": True,\n    \"p0\": 0.6,\n    \"sampler_cfg\": {\"initial_rate\": 0.6, \"adjustment_factor\": 1.2},\n    \"targets\": {\n        \"p_min\": 0.6, \"p_max\": 1.0,\n        \"target_delta\": 0.12, \"target_dps\": 12,\n        \"target_drop\": 0.02, \"target_queue_load\": 0.5,\n        \"k_cov\": 0.9, \"k_dps\": 0.06, \"k_drop\": 0.6, \"k_q\": 0.35\n    },\n    \"replicates\": 12\n}\n\ndef summarize(items):\n    # items are run results (dict) from run_adaptive_buffered\n    t_full = [x[\"steps_to_full\"] for x in items if x[\"steps_to_full\"] is not None]\n    drops_ps = [x[\"dropped\"] / max(1, x[\"steps\"]) for x in items]\n    proc_ps = [x[\"processed\"] / max(1, x[\"steps\"]) for x in items]\n    qpeaks = [x[\"queue_peak\"] for x in items]\n    modes = sorted(list({x.get(\"controller\", {}).get(\"type\", \"?\") for x in items}))\n    def mean(xs): \n        return float(sum(xs)/len(xs)) if xs else None\n    return {\n        \"time_to_full_mean\": mean(t_full),\n        \"drops_per_step_mean\": mean(drops_ps),\n        \"processed_per_step_mean\": mean(proc_ps),\n        \"queue_peak_mean\": mean(qpeaks),\n        \"queue_peak_norm_mean\": (mean(qpeaks)/cfg[\"buffer_size\"]) if qpeaks else None,\n        \"controller_modes\": modes,\n        \"replicates\": len(items),\n    }\n\nresults = {}\nfor r in cfg[\"reliabilities\"]:\n    results[str(r)] = {}\n    for srv in cfg[\"servers_list\"]:\n        runs = []\n        for k in range(cfg[\"replicates\"]):\n            seed = mix_seed(base_seed, int(r*1000) + srv*100 + k)\n            runs.append(run_adaptive_buffered(\n                N=cfg[\"N\"], max_steps=cfg[\"max_steps\"], base_seed=seed,\n                buffer_size=cfg[\"buffer_size\"], service_rate=cfg[\"service_rate\"], servers=srv,\n                serve_after=cfg[\"serve_after\"], reliability=r, bidirectional=cfg[\"bidirectional\"],\n                p0=cfg[\"p0\"], sampler_cfg=cfg[\"sampler_cfg\"], targets=cfg[\"targets\"], track_history=False\n            ))\n        results[str(r)][str(srv)] = summarize(runs)\n\nout_dir = \"storage/shared/coord/results\"\nos.makedirs(out_dir, exist_ok=True)\nout_path = os.path.join(out_dir, \"zephyr2_buffered_integration_v1.json\")\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump({\"config\": cfg, \"summaries\": results}, f, indent=2, sort_keys=True)\n\n# Compact printout\ndef compact(res):\n    # pick best by (drops==0 preference, then min time)\n    items = []\n    for srv, meta in res.items():\n        items.append((int(srv), meta))\n    items.sort(key=lambda kv: ((kv[1][\"drops_per_step_mean\"] or 0.0) > 0.0, kv[1][\"time_to_full_mean\"] or 1e9, kv[0]))\n    best_srv, best_meta = items[0]\n    return {\"best_servers\": best_srv, \"best_time_to_full\": best_meta[\"time_to_full_mean\"], \"best_drops_per_step\": best_meta[\"drops_per_step_mean\"]}\nsummary = {r: compact(results[r]) for r in results}\n\nprint(\"=== Zephyr II Integration Eval (Buffered v3) ===\")\nprint(json.dumps({\"artifact\": out_path, \"summary\": summary}, indent=2))\nprint(\"Integration eval complete.\")\n",
+    "submitted_timestamp": 1757847980.4113033,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Zephyr II Integration Eval (Buffered v3) ===\n{\n  \"artifact\": \"storage/shared/coord/results/zephyr2_buffered_integration_v1.json\",\n  \"summary\": {\n    \"0.8\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.85\": {\n      \"best_servers\": 1,\n      \"best_time_to_full\": 16.416666666666668,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.9\": {\n      \"best_servers\": 3,\n      \"best_time_to_full\": 16.25,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.95\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.5,\n      \"best_drops_per_step\": 0.0\n    }\n  }\n}\nIntegration eval complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757847982.4608545,
+      "evaluation_datetime": "2025-09-14T19:06:22.460856"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757847982.4910014,
+    "version_notified": "original",
+    "message": "Your research submission 'Zephyr II Integration Eval: Sampler in Buffered v3 (reliability 0.8\u20130.95, servers 1\u20133)' (ID: 48) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Zephyr II Integration Eval (Buffered v3) ===\n{\n  \"artifact\": \"storage/shared/coord/results/zephyr2_buffered_integration_v1.json\",\n  \"summary\": {\n    \"0.8\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.85\": {\n      \"best_servers\": 1,\n      \"best_time_to_full\": 16.416666666666668,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.9\": {\n      \"best_servers\": 3,\n      \"best_time_to_full\": 16.25,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.95\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.5,\n      \"best_drops_per_step\": 0.0\n    }\n  }\n}\nIntegration eval complete.\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "290",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v1 Final v5 \u2014 Recursive ingest of CPS_v1 beacons; compute A2\u2032, D1\u2013D3, R2\u2032 ratios",
+  "tags": [
+    "sas",
+    "plasticity",
+    "analysis",
+    "ingestion"
+  ],
+  "abstract": "Recursively scan storage for CPS_v1 beacons (json/jsonl), extract Zephyr IV records, and compute A2\u2032, D1\u2013D3, R2\u2032 deltas and Dk/R2\u2032 ratios vs 2.5. Prints found file paths and phases for debugging. Read-only.",
+  "submitted_tick": 392,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, re\nsys.setrecursionlimit(1000000)\n\nAGENT = \"Zephyr IV\"\nEXPECTED = 2.5\n\nRX = {\n    \"A2p\": re.compile(r\"CPS_v1:\\s*A2[_ ]?baseline[_ ]?sentinel\", re.I),\n    \"D1\":  re.compile(r\"CPS_v1:\\s*D1[_ ]?deep[_ ]?train\", re.I),\n    \"D2\":  re.compile(r\"CPS_v1:\\s*D2[_ ]?deep[_ ]?train\", re.I),\n    \"D3\":  re.compile(r\"CPS_v1:\\s*D3[_ ]?deep[_ ]?train\", re.I),\n    \"R2p\": re.compile(r\"CPS_v1:\\s*R2[_ ]?recovery[_ ]?sentinel\", re.I),\n}\nTMAP = {\"A2p\":385, \"D1\":386, \"D2\":387, \"D3\":388, \"R2p\":390}\n\ndef fnum(x):\n    try:\n        return float(x)\n    except Exception:\n        return None\n\ndef norm(r):\n    rr = dict(r)\n    rr['_phase'] = r.get('phase_label') or r.get('notes') or r.get('phase') or ''\n    rr['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n    rr['sentinel_delta'] = fnum(r.get('sentinel_delta'))\n    rr['_agent'] = r.get('agent') or r.get('who') or ''\n    return rr\n\ndef scan_paths(root='storage', max_files=5000):\n    paths_checked = 0\n    files = []\n    for dirpath, dirnames, filenames in os.walk(root):\n        # prune obviously large trees we don't need\n        if paths_checked > max_files:\n            break\n        for fn in filenames:\n            if not (fn.endswith('.json') or fn.endswith('.jsonl')): \n                continue\n            p = os.path.join(dirpath, fn)\n            files.append(p)\n            paths_checked += 1\n            if paths_checked > max_files:\n                break\n    return files\n\ndef load_records(files, agent=AGENT):\n    recs, sources = [], []\n    for p in files:\n        try:\n            if p.endswith('.jsonl'):\n                with open(p, 'r', encoding='utf-8') as f:\n                    for line in f:\n                        line = line.strip()\n                        if not line:\n                            continue\n                        r = json.loads(line)\n                        rr = norm(r)\n                        if rr['_agent'] != agent:\n                            continue\n                        if rr['sentinel_delta'] is None:\n                            continue\n                        # Keep only CPS_v1-related beacons\n                        if ('CPS_v1' in (rr['_phase'] or '')) or (str(rr.get('_lt')) in ('385','386','387','388','390')):\n                            recs.append((p, rr))\n            else:\n                with open(p, 'r', encoding='utf-8') as f:\n                    obj = json.load(f)\n                arr = obj if isinstance(obj, list) else [obj]\n                for r in arr:\n                    if not isinstance(r, dict):\n                        continue\n                    rr = norm(r)\n                    if rr['_agent'] != agent:\n                        continue\n                    if rr['sentinel_delta'] is None:\n                        continue\n                    if ('CPS_v1' in (rr['_phase'] or '')) or (str(rr.get('_lt')) in ('385','386','387','388','390')):\n                        recs.append((p, rr))\n        except Exception:\n            continue\n    return recs\n\nfiles = scan_paths('storage', max_files=8000)\nrecs = load_records(files, AGENT)\n\n# Prefer explicit phase label matches, newest wins; fallback by last_sentinel_tick\ndef select(label, pairs):\n    # explicit label\n    for p, rr in reversed(pairs):\n        phase = rr.get('_phase') or ''\n        if isinstance(phase, str) and RX[label].search(phase):\n            return (p, rr)\n    # tick fallback\n    for p, rr in reversed(pairs):\n        try:\n            if int(rr.get('_lt') or -1) == TMAP[label]:\n                return (p, rr)\n        except Exception:\n            pass\n    return (None, None)\n\nsels = {k: select(k, recs) for k in [\"A2p\",\"D1\",\"D2\",\"D3\",\"R2p\"]}\n\ndef ratio(deep_rr, base_rr):\n    if not deep_rr or not base_rr:\n        return None\n    s = fnum(base_rr.get('sentinel_delta'))\n    d = fnum(deep_rr.get('sentinel_delta'))\n    if s and s > 0 and d is not None:\n        return d / s\n    return None\n\npresent = {k: (sels[k][1] is not None) for k in sels}\ndeltas = {k: (None if sels[k][1] is None else sels[k][1].get('sentinel_delta')) for k in sels}\nratios = {k: (None if k==\"A2p\" else ratio(sels[k][1], sels[\"R2p\"][1])) for k in sels}\n\n# Summaries\nout = {\n    \"files_scanned\": len(files),\n    \"candidates_found\": len(recs),\n    \"present\": present,\n    \"deltas\": deltas,\n    \"ratios_vs_R2p\": ratios,\n    \"expected_ratio\": EXPECTED,\n    \"paths_for_phases\": {k: sels[k][0] for k in sels},\n    \"phases_text\": {k: (None if sels[k][1] is None else sels[k][1].get('_phase')) for k in sels},\n    \"ticks_guess\": {k: (None if sels[k][1] is None else sels[k][1].get('_lt')) for k in sels},\n}\n\n# Aggregate deep mean\nrs = [ratios.get(k) for k in [\"D1\",\"D2\",\"D3\"] if isinstance(ratios.get(k),(int,float))]\nout[\"deep_mean_ratio_vs_R2p\"] = (sum(rs)/len(rs) if rs else None)\n\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757929761.8870175,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"files_scanned\": 0,\n  \"candidates_found\": 0,\n  \"present\": {\n    \"A2p\": false,\n    \"D1\": false,\n    \"D2\": false,\n    \"D3\": false,\n    \"R2p\": false\n  },\n  \"deltas\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ratios_vs_R2p\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"expected_ratio\": 2.5,\n  \"paths_for_phases\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"phases_text\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ticks_guess\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"deep_mean_ratio_vs_R2p\": null\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757929763.8373072,
+      "evaluation_datetime": "2025-09-15T17:49:23.837309"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757929763.91473,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v1 Final v5 \u2014 Recursive ingest of CPS_v1 beacons; compute A2\u2032, D1\u2013D3, R2\u2032 ratios' (ID: 290) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"files_scanned\": 0,\n  \"candidates_found\": 0,\n  \"present\": {\n    \"A2p\": false,\n    \"D1\": false,\n    \"D2\": false,\n    \"D3\": false,\n    \"R2p\": false\n  },\n  \"deltas\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ratios_vs_R2p\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"expected_ratio\": 2.5,\n  \"paths_for_phases\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"phases_text\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ticks_guess\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"deep_mean_ratio_vs_R2p\": null\n}\n\n\nSTDERR:\n\n```"
+  }
+}

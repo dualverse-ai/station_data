@@ -1,0 +1,116 @@
+{
+  "id": "626",
+  "author": "Logos IV",
+  "research_task_id": "1",
+  "title": "Logos IV: Hypothesis - PCA Whitening on Embedding Baseline",
+  "tags": [
+    "hypothesis-test",
+    "embedding-pipeline",
+    "pca-whitening",
+    "baseline"
+  ],
+  "abstract": "This submission tests the hypothesis that reintroducing PCA whitening (tau=0.85), a technique from older SOTA methods, will improve the current embedding baseline. This experiment modifies the pure ComBat embedding pipeline (from ID 619) by adding the whitening step before ComBat. No graph refinement is used.",
+  "submitted_tick": 376,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\nfrom logos.whitening_test_v1 import eliminate_batch_effect_fn\n",
+    "submitted_timestamp": 1761510883.8650746,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpu_fb2xpd/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpu_fb2xpd/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpu_fb2xpd/storage/logos/whitening_test_v1.py\", line 35, in eliminate_batch_effect_fn\n    whitened_pca = _whiten_pcs(pca_data_for_whitening, tau=0.85)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpu_fb2xpd/storage/logos/whitening_test_v1.py\", line 9, in _whiten_pcs\n    Z = adata_emb.obsm[key]\n        ~~~~~~~~~~~~~~^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/anndata/_core/aligned_mapping.py\", line 215, in __getitem__\n    return self._data[key]\n           ~~~~~~~~~~^^^^^\nKeyError: 'X_pca'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761510890.370486,
+      "evaluation_datetime": "2025-10-27T04:34:50.370489"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_626_1761510890",
+      "started_timestamp": 1761510890.3698723,
+      "completed_timestamp": 1761511244.416041,
+      "final_report": "# Debug Report for Evaluation 626\n\n## Summary\n**SUCCESS** - Fixed the KeyError by correcting the AnnData object structure for the whitening function.\n\n## Root Cause\nThe original code on line 34 of `storage/logos/whitening_test_v1.py` created a temporary AnnData object incorrectly:\n```python\npca_data_for_whitening = ad.AnnData(X=adata_emb.obsm['X_pca'], uns={'pca': adata_emb.uns['pca']})\n```\n\nThis placed the PCA data in the `.X` attribute, but the `_whiten_pcs()` function expects to find it in `.obsm['X_pca']`. When the function tried to access `adata_emb.obsm['X_pca']` on line 9, it raised a KeyError because the data wasn't stored there.\n\n## Fix Applied\nIn `submissions/submission_v2.py`, I corrected the temporary AnnData object creation to store the PCA data in the proper location:\n\n```python\npca_data_for_whitening = ad.AnnData(\n    X=np.zeros((adata_emb.obsm['X_pca'].shape[0], 1)),  # Dummy X (required)\n    obsm={'X_pca': adata_emb.obsm['X_pca']},  # PCA data in obsm\n    uns={'pca': adata_emb.uns['pca']}\n)\n```\n\nThis ensures:\n1. The PCA data is correctly placed in `.obsm['X_pca']` where `_whiten_pcs()` expects it\n2. A dummy `.X` array is provided (required by AnnData)\n3. The PCA metadata is still available in `.uns['pca']`\n\n## Result\nThe code now runs successfully without crashing. The monitor script confirmed the submission ran for over 300 seconds without errors, indicating the fix resolved the issue completely.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nsys.path.append('storage')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\n\ndef _whiten_pcs(adata_emb, key='X_pca', tau=0.95, eps=1e-8):\n    \"\"\"\n    Function retrieved from Logos III's research, Capsule #10.\n    FIXED: Now properly accesses data from obsm[key]\n    \"\"\"\n    Z = adata_emb.obsm[key]\n    # Ensure 'pca' key and its 'variance' subkey exist\n    if 'pca' not in adata_emb.uns or 'variance' not in adata_emb.uns['pca']:\n        raise KeyError(\"PCA variance information not found in adata.uns['pca']['variance']. Please run sc.pp.pca first.\")\n\n    var = adata_emb.uns['pca']['variance']\n    scale = np.sqrt(np.clip(var[:Z.shape[1]], eps, None))\n    Zw = (Z / scale) * float(tau)\n    Zw -= Zw.mean(axis=0, keepdims=True)\n    return Zw\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hypothesis Test: Reintroducing PCA whitening before ComBat.\n    This test is performed on the embedding pipeline alone (no graph refinement).\n    \"\"\"\n    # --- EMBEDDING PIPELINE ---\n    adata_emb = adata.copy()\n    sc.pp.normalize_total(adata_emb, target_sum=1e-4)\n    sc.pp.log1p(adata_emb)\n    sc.pp.highly_variable_genes(adata_emb, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_emb, n_comps=60)\n\n    # --- HYPOTHESIS: Apply PCA Whitening ---\n    # FIXED: Create a temporary AnnData object with PCA data in obsm['X_pca'], not X\n    pca_data_for_whitening = ad.AnnData(\n        X=np.zeros((adata_emb.obsm['X_pca'].shape[0], 1)),  # Dummy X\n        obsm={'X_pca': adata_emb.obsm['X_pca']},  # PCA data in obsm\n        uns={'pca': adata_emb.uns['pca']}\n    )\n    whitened_pca = _whiten_pcs(pca_data_for_whitening, tau=0.85)\n\n    # Create a new AnnData object for ComBat, now with the whitened PCA.\n    adata_for_combat = ad.AnnData(X=whitened_pca, obs=adata_emb.obs)\n    sc.pp.combat(adata_for_combat, key='batch')\n    Z_final_emb = adata_for_combat.X\n\n    # --- Final Output (Embedding only) ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_final_emb})\n\n    return adata_out\n",
+      "created_timestamp": 1761510918.8974311,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.629510730521573,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/f750ec05-adf5-41ae-afc8-f185d1809ca1/result_human.h5ad\n\nRESULT_UUID: f750ec05-adf5-41ae-afc8-f185d1809ca1\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.149  ARI: 0.645  NMI: 0.649\n  Graph_conn: 0.859  kBET: 0.850  iLISI: 0.090  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.440\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825542  ASW_label: 0.497738  ARI: 0.644657  NMI: 0.649137\n  Graph_conn: 0.861805  kBET: 0.810189  iLISI: 0.090479  cLISI: 0.989415\n  PCR: 0.999947  Cell_cycle: 0.384284",
+          "ASW_batch": [
+            "0.648",
+            0.6482373968376995
+          ],
+          "ASW_label": [
+            "0.149",
+            0.1492362181082524
+          ],
+          "ARI": [
+            "0.645",
+            0.6447050882010258
+          ],
+          "NMI": [
+            "0.649",
+            0.6490373408243025
+          ],
+          "Graph_conn": [
+            "0.859",
+            0.8594201603846805
+          ],
+          "kBET": [
+            "0.850",
+            0.850023772525815
+          ],
+          "iLISI": [
+            "0.090",
+            0.09047853571125897
+          ],
+          "cLISI": [
+            "0.964",
+            0.9636638322793517
+          ],
+          "PCR": [
+            "1.000",
+            0.9999475068571122
+          ],
+          "Cell_cycle": [
+            "0.440",
+            0.440357453486232
+          ]
+        },
+        "evaluation_timestamp": 1761511259.243648,
+        "evaluation_datetime": "2025-10-27T04:40:59.243651",
+        "sort_key": [
+          0.629510730521573
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.629510730521573,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761511259.2643592,
+    "version_notified": "v2",
+    "message": "Your research submission 'Logos IV: Hypothesis - PCA Whitening on Embedding Baseline' (ID: 626) succeeded after automatic debugging.\n\n**Score:** 0.629510730521573\n**ASW_batch:** 0.648\n**ASW_label:** 0.149\n**ARI:** 0.645\n**NMI:** 0.649\n**Graph_conn:** 0.859\n**kBET:** 0.850\n**iLISI:** 0.090\n**cLISI:** 0.964\n**PCR:** 1.000\n**Cell_cycle:** 0.440\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.149  ARI: 0.645  NMI: 0.649\n  Graph_conn: 0.859  kBET: 0.850  iLISI: 0.090  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.440\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825542  ASW_label: 0.497738  ARI: 0.644657  NMI: 0.649137\n  Graph_conn: 0.861805  kBET: 0.810189  iLISI: 0.090479  cLISI: 0.989415\n  PCR: 0.999947  Cell_cycle: 0.384284\n\n**Debugger Report:** # Debug Report for Evaluation 626\n\n## Summary\n**SUCCESS** - Fixed the KeyError by correcting the AnnData object structure for the whitening function.\n\n## Root Cause\nThe original code on line 34 of `storage/logos/whitening_test_v1.py` created a temporary AnnData object incorrectly:\n```python\npca_data_for_whitening = ad.AnnData(X=adata_emb.obsm['X_pca'], uns={'pca': adata_emb.uns['pca']})\n```\n\nThis placed the PCA data in the `.X` attribute, but the `_whiten_pcs()` function expects to find it in `.obsm['X_pca']`. When the function tried to access `adata_emb.obsm['X_pca']` on line 9, it raised a KeyError because the data wasn't stored there.\n\n## Fix Applied\nIn `submissions/submission_v2.py`, I corrected the temporary AnnData object creation to store the PCA data in the proper location:\n\n```python\npca_data_for_whitening = ad.AnnData(\n    X=np.zeros((adata_emb.obsm['X_pca'].shape[0], 1)),  # Dummy X (required)\n    obsm={'X_pca': adata_emb.obsm['X_pca']},  # PCA data in obsm\n    uns={'pca': adata_emb.uns['pca']}\n)\n```\n\nThis ensures:\n1. The PCA data is correctly placed in `.obsm['X_pca']` where `_whiten_pcs()` expects it\n2. A dummy `.X` array is provided (required by AnnData)\n3. The PCA metadata is still available in `.uns['pca']`\n\n## Result\nThe code now runs successfully without crashing. The monitor script confirmed the submission ran for over 300 seconds without errors, indicating the fix resolved the issue completely.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nsys.path.append('storage')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\n\ndef _whiten_pcs(adata_emb, key='X_pca', tau=0.95, eps=1e-8):\n    \"\"\"\n    Function retrieved from Logos III's research, Capsule #10.\n    FIXED: Now properly accesses data from obsm[key]\n    \"\"\"\n    Z = adata_emb.obsm[key]\n    # Ensure 'pca' key and its 'variance' subkey exist\n    if 'pca' not in adata_emb.uns or 'variance' not in adata_emb.uns['pca']:\n        raise KeyError(\"PCA variance information not found in adata.uns['pca']['variance']. Please run sc.pp.pca first.\")\n\n    var = adata_emb.uns['pca']['variance']\n    scale = np.sqrt(np.clip(var[:Z.shape[1]], eps, None))\n    Zw = (Z / scale) * float(tau)\n    Zw -= Zw.mean(axis=0, keepdims=True)\n    return Zw\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hypothesis Test: Reintroducing PCA whitening before ComBat.\n    This test is performed on the embedding pipeline alone (no graph refinement).\n    \"\"\"\n    # --- EMBEDDING PIPELINE ---\n    adata_emb = adata.copy()\n    sc.pp.normalize_total(adata_emb, target_sum=1e-4)\n    sc.pp.log1p(adata_emb)\n    sc.pp.highly_variable_genes(adata_emb, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_emb, n_comps=60)\n\n    # --- HYPOTHESIS: Apply PCA Whitening ---\n    # FIXED: Create a temporary AnnData object with PCA data in obsm['X_pca'], not X\n    pca_data_for_whitening = ad.AnnData(\n        X=np.zeros((adata_emb.obsm['X_pca'].shape[0], 1)),  # Dummy X\n        obsm={'X_pca': adata_emb.obsm['X_pca']},  # PCA data in obsm\n        uns={'pca': adata_emb.uns['pca']}\n    )\n    whitened_pca = _whiten_pcs(pca_data_for_whitening, tau=0.85)\n\n    # Create a new AnnData object for ComBat, now with the whitened PCA.\n    adata_for_combat = ad.AnnData(X=whitened_pca, obs=adata_emb.obs)\n    sc.pp.combat(adata_for_combat, key='batch')\n    Z_final_emb = adata_for_combat.X\n\n    # --- Final Output (Embedding only) ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_final_emb})\n\n    return adata_out\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/f750ec05-adf5-41ae-afc8-f185d1809ca1/result_human.h5ad\n\nRESULT_UUID: f750ec05-adf5-41ae-afc8-f185d1809ca1\n\n\nSTDERR:\n\n```"
+  }
+}

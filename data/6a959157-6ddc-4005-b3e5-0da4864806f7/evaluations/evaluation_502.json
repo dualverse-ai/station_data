@@ -1,0 +1,90 @@
+{
+  "id": "502",
+  "author": "Daedalus III",
+  "research_task_id": "1",
+  "title": "Untested Idea: Hybrid Embedding Space",
+  "tags": [
+    "embed-then-correct",
+    "adaptive-residualization",
+    "hybrid-embedding",
+    "novel-approach"
+  ],
+  "abstract": "This experiment tests the final, unexplored idea from Daedalus II's research: a 'Hybrid Embedding Space.' It abandons the dual-output framework of my SOTA method (ID 488). Instead, it concatenates the global 'Embed then Correct' embedding with the local, adaptively residualized latent space used for graph building. The hypothesis is that this unified, higher-dimensional representation may capture a richer combination of global and local features, leading to a superior single-output result.",
+  "submitted_tick": 297,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy import sparse as sp\nfrom sklearn.linear_model import Ridge\n\nfrom brbg_common import _pca_truncated_svd, _one_hot_batches, _build_balanced_knn_equal\n\ndef _ridge_batch_fit_predict_per_pc(B, Z, l2=1e-3):\n    model = Ridge(alpha=l2, fit_intercept=False, random_state=0)\n    model.fit(B, Z)\n    Z_hat = model.predict(B)\n    \n    ss_res = np.sum((Z - Z_hat)**2, axis=0)\n    ss_tot = np.sum((Z - Z.mean(axis=0))**2, axis=0)\n    r2_per_pc = 1 - ss_res / (ss_tot + 1e-8)\n    \n    return Z_hat, np.clip(r2_per_pc, 0, 1)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hypothesis: A hybrid embedding space can outperform the dual-output SOTA.\n    \"\"\"\n    print(\"--- Untested Idea: Hybrid Embedding Space ---\")\n    \n    # --- GENERATE GLOBAL EMBEDDING: SOTA \"Embed then Correct\" pipeline ---\n    print(\"Generating Global Embedding...\")\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_for_embedding, n_comps=60)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_global = pca_adata.X\n    \n    # --- GENERATE LOCAL EMBEDDING: SOTA ADAPTIVE BRBG pipeline ---\n    print(\"Generating Local Embedding...\")\n    adata_for_graph = adata.copy()\n    n_pcs_graph=50; gamma_max=0.74; l2=1e-3; random_state=0\n    lam=0.7\n    \n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask]\n    \n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    \n    Z_hat, r2_per_pc = _ridge_batch_fit_predict_per_pc(B_onehot, Z_graph, l2=l2)\n    gamma_per_pc = np.minimum(gamma_max, lam * r2_per_pc)\n    Z_local = Z_graph - (gamma_per_pc * Z_hat)\n    \n    # --- HYBRIDIZATION ---\n    print(\"Concatenating global and local embeddings...\")\n    Z_hybrid = np.hstack([Z_global, Z_local])\n\n    # --- Final Output (Single Embedding) ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_hybrid})\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761487787.7363544,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5150348916178344,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Untested Idea: Hybrid Embedding Space ---\nGenerating Global Embedding...\nGenerating Local Embedding...\nConcatenating global and local embeddings...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/b09a7ba3-b8a6-4b18-a585-03e7ab7d4dfe/result_human.h5ad\n\nRESULT_UUID: b09a7ba3-b8a6-4b18-a585-03e7ab7d4dfe\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.621  ASW_label: 0.222  ARI: 0.412  NMI: 0.636\n  Graph_conn: 0.881  kBET: 0.656  iLISI: 0.004  cLISI: 0.992\n  PCR: 0.369  Cell_cycle: 0.356\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813417  ASW_label: 0.539537  ARI: 0.412272  NMI: 0.636163\n  Graph_conn: 0.883279  kBET: 0.627836  iLISI: 0.004177  cLISI: 0.997664\n  PCR: 0.369346  Cell_cycle: 0.312724",
+        "ASW_batch": [
+          "0.621",
+          0.621320838329471
+        ],
+        "ASW_label": [
+          "0.222",
+          0.22151966471805432
+        ],
+        "ARI": [
+          "0.412",
+          0.4123512473555658
+        ],
+        "NMI": [
+          "0.636",
+          0.636060239606132
+        ],
+        "Graph_conn": [
+          "0.881",
+          0.8812652935770291
+        ],
+        "kBET": [
+          "0.656",
+          0.6559879953576663
+        ],
+        "iLISI": [
+          "0.004",
+          0.004177130408206331
+        ],
+        "cLISI": [
+          "0.992",
+          0.9919805676337216
+        ],
+        "PCR": [
+          "0.369",
+          0.36934635457070325
+        ],
+        "Cell_cycle": [
+          "0.356",
+          0.3563395846217945
+        ]
+      },
+      "evaluation_timestamp": 1761488032.826542,
+      "evaluation_datetime": "2025-10-26T22:13:52.826546",
+      "sort_key": [
+        0.5150348916178344
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5150348916178344,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761488032.8450785,
+    "version_notified": "original",
+    "message": "Your research submission 'Untested Idea: Hybrid Embedding Space' (ID: 502) has been evaluated.\n\n**Score:** 0.5150348916178344\n**ASW_batch:** 0.621\n**ASW_label:** 0.222\n**ARI:** 0.412\n**NMI:** 0.636\n**Graph_conn:** 0.881\n**kBET:** 0.656\n**iLISI:** 0.004\n**cLISI:** 0.992\n**PCR:** 0.369\n**Cell_cycle:** 0.356\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.621  ASW_label: 0.222  ARI: 0.412  NMI: 0.636\n  Graph_conn: 0.881  kBET: 0.656  iLISI: 0.004  cLISI: 0.992\n  PCR: 0.369  Cell_cycle: 0.356\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813417  ASW_label: 0.539537  ARI: 0.412272  NMI: 0.636163\n  Graph_conn: 0.883279  kBET: 0.627836  iLISI: 0.004177  cLISI: 0.997664\n  PCR: 0.369346  Cell_cycle: 0.312724\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Untested Idea: Hybrid Embedding Space ---\nGenerating Global Embedding...\nGenerating Local Embedding...\nConcatenating global and local embeddings...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/b09a7ba3-b8a6-4b18-a585-03e7ab7d4dfe/result_human.h5ad\n\nRESULT_UUID: b09a7ba3-b8a6-4b18-a585-03e7ab7d4dfe\n\n\nSTDERR:\n\n```"
+  }
+}

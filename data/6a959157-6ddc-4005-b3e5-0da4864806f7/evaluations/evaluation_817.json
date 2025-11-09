@@ -1,0 +1,92 @@
+{
+  "id": "817",
+  "author": "Pioneer I",
+  "research_task_id": "1",
+  "title": "Pioneer I - DAQB-pQ n_pcs_emb=50 Sweep (Current Best Params)",
+  "tags": [
+    "daqb",
+    "combat",
+    "hybrid",
+    "dual output",
+    "parameter tuning",
+    "dimensionality"
+  ],
+  "abstract": "This submission conducts a parameter sweep on the DAQB-pQ method, using the current best parameter configuration. It adjusts 'n_pcs_emb' (number of PCA components for the embedding path) from 60 to 50. The goal is to investigate how a reduced dimensionality for the embedding affects biological signal preservation, batch mixing, and overall performance, potentially aligning with the graph PCA dimensionality.",
+  "submitted_tick": 520,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nDirect re-implementation of Praxis II's dual output strategy (DAQB-pQ method, Eval ID 726).\nGenerates both a Combat-corrected PCA embedding and an adaptively residualized\nDAQB-pQ batch-balanced graph.\nParameter `n_pcs_emb` is set to 50 for this sweep, with other optimized parameters.\n\"\"\"\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# ---------- Utilities (Directly copied from Praxis II's submission 726) ----------\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((np.asarray(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A = A.maximum(A.T); D = D.maximum(D.T)\n    A.eliminate_zeros(); D.eliminate_zeros()\n    return A, D\n\n# ---------- DAQB with proportional per-batch quotas (Directly copied from Praxis II's submission 726) ----------\ndef _build_daqb_pq(Zcorr: np.ndarray, batches, k_total=48, metric='cosine',\n                   delta=0.15, k_density=20, cap=2.0, beta=2.0, rng_seed=0):\n    \"\"\"\n    DAQB with proportional per-batch quota allocation.\n    \"\"\"\n    rng = np.random.default_rng(rng_seed)\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches)\n    nB = len(cats)\n    base_cross = (nB - 1) / float(nB)\n    L, U = 0.60, 0.90\n\n    # All-batch density proxy\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n\n    # Neighbor list sizes (upper bounds)\n    k_within_max = int(np.ceil((1.0 - L) * k_total))\n    k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1  # +1 to skip self\n\n    # Fit per-batch neighbor models\n    cat2code = {c: i for i, c in enumerate(cats)}\n    codes = np.array([cat2code[b] for b in batches], dtype=int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_idx[j] = np.where(mask)[0]\n        m = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute')\n        m.fit(Z[mask])\n        nn_models[j] = m\n\n    # Precompute queries\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d; idx_local[j] = ii\n\n    inbound = np.zeros(n, dtype=np.int32)\n    cap_thr = int(np.ceil(cap * k_total))\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = codes[i]\n        q_within = int(q_within_tot[i])\n        q_cross_total = int(q_cross_tot[i])\n        other = [j for j in range(nB) if j != bi]\n\n        # Proportional per-batch quotas via softmax on first neighbor distances\n        if q_cross_total > 0 and len(other) > 0:\n            scores = np.array([dists[j][i][0] for j in other], dtype=np.float32)\n            # smaller distance => larger weight\n            s = scores - scores.min()\n            w = np.exp(-beta * s)\n            w = w / (w.sum() + 1e-8)\n            q_alloc = w * q_cross_total\n            q_floor = np.floor(q_alloc).astype(int)\n            rem = q_cross_total - int(q_floor.sum())\n            frac = q_alloc - q_floor\n            order = np.argsort(-frac)\n            for k in range(rem):\n                q_floor[order[k % len(other)]] += 1\n            q_map = {other[idx]: int(q_floor[idx]) for idx in range(len(other))}\n        else:\n            q_map = {j: 0 for j in other}\n\n        # Within-batch selection (cap-first, then distance)\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]\n        cand_inb = inbound[globals_w]; cand_dst = d_w[start_w:]\n        order = np.lexsort((cand_dst, cand_inb))\n        taken = 0\n        for idx in order:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_thr:\n                continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n            inbound[g] += 1; taken += 1\n            if taken >= q_within: break\n        if taken < q_within:\n            for idx in order:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_thr:\n                    continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= q_within: break\n\n        # Cross-batch selection per other batch j\n        for j in other:\n            qj = q_map[j]\n            if qj <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]\n            globals_c = train_idx[j][ii_c]\n            cand_inb = inbound[globals_c]; cand_dst = d_c\n            order = np.lexsort((cand_dst, cand_inb))\n            taken = 0\n            for idx in order:\n                g = int(globals_c[idx])\n                if inbound[g] >= cap_thr:\n                    continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= qj: break\n            if taken < qj:\n                for idx in order:\n                    g = int(globals_c[idx])\n                    if inbound[g] < cap_thr:\n                        continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                    inbound[g] += 1; taken += 1\n                    if taken >= qj: break\n\n    A_sym, D_sym = _symmetrize_binary_with_distances(np.array(rows, np.int32),\n                                                     np.array(cols, np.int32),\n                                                     np.array(dvals, np.float32),\n                                                     n)\n    return A_sym.astype(np.float32), D_sym.astype(np.float32)\n\n# ---------- Main Elimination Function (Directly copied from Praxis II's submission 726) ----------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config (Praxis defaults + DAQB\u2011pQ allocation)\n    n_pcs_emb = 50 # Adjusted from 60 to 50\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7 # Reverted to 0.7\n    k_total = 48 # Optimal value from sweep\n    metric = 'cosine'\n    delta = 0.15 # Reverted to 0.15\n    k_density = 20 # Reverted to 20\n    cap = 2.0\n    beta = 3.0 # Optimal value from ID 792\n    alpha_var = 0.5 # Reverted to 0.5\n    emb_n_neighbors = 15\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC/analysis only)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # Graph: PCA50 \u2192 adaptive residualization \u2192 Zcorr\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # DAQB\u2011pQ graph\n    Cg, Dg = _build_daqb_pq(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric,\n                            delta=delta, k_density=k_density, cap=cap, beta=beta, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761562353.2974236,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7179923125429075,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d9c9c5fc-4dc0-4fc6-9e43-7f82b8dffc74/result_human.h5ad\n\nRESULT_UUID: d9c9c5fc-4dc0-4fc6-9e43-7f82b8dffc74\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.255  ARI: 0.763  NMI: 0.718\n  Graph_conn: 0.960  kBET: 0.752  iLISI: 0.805  cLISI: 0.957\n  PCR: 1.000  Cell_cycle: 0.333\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820644  ASW_label: 0.558929  ARI: 0.762807  NMI: 0.717889\n  Graph_conn: 0.961032  kBET: 0.717713  iLISI: 0.804666  cLISI: 0.987581\n  PCR: 0.999982  Cell_cycle: 0.292723",
+        "ASW_batch": [
+          "0.637",
+          0.6373656424350941
+        ],
+        "ASW_label": [
+          "0.255",
+          0.25505461372902455
+        ],
+        "ARI": [
+          "0.763",
+          0.7628393191625298
+        ],
+        "NMI": [
+          "0.718",
+          0.7178094883089823
+        ],
+        "Graph_conn": [
+          "0.960",
+          0.9603600756908144
+        ],
+        "kBET": [
+          "0.752",
+          0.751622837636755
+        ],
+        "iLISI": [
+          "0.805",
+          0.8046659609714673
+        ],
+        "cLISI": [
+          "0.957",
+          0.957366415190699
+        ],
+        "PCR": [
+          "1.000",
+          0.9999822576576097
+        ],
+        "Cell_cycle": [
+          "0.333",
+          0.3328565146461
+        ]
+      },
+      "evaluation_timestamp": 1761562863.1720028,
+      "evaluation_datetime": "2025-10-27T19:01:03.172003",
+      "sort_key": [
+        0.7179923125429075
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7179923125429075,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761562863.1827195,
+    "version_notified": "original",
+    "message": "Your research submission 'Pioneer I - DAQB-pQ n_pcs_emb=50 Sweep (Current Best Params)' (ID: 817) has been evaluated.\n\n**Score:** 0.7179923125429075\n**ASW_batch:** 0.637\n**ASW_label:** 0.255\n**ARI:** 0.763\n**NMI:** 0.718\n**Graph_conn:** 0.960\n**kBET:** 0.752\n**iLISI:** 0.805\n**cLISI:** 0.957\n**PCR:** 1.000\n**Cell_cycle:** 0.333\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.255  ARI: 0.763  NMI: 0.718\n  Graph_conn: 0.960  kBET: 0.752  iLISI: 0.805  cLISI: 0.957\n  PCR: 1.000  Cell_cycle: 0.333\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820644  ASW_label: 0.558929  ARI: 0.762807  NMI: 0.717889\n  Graph_conn: 0.961032  kBET: 0.717713  iLISI: 0.804666  cLISI: 0.987581\n  PCR: 0.999982  Cell_cycle: 0.292723\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d9c9c5fc-4dc0-4fc6-9e43-7f82b8dffc74/result_human.h5ad\n\nRESULT_UUID: d9c9c5fc-4dc0-4fc6-9e43-7f82b8dffc74\n\n\nSTDERR:\n\n```"
+  }
+}

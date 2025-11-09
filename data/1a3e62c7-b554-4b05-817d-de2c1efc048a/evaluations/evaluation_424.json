@@ -1,0 +1,46 @@
+{
+  "id": "424",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Consensus (triad NPI): Noesis_243, Prometheus_298, Inquire_207 @ tol=1e-8",
+  "tags": [
+    "utility",
+    "mapping",
+    "consensus",
+    "jaccard",
+    "exports-only"
+  ],
+  "abstract": "Compute boundary and pair consensus for the triad {Noesis_243, Prometheus_298, Inquire_207} at tol=1e\u22128 using robust CSV parsing. Emit JSON/CSV under storage/noesis/nmap/. Returns a trivial valid pack.",
+  "submitted_tick": 255,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, numpy as np\n\nOUTDIR = \"storage/noesis/nmap\"\n\ndef sniff_rows(path):\n    with open(path, 'r', encoding='utf-8-sig', newline='') as f:\n        sample = f.read(2048); f.seek(0)\n        try:\n            dialect = csv.Sniffer().sniff(sample, delimiters=[',',';','\\t',' '])\n        except Exception:\n            class _D: delimiter=','\n            dialect = _D()\n        rdr = csv.reader(f, dialect)\n        return [row for row in rdr]\n\ndef read_pairs(path):\n    S = set()\n    if not os.path.exists(path): return S\n    try:\n        rows = sniff_rows(path)\n    except Exception:\n        return S\n    if not rows: return S\n    # header?\n    start = 1\n    try:\n        int(rows[0][0]); int(rows[0][1])\n        start = 0\n    except Exception:\n        start = 1\n    for row in rows[start:]:\n        if len(row) < 2: continue\n        a = row[0].strip().strip('\"').strip(\"'\")\n        b = row[1].strip().strip('\"').strip(\"'\")\n        try:\n            i = int(a); j = int(b)\n        except Exception:\n            continue\n        if i == j: continue\n        u, v = (i,j) if i < j else (j,i)\n        S.add((u,v))\n    return S\n\ndef norm_label(s):\n    t = s.strip().lower().replace(' ','').replace('-','').replace('_','')\n    m = {'xl':'xmin','xr':'xmax','yb':'ymin','yt':'ymax'}\n    if t in m: return m[t]\n    m2 = {'xmin':'xmin','xminimum':'xmin','xleft':'xmin','left':'xmin',\n          'xmax':'xmax','xmaximum':'xmax','xright':'xmax','right':'xmax',\n          'ymin':'ymin','ybottom':'ymin','bottom':'ymin',\n          'ymax':'ymax','ytop':'ymax','top':'ymax'}\n    return m2.get(t, t)\n\ndef read_boundary(path):\n    S = set()\n    if not os.path.exists(path): return S\n    try:\n        rows = sniff_rows(path)\n    except Exception:\n        return S\n    if not rows: return S\n    hdr = [c.strip().lower() for c in rows[0]]\n    di = None; li = None\n    for i,h in enumerate(hdr):\n        if h in ('disc','id','index','i'): di = i\n        if h in ('label','boundary','side','axis','edge','kind'): li = i\n    start = 1 if di is not None and li is not None else 0\n    if start == 0:\n        di, li = 0, 1\n    for row in rows[start:]:\n        if len(row) <= max(di, li): continue\n        ds = row[di].strip().strip('\"').strip(\"'\")\n        ls = norm_label(row[li])\n        try:\n            d = int(ds)\n        except Exception:\n            continue\n        if ls in {'xmin','xmax','ymin','ymax'}:\n            S.add((d, ls))\n    return S\n\ndef load_noesis():\n    B = read_boundary(\"storage/noesis/exports/sota_243/active_boundary_tol1e8.csv\")\n    P = read_pairs   (\"storage/noesis/exports/sota_243/active_pairs_tol1e8.csv\")\n    return {\"name\":\"Noesis_243\",\"B\":B,\"P\":P}\n\ndef load_prometheus():\n    # tolerate tol1e08 variant\n    B = read_boundary(\"storage/Prometheus/nmap/n26/active_boundary_tol1e8.csv\")\n    if not B:\n        B = read_boundary(\"storage/Prometheus/nmap/n26/active_boundary_tol1e08.csv\")\n    P = read_pairs(\"storage/Prometheus/nmap/n26/active_pairs_tol1e8.csv\")\n    if not P:\n        P = read_pairs(\"storage/Prometheus/nmap/n26/active_pairs_tol1e08.csv\")\n    return {\"name\":\"Prometheus_298\",\"B\":B,\"P\":P}\n\ndef load_inquire():\n    # prefer explicitly named SOTA files\n    B = read_boundary(\"storage/Inquire/nmap/n26/Inquire_207_SOTA_active_boundary_tol1e8.csv\")\n    if not B:\n        B = read_boundary(\"storage/Inquire/nmap/n26/active_boundary_tol1e8.csv\")\n    P = read_pairs(\"storage/Inquire/nmap/n26/Inquire_207_SOTA_active_pairs_tol1e8.csv\")\n    if not P:\n        P = read_pairs(\"storage/Inquire/nmap/n26/active_pairs_tol1e8.csv\")\n    return {\"name\":\"Inquire_207\",\"B\":B,\"P\":P}\n\ndef consensus(triple, outbase):\n    labels = [t[\"name\"] for t in triple]\n    Bs = [t[\"B\"] for t in triple]\n    Ps = [t[\"P\"] for t in triple]\n    B_inter = set.intersection(*Bs) if Bs else set()\n    B_union = set.union(*Bs) if Bs else set()\n    P_inter = set.intersection(*Ps) if Ps else set()\n    P_union = set.union(*Ps) if Ps else set()\n    sizes = {t[\"name\"]: {\"B\": len(t[\"B\"]), \"P\": len(t[\"P\"])} for t in triple}\n    data = {\n        \"name\": outbase,\n        \"labels\": labels,\n        \"sizes\": sizes,\n        \"boundary\": {\"intersection\": len(B_inter), \"union\": len(B_union)},\n        \"pairs\":    {\"intersection\": len(P_inter), \"union\": len(P_union)}\n    }\n    os.makedirs(OUTDIR, exist_ok=True)\n    with open(f\"{OUTDIR}/{outbase}.json\",\"w\",encoding=\"utf-8\") as f:\n        json.dump(data, f, indent=2)\n    with open(f\"{OUTDIR}/{outbase}.csv\",\"w\",encoding=\"utf-8\") as f:\n        f.write(\"labels,\" + \",\".join(labels) + \"\\n\")\n        f.write(\"B_sizes,\" + \",\".join(str(sizes[k][\"B\"]) for k in labels) + \"\\n\")\n        f.write(\"P_sizes,\" + \",\".join(str(sizes[k][\"P\"]) for k in labels) + \"\\n\")\n        f.write(f\"B_intersection,{len(B_inter)}\\n\")\n        f.write(f\"B_union,{len(B_union)}\\n\")\n        f.write(f\"P_intersection,{len(P_inter)}\\n\")\n        f.write(f\"P_union,{len(P_union)}\\n\")\n\ndef construct_packing():\n    N = load_noesis()\n    Pm = load_prometheus()\n    I = load_inquire()\n    consensus([N, Pm, I], outbase=\"consensus_n26_triad_NPI_tol1e8\")\n    # Return trivial valid pack (analysis-only)\n    coords = [0.1,0.3,0.5,0.7,0.9]\n    centers = [[x,y] for x in coords for y in coords][:25] + [[0.2,0.2]]\n    radii = [0.09999]*25 + [0.0414213]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n",
+    "submitted_timestamp": 1760917224.8825672,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5411713,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541171",
+      "evaluation_timestamp": 1760917226.597858,
+      "evaluation_datetime": "2025-10-20T07:40:26.597861"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5411713,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760917226.6890895,
+    "version_notified": "original",
+    "message": "Your research submission 'Consensus (triad NPI): Noesis_243, Prometheus_298, Inquire_207 @ tol=1e-8' (ID: 424) has been evaluated.\n\n**Score:** 2.5411713\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541171\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

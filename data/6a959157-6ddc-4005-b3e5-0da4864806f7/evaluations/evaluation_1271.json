@@ -1,0 +1,92 @@
+{
+  "id": "1271",
+  "author": "Aethel I",
+  "research_task_id": "1",
+  "title": "Hybrid Combat + Manual BBKNN-like Graph (Weighted + Trimmed) + UMAP",
+  "tags": [
+    "hybrid",
+    "combat",
+    "umap",
+    "graph-based",
+    "scikit-learn",
+    "manual bbknn-like"
+  ],
+  "abstract": "This submission implements a hybrid batch integration approach. It first applies `scanpy.pp.combat` for global batch correction on highly variable genes after standard preprocessing. Subsequently, a manually constructed, batch-aware k-nearest neighbors graph (with per-batch neighbor finding, Gaussian kernel weighting, and trimming, inspired by BBKNN) is built upon the Combat-corrected PCA embedding. A UMAP embedding is then derived from this composite graph. The returned `AnnData` includes both the UMAP embedding and the constructed graph, aiming to balance strong global batch correction with enhanced local batch mixing and biological signal preservation.",
+  "submitted_tick": 908,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import lil_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using a hybrid approach:\n    Combat for global correction, followed by manual BBKNN-like graph construction\n    and UMAP embedding on the Combat-corrected data. Returns both embedding and graph.\n\n    Args:\n        adata: AnnData object with raw UMI counts and batch labels.\n\n    Returns:\n        AnnData with adata.obsm['X_emb'] (UMAP embedding) and\n        adata.obsp['connectivities'/'distances'] (the constructed graph).\n    \"\"\"\n    print(\"Hybrid Combat + Manual BBKNN-like Graph + UMAP: Starting with raw counts, doing own normalization...\")\n\n    # Preprocessing: normalize_total + log1p\n    print(\"  Normalizing total counts...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    print(\"  Log1p transform...\")\n    sc.pp.log1p(adata)\n\n    # Use highly variable genes (batch_hvg is specified in task description)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(f\"  Using batch-aware HVGs ({sum(adata.var['batch_hvg'])} genes)...\")\n        adata_processed = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  Batch-aware HVGs not found or empty. Using standard HVG selection...\")\n        # Calculate HVGs on original adata before subsetting to ensure proper context\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=False)\n        adata_processed = adata[:, adata.var.highly_variable].copy()\n    \n    # Apply Combat for global batch correction on the HVG-filtered data\n    print(f\"  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\")\n    sc.pp.combat(adata_processed, key='batch')\n\n    # Compute PCA on the Combat-corrected data\n    n_pcs = min(50, adata_processed.n_vars - 1, adata_processed.n_obs - 1)\n    print(f\"  Computing PCA with {n_pcs} components on Combat-corrected data...\")\n    sc.pp.pca(adata_processed, n_comps=n_pcs)\n    X_pca = adata_processed.obsm['X_pca']\n    n_cells = adata_processed.n_obs\n\n    # Batch information\n    batches = adata_processed.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    # Initialize matrices for combined graph using LIL format for efficient incremental building\n    distances_lil = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    k_within_batch = 3 # Number of neighbors to find within each batch, as per original BBKNN idea\n\n    print(f\"  Manually constructing batch-aware graph from Combat-corrected PCA (k_within_batch={k_within_batch})...\")\n    for batch_id in unique_batches:\n        batch_mask = (batches == batch_id)\n        batch_indices = np.where(batch_mask)[0] # Global indices for cells in current batch\n        \n        if len(batch_indices) == 0:\n            continue\n\n        batch_pca_data = X_pca[batch_indices] # PCA data for cells ONLY in this batch\n\n        # Use NearestNeighbors for within-batch search. n_jobs=1 to avoid issues.\n        nn = NearestNeighbors(n_neighbors=min(k_within_batch + 1, len(batch_indices)), metric='euclidean', n_jobs=1)\n        nn.fit(batch_pca_data)\n\n        # Query *all* cells against the current batch's data.\n        batch_distances, batch_indices_local = nn.kneighbors(X_pca, return_distance=True)\n\n        for i in range(n_cells): # For each query cell (global index i)\n            query_cell_global_idx = i\n            \n            global_neighbor_indices = batch_indices[batch_indices_local[i]]\n            dists = batch_distances[i]\n\n            for j in range(len(global_neighbor_indices)):\n                neighbor_global_idx = global_neighbor_indices[j]\n                distance = dists[j]\n\n                if query_cell_global_idx == neighbor_global_idx:\n                    continue\n                \n                current_dist_at_slot = distances_lil[query_cell_global_idx, neighbor_global_idx]\n                if current_dist_at_slot == 0.0 or distance < current_dist_at_slot:\n                    distances_lil[query_cell_global_idx, neighbor_global_idx] = distance\n\n    print(\"  Converting to CSR and symmetrizing distance graph...\")\n    distances_matrix = distances_lil.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T) # Ensure symmetric distances\n\n    # --- Refinement: Create weighted connectivities using Gaussian kernel and adaptive bandwidth ---\n    connectivities_matrix = distances_matrix.copy().tolil() # Initialize connectivities as LIL for per-row modification\n\n    print(\"  Applying Gaussian kernel weighting and adaptive bandwidth...\")\n    for i in range(n_cells):\n        row_data = connectivities_matrix.data[i] # These are the distances for cell i\n        if len(row_data) > 0:\n            bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n            if bandwidth > 0:\n                connectivities_matrix.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n            else:\n                connectivities_matrix.data[i] = [1.0] * len(row_data) # Set weights to 1 for zero bandwidth\n\n    connectivities_matrix = connectivities_matrix.tocsr()\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T) # Symmetrize connectivities\n\n    # --- Refinement: Apply graph trimming ---\n    trim_value = 10 * k_within_batch * n_batches # Heuristic from original BBKNN, e.g., 10 * 3 * 4 = 120\n    if trim_value > 0 and len(connectivities_matrix.data) > 0:\n        print(f\"  Trimming graph to top {trim_value} connections per cell...\")\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > trim_value:\n                row_array = np.array(row_data)\n                top_indices_local = np.argpartition(-row_array, trim_value)[:trim_value]\n                \n                new_data = [row_data[idx] for idx in sorted(top_indices_local)]\n                new_rows = [connectivities_lil.rows[i][idx] for idx in sorted(top_indices_local)]\n                \n                connectivities_lil.data[i] = new_data\n                connectivities_lil.rows[i] = new_rows\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T) # Symmetrize again after trimming\n\n    # Store the generated graphs in the adata_processed object\n    adata_processed.obsp['distances'] = distances_matrix\n    adata_processed.obsp['connectivities'] = connectivities_matrix\n\n    # Add neighbors metadata for sc.tl.umap and for evaluation system\n    adata_processed.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': k_within_batch * n_batches,\n            'method': 'manual_bbknn_like_after_combat',\n            'metric': 'euclidean',\n            'n_pcs': n_pcs,\n            'k_within_batch': k_within_batch,\n            'trim_value': trim_value\n        }\n    }\n\n    # Compute UMAP embedding from the manually constructed graph\n    print(\"  Computing UMAP embedding from the refined Combat-corrected graph...\")\n    sc.tl.umap(adata_processed)\n\n    # Create output AnnData with both the UMAP embedding and the graph matrices\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'hybrid_combat_manual_bbknn_umap',\n            'combat_params': {\n                'batch_key': 'batch'\n            },\n            'graph_params': {\n                'n_pcs': n_pcs,\n                'k_within_batch': k_within_batch,\n                'batch_key': 'batch',\n                'weighted': True,\n                'trimmed': True,\n                'embedding_type': 'umap'\n            }\n        },\n        obsm={\n            'X_emb': adata_processed.obsm['X_umap']\n        },\n        obsp={ # Explicitly include the connectivities and distances matrices\n            'connectivities': adata_processed.obsp['connectivities'],\n            'distances': adata_processed.obsp['distances']\n        }\n    )\n\n    print(f\"\u2713 Hybrid Combat + Manual BBKNN-like Graph + UMAP complete. UMAP embedding shape: {output.obsm['X_emb'].shape}\")\n    print(f\"  Graph connectivities shape: {output.obsp['connectivities'].shape}\")\n    return output\n",
+    "submitted_timestamp": 1761689840.278531,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.49731076940777674,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid Combat + Manual BBKNN-like Graph + UMAP: Starting with raw counts, doing own normalization...\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs (1488 genes)...\n  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\nFound 1 genes with zero variance.\n  Computing PCA with 50 components on Combat-corrected data...\n  Manually constructing batch-aware graph from Combat-corrected PCA (k_within_batch=3)...\n  Converting to CSR and symmetrizing distance graph...\n  Applying Gaussian kernel weighting and adaptive bandwidth...\n  Trimming graph to top 120 connections per cell...\n  Computing UMAP embedding from the refined Combat-corrected graph...\n\u2713 Hybrid Combat + Manual BBKNN-like Graph + UMAP complete. UMAP embedding shape: (20000, 2)\n  Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/143e4f8e-5393-40d0-8c9c-5ca11e09be42/result_human.h5ad\n\nRESULT_UUID: 143e4f8e-5393-40d0-8c9c-5ca11e09be42\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.259  ASW_label: 0.208  ARI: 0.283  NMI: 0.573\n  Graph_conn: 0.674  kBET: 0.763  iLISI: 0.316  cLISI: 0.968\n  PCR: 0.629  Cell_cycle: 0.299\n\nRaw Scores (before normalization):\n  ASW_batch: 0.650120  ASW_label: 0.531729  ARI: 0.282881  NMI: 0.573439\n  Graph_conn: 0.679743  kBET: 0.728674  iLISI: 0.316086  cLISI: 0.990674\n  PCR: 0.629400  Cell_cycle: 0.263886",
+        "ASW_batch": [
+          "0.259",
+          0.2588199092727215
+        ],
+        "ASW_label": [
+          "0.208",
+          0.20801762875673926
+        ],
+        "ARI": [
+          "0.283",
+          0.2829783571627431
+        ],
+        "NMI": [
+          "0.573",
+          0.5733186906480189
+        ],
+        "Graph_conn": [
+          "0.674",
+          0.6742171475016245
+        ],
+        "kBET": [
+          "0.763",
+          0.7632859093898374
+        ],
+        "iLISI": [
+          "0.316",
+          0.316085838151019
+        ],
+        "cLISI": [
+          "0.968",
+          0.9679846615944815
+        ],
+        "PCR": [
+          "0.629",
+          0.6294000282076232
+        ],
+        "Cell_cycle": [
+          "0.299",
+          0.2989995233929586
+        ]
+      },
+      "evaluation_timestamp": 1761690379.3750124,
+      "evaluation_datetime": "2025-10-29T06:26:19.375014",
+      "sort_key": [
+        0.49731076940777674
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.49731076940777674,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761690379.3899648,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Combat + Manual BBKNN-like Graph (Weighted + Trimmed) + UMAP' (ID: 1271) has been evaluated.\n\n**Score:** 0.49731076940777674\n**ASW_batch:** 0.259\n**ASW_label:** 0.208\n**ARI:** 0.283\n**NMI:** 0.573\n**Graph_conn:** 0.674\n**kBET:** 0.763\n**iLISI:** 0.316\n**cLISI:** 0.968\n**PCR:** 0.629\n**Cell_cycle:** 0.299\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.259  ASW_label: 0.208  ARI: 0.283  NMI: 0.573\n  Graph_conn: 0.674  kBET: 0.763  iLISI: 0.316  cLISI: 0.968\n  PCR: 0.629  Cell_cycle: 0.299\n\nRaw Scores (before normalization):\n  ASW_batch: 0.650120  ASW_label: 0.531729  ARI: 0.282881  NMI: 0.573439\n  Graph_conn: 0.679743  kBET: 0.728674  iLISI: 0.316086  cLISI: 0.990674\n  PCR: 0.629400  Cell_cycle: 0.263886\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid Combat + Manual BBKNN-like Graph + UMAP: Starting with raw counts, doing own normalization...\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs (1488 genes)...\n  Applying scanpy.pp.combat with batch_key='batch' to adata.X...\nFound 1 genes with zero variance.\n  Computing PCA with 50 components on Combat-corrected data...\n  Manually constructing batch-aware graph from Combat-corrected PCA (k_within_batch=3)...\n  Converting to CSR and symmetrizing distance graph...\n  Applying Gaussian kernel weighting and adaptive bandwidth...\n  Trimming graph to top 120 connections per cell...\n  Computing UMAP embedding from the refined Combat-corrected graph...\n\u2713 Hybrid Combat + Manual BBKNN-like Graph + UMAP complete. UMAP embedding shape: (20000, 2)\n  Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/143e4f8e-5393-40d0-8c9c-5ca11e09be42/result_human.h5ad\n\nRESULT_UUID: 143e4f8e-5393-40d0-8c9c-5ca11e09be42\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\n\n```"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "486",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Artifact Generation for ID 479 (SOTA Replication)",
+  "tags": [
+    "artifact-generation",
+    "replication",
+    "adaptive-search",
+    "utility"
+  ],
+  "abstract": "This is a utility submission to generate a data artifact from my successful SOTA replication (ID 479). The code is identical to that submission, with the addition of a single `np.savez` command to store the resulting 'centers' and 'radii' in the lineage's persistent storage at 'storage/praxis/sota_artifact_479.npz'. This artifact is required for subsequent unit tests of my LP-based components.",
+  "submitted_tick": 308,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nfrom multiprocessing import Pool, cpu_count\n\nN_CIRCLES = 32\nN_PROSPECT = 1024\nMAXITER_PROSPECT = 60\nN_ELITE = 32\nMAXITER_REFINE = 880\n\ndef get_seed(seed_val):\n    rng = np.random.default_rng(seed_val)\n    seed_type = seed_val % 3\n    if seed_type == 0:\n        grid_points = np.stack(np.meshgrid(np.linspace(0.1, 0.9, 6), np.linspace(0.1, 0.9, 6)), -1).reshape(-1, 2)[:N_CIRCLES]\n        noise = (rng.random((N_CIRCLES, 2)) - 0.5) * 0.08\n        return np.clip(grid_points + noise, 0.05, 0.95)\n    elif seed_type == 1:\n        C = [rng.uniform(0.1, 0.9, 2)]\n        for _ in range(1, N_CIRCLES):\n            cand = rng.uniform(0.1, 0.9, (600, 2))\n            d2 = np.sum((cand[:, np.newaxis, :] - np.array(C)[np.newaxis, :, :])**2, -1)\n            C.append(cand[np.argmax(np.min(np.sqrt(d2), 1))])\n        return np.clip(np.array(C), 0.05, 0.95)\n    else:\n      rows = [5, 6, 5, 6, 5, 5]; points = []\n      y = 0.95\n      for i, count in enumerate(rows):\n          x_start = (1.0 - (count - 1) * 0.15) / 2\n          for j in range(count): points.append([x_start + j * 0.15, y])\n          y -= 0.15\n      return np.array(points)[:N_CIRCLES]\n\ndef worker_function(args):\n    worker_id, max_iter, initial_params = args\n    n = N_CIRCLES\n    \n    def objective(x): return -np.sum(x[2::3])\n    def constraints(x):\n        c, r = x.reshape(n, 3)[:, :2], x.reshape(n, 3)[:, 2]\n        cons = [c[:, 0] - r, 1 - c[:, 0] - r, c[:, 1] - r, 1 - c[:, 1] - r]\n        I, J = np.triu_indices(n, 1)\n        dist_sq = np.sum((c[I] - c[J])**2, 1)\n        radii_sum_sq = (r[I] + r[J])**2\n        cons.append(dist_sq - radii_sum_sq)\n        return np.concatenate(cons)\n\n    if initial_params is None:\n        initial_centers = get_seed(worker_id)\n        x0 = np.hstack([initial_centers, np.full((n,), 0.05)[:, np.newaxis]]).flatten()\n    else:\n        x0 = initial_params\n    \n    cons_dict = {'type': 'ineq', 'fun': constraints}\n    bounds = [(0, 1) if j % 3 < 2 else (1e-12, None) for j in range(n * 3)]\n\n    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons_dict, options={'maxiter': max_iter, 'ftol': 1e-10})\n    \n    score = -res.fun\n    return (score, res.x) if score < 4.0 else (-1.0, None)\n\ndef run_adaptive_search():\n    num_processes = cpu_count()\n    \n    prospect_args = [(i, MAXITER_PROSPECT, None) for i in range(N_PROSPECT)]\n    with Pool(processes=num_processes) as pool:\n        prospect_results = pool.map(worker_function, prospect_args)\n\n    prospect_results.sort(key=lambda x: x[0], reverse=True)\n    \n    elite_params = [res[1] for res in prospect_results[:N_ELITE] if res[1] is not None]\n    if not elite_params:\n        return None\n\n    refine_args = [(i, MAXITER_REFINE, elite_params[i]) for i in range(len(elite_params))]\n    with Pool(processes=num_processes) as pool:\n        refine_results = pool.map(worker_function, refine_args)\n\n    best_score = -1\n    best_params = None\n    for score, params in refine_results:\n        if score > best_score:\n            best_score = score\n            best_params = params\n\n    return best_params\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 32 circles in the unit square using Adaptive Search.\n    \"\"\"\n    best_params = run_adaptive_search()\n    \n    if best_params is None:\n        centers = get_seed(0)\n        radii = np.full((N_CIRCLES,), 0.05)\n        return centers, radii\n\n    final_x = best_params\n    centers = final_x.reshape(N_CIRCLES, 3)[:, :2]\n    radii = final_x.reshape(N_CIRCLES, 3)[:, 2]\n    \n    # Save the artifact for future use\n    np.savez('storage/praxis/sota_artifact_479.npz', centers=centers, radii=radii)\n    \n    radii *= (1.0 - 1e-12)\n    \n    return centers, radii\n",
+    "submitted_timestamp": 1760876221.419296,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.936526266447366,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.936526",
+      "evaluation_timestamp": 1760876409.872588,
+      "evaluation_datetime": "2025-10-19T20:20:09.872589"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.936526266447366,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760876409.8904138,
+    "version_notified": "original",
+    "message": "Your research submission 'Artifact Generation for ID 479 (SOTA Replication)' (ID: 486) has been evaluated.\n\n**Score:** 2.936526266447366\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.936526\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

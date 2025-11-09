@@ -1,0 +1,116 @@
+{
+  "id": "1102",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Graph Correction with a Penalized Distance Metric",
+  "tags": [
+    "graph-based",
+    "distance-metric",
+    "knn",
+    "batch-penalty"
+  ],
+  "abstract": "This method constructs a corrected neighborhood graph by modifying the distance metric. After an initial PCA, it calculates a custom distance matrix where a fixed penalty is added to the Euclidean distance between any two cells from different batches. A k-NN graph is then built using this penalized metric. This encourages finding neighbors within the same batch but allows connections to exceptionally close cells in other batches, aiming for a balance between biological preservation and batch mixing.",
+  "submitted_tick": 718,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nGraph Correction with a Penalized Distance Metric\n\nThis method builds a k-NN graph using a custom distance metric that\npenalizes connections between different batches.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import lil_matrix\nfrom sklearn.metrics import pairwise_distances\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Graph Correction with Penalized Distance: Starting...\")\n\n    # --- Parameters ---\n    n_neighbors = 15\n    batch_penalty = 1.0 # Additive penalty for cross-batch distances\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing PCA...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca']\n    n_cells = adata.n_obs\n\n    # === STAGE 2: Calculate Penalized Distance Matrix ===\n    print(\"  [Stage 2] Calculating penalized distance matrix...\")\n    \n    # Calculate standard Euclidean distances\n    dist_matrix = pairwise_distances(X_pca, metric='euclidean')\n    \n    # Create a penalty matrix\n    batch_labels = adata.obs['batch'].values\n    # This creates a matrix where M[i, j] is 1 if batches are different, 0 otherwise\n    is_diff_batch = batch_labels[:, np.newaxis] != batch_labels[np.newaxis, :]\n    penalty_matrix = is_diff_batch.astype(np.float32) * batch_penalty\n    \n    # Add the penalty to the distance matrix\n    penalized_dist_matrix = dist_matrix + penalty_matrix\n    \n    print(f\"  [Stage 2] Penalty of {batch_penalty} applied to cross-batch connections.\")\n\n    # === STAGE 3: Find Neighbors and Construct Graph ===\n    print(\"  [Stage 3] Finding k-NN and constructing graph...\")\n    \n    # Find the k+1 nearest neighbors for each cell (including self)\n    # We use argpartition for efficiency as we don't need the full sorted list\n    neighbor_indices = np.argpartition(penalized_dist_matrix, kth=n_neighbors + 1, axis=1)[:, :n_neighbors + 1]\n    \n    # Create sparse matrices for graph\n    distances_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    connectivities_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        # Exclude self from neighbors\n        neighbors = neighbor_indices[i, neighbor_indices[i] != i]\n        \n        # Get the original (unpenalized) distances to these neighbors\n        dists = dist_matrix[i, neighbors]\n\n        distances_out[i, neighbors] = dists\n        # Simple connectivity: 1 for connected, 0 otherwise\n        connectivities_out[i, neighbors] = 1\n\n    # Symmetrize matrices\n    distances_out = distances_out.tocsr().maximum(distances_out.T)\n    connectivities_out = connectivities_out.tocsr().maximum(connectivities_out.T)\n\n    print(\"  [Stage 3] Graph construction complete.\")\n\n    # === STAGE 4: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsp={\n            'connectivities': connectivities_out,\n            'distances': distances_out,\n        },\n        uns={'method_id': 'penalized_distance_knn'}\n    )\n    \n    print(f\"\u2713 Penalized Distance Graph complete.\")\n    return output\n",
+    "submitted_timestamp": 1761639883.8679528,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nGraph Correction with Penalized Distance: Starting...\n  [Stage 1] Normalizing and computing PCA...\n  [Stage 2] Calculating penalized distance matrix...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp87p5kxfo/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp87p5kxfo/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp87p5kxfo/submission.py\", line 41, in eliminate_batch_effect_fn\n    is_diff_batch = batch_labels[:, np.newaxis] != batch_labels[np.newaxis, :]\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/ops/common.py\", line 76, in new_method\n    return method(self, other)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/arrays/categorical.py\", line 131, in func\n    raise ValueError(\"Lengths must match.\")\nValueError: Lengths must match.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761639893.1745465,
+      "evaluation_datetime": "2025-10-28T16:24:53.174555"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1102_1761639893",
+      "started_timestamp": 1761639893.1738312,
+      "completed_timestamp": 1761640009.335902,
+      "final_report": "# Debug Report for Evaluation 1102\n\n## Summary\n**SUCCESS** - Fixed the code in a single attempt. The submission now runs without crashing and achieved a score of 0.2939.\n\n## Root Cause\nThe original code attempted to create a boolean comparison matrix using NumPy broadcasting on pandas Categorical arrays:\n\n```python\nbatch_labels = adata.obs['batch'].values\nis_diff_batch = batch_labels[:, np.newaxis] != batch_labels[np.newaxis, :]\n```\n\nThe error occurred because:\n- `adata.obs['batch'].values` returns a pandas Categorical array\n- Pandas Categorical arrays have strict length-matching requirements for comparison operations\n- When using broadcasting with `np.newaxis`, pandas raises a `ValueError: Lengths must match` error\n- NumPy broadcasting doesn't work directly on pandas categorical types\n\n## Fix Applied\nConverted the pandas Categorical array to a pure NumPy array before applying broadcasting:\n\n```python\nbatch_labels = adata.obs['batch'].values\nbatch_labels_array = np.asarray(batch_labels)  # Convert to numpy array\nis_diff_batch = batch_labels_array[:, np.newaxis] != batch_labels_array[np.newaxis, :]\n```\n\nThis simple conversion allows NumPy's broadcasting mechanism to work correctly, creating the desired boolean matrix where `M[i, j]` is `True` if cell `i` and cell `j` are from different batches.\n\n## Result\n- **Version**: submission_v2.py\n- **Status**: Running successfully\n- **Score**: 0.2939888733577063\n- **Evaluation ID**: 1102\n\nThe algorithm's approach (penalized distance metric for k-NN graph construction) is sound. The fix only addressed a type compatibility issue between pandas and NumPy.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "#!/usr/bin/env python3\n\"\"\"\nGraph Correction with a Penalized Distance Metric\n\nThis method builds a k-NN graph using a custom distance metric that\npenalizes connections between different batches.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import lil_matrix\nfrom sklearn.metrics import pairwise_distances\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Graph Correction with Penalized Distance: Starting...\")\n\n    # --- Parameters ---\n    n_neighbors = 15\n    batch_penalty = 1.0 # Additive penalty for cross-batch distances\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing PCA...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca']\n    n_cells = adata.n_obs\n\n    # === STAGE 2: Calculate Penalized Distance Matrix ===\n    print(\"  [Stage 2] Calculating penalized distance matrix...\")\n\n    # Calculate standard Euclidean distances\n    dist_matrix = pairwise_distances(X_pca, metric='euclidean')\n\n    # Create a penalty matrix\n    # FIX: Convert pandas Series/Categorical to numpy array first\n    batch_labels = adata.obs['batch'].values\n    batch_labels_array = np.asarray(batch_labels)\n\n    # This creates a matrix where M[i, j] is 1 if batches are different, 0 otherwise\n    is_diff_batch = batch_labels_array[:, np.newaxis] != batch_labels_array[np.newaxis, :]\n    penalty_matrix = is_diff_batch.astype(np.float32) * batch_penalty\n\n    # Add the penalty to the distance matrix\n    penalized_dist_matrix = dist_matrix + penalty_matrix\n\n    print(f\"  [Stage 2] Penalty of {batch_penalty} applied to cross-batch connections.\")\n\n    # === STAGE 3: Find Neighbors and Construct Graph ===\n    print(\"  [Stage 3] Finding k-NN and constructing graph...\")\n\n    # Find the k+1 nearest neighbors for each cell (including self)\n    # We use argpartition for efficiency as we don't need the full sorted list\n    neighbor_indices = np.argpartition(penalized_dist_matrix, kth=n_neighbors + 1, axis=1)[:, :n_neighbors + 1]\n\n    # Create sparse matrices for graph\n    distances_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    connectivities_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        # Exclude self from neighbors\n        neighbors = neighbor_indices[i, neighbor_indices[i] != i]\n\n        # Get the original (unpenalized) distances to these neighbors\n        dists = dist_matrix[i, neighbors]\n\n        distances_out[i, neighbors] = dists\n        # Simple connectivity: 1 for connected, 0 otherwise\n        connectivities_out[i, neighbors] = 1\n\n    # Symmetrize matrices\n    distances_out = distances_out.tocsr().maximum(distances_out.T)\n    connectivities_out = connectivities_out.tocsr().maximum(connectivities_out.T)\n\n    print(\"  [Stage 3] Graph construction complete.\")\n\n    # === STAGE 4: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsp={\n            'connectivities': connectivities_out,\n            'distances': distances_out,\n        },\n        uns={'method_id': 'penalized_distance_knn'}\n    )\n\n    print(f\"\u2713 Penalized Distance Graph complete.\")\n    return output\n",
+      "created_timestamp": 1761639928.916947,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.2939888733577063,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nGraph Correction with Penalized Distance: Starting...\n  [Stage 1] Normalizing and computing PCA...\n  [Stage 2] Calculating penalized distance matrix...\n  [Stage 2] Penalty of 1.0 applied to cross-batch connections.\n  [Stage 3] Finding k-NN and constructing graph...\n  [Stage 3] Graph construction complete.\n\u2713 Penalized Distance Graph complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/85047355-4106-4a5a-8de5-cdecc1bd3da2/result_human.h5ad\n\nRESULT_UUID: 85047355-4106-4a5a-8de5-cdecc1bd3da2\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.415  NMI: 0.635\n  Graph_conn: 0.899  kBET: 0.000  iLISI: 0.000  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.414844  NMI: 0.635184\n  Graph_conn: 0.900703  kBET: nan  iLISI: 0.000000  cLISI: 0.997347\n  PCR: nan  Cell_cycle: 0.000000",
+          "ASW_batch": [
+            "0.000",
+            0.0
+          ],
+          "ASW_label": [
+            "0.000",
+            0.0
+          ],
+          "ARI": [
+            "0.415",
+            0.4149235581276287
+          ],
+          "NMI": [
+            "0.635",
+            0.635081323598013
+          ],
+          "Graph_conn": [
+            "0.899",
+            0.8989899655390216
+          ],
+          "kBET": [
+            "0.000",
+            0.0
+          ],
+          "iLISI": [
+            "0.000",
+            1.6283271027835629e-15
+          ],
+          "cLISI": [
+            "0.991",
+            0.9908938863123978
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.000",
+            0.0
+          ]
+        },
+        "evaluation_timestamp": 1761639986.49295,
+        "evaluation_datetime": "2025-10-28T16:26:26.492951",
+        "sort_key": [
+          0.2939888733577063
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.2939888733577063,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761640009.351467,
+    "version_notified": "v2",
+    "message": "Your research submission 'Graph Correction with a Penalized Distance Metric' (ID: 1102) succeeded after automatic debugging.\n\n**Score:** 0.2939888733577063\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.415\n**NMI:** 0.635\n**Graph_conn:** 0.899\n**kBET:** 0.000\n**iLISI:** 0.000\n**cLISI:** 0.991\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.415  NMI: 0.635\n  Graph_conn: 0.899  kBET: 0.000  iLISI: 0.000  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.414844  NMI: 0.635184\n  Graph_conn: 0.900703  kBET: nan  iLISI: 0.000000  cLISI: 0.997347\n  PCR: nan  Cell_cycle: 0.000000\n\n**Debugger Report:** # Debug Report for Evaluation 1102\n\n## Summary\n**SUCCESS** - Fixed the code in a single attempt. The submission now runs without crashing and achieved a score of 0.2939.\n\n## Root Cause\nThe original code attempted to create a boolean comparison matrix using NumPy broadcasting on pandas Categorical arrays:\n\n```python\nbatch_labels = adata.obs['batch'].values\nis_diff_batch = batch_labels[:, np.newaxis] != batch_labels[np.newaxis, :]\n```\n\nThe error occurred because:\n- `adata.obs['batch'].values` returns a pandas Categorical array\n- Pandas Categorical arrays have strict length-matching requirements for comparison operations\n- When using broadcasting with `np.newaxis`, pandas raises a `ValueError: Lengths must match` error\n- NumPy broadcasting doesn't work directly on pandas categorical types\n\n## Fix Applied\nConverted the pandas Categorical array to a pure NumPy array before applying broadcasting:\n\n```python\nbatch_labels = adata.obs['batch'].values\nbatch_labels_array = np.asarray(batch_labels)  # Convert to numpy array\nis_diff_batch = batch_labels_array[:, np.newaxis] != batch_labels_array[np.newaxis, :]\n```\n\nThis simple conversion allows NumPy's broadcasting mechanism to work correctly, creating the desired boolean matrix where `M[i, j]` is `True` if cell `i` and cell `j` are from different batches.\n\n## Result\n- **Version**: submission_v2.py\n- **Status**: Running successfully\n- **Score**: 0.2939888733577063\n- **Evaluation ID**: 1102\n\nThe algorithm's approach (penalized distance metric for k-NN graph construction) is sound. The fix only addressed a type compatibility issue between pandas and NumPy.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\n#!/usr/bin/env python3\n\"\"\"\nGraph Correction with a Penalized Distance Metric\n\nThis method builds a k-NN graph using a custom distance metric that\npenalizes connections between different batches.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import lil_matrix\nfrom sklearn.metrics import pairwise_distances\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Graph Correction with Penalized Distance: Starting...\")\n\n    # --- Parameters ---\n    n_neighbors = 15\n    batch_penalty = 1.0 # Additive penalty for cross-batch distances\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing PCA...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca']\n    n_cells = adata.n_obs\n\n    # === STAGE 2: Calculate Penalized Distance Matrix ===\n    print(\"  [Stage 2] Calculating penalized distance matrix...\")\n\n    # Calculate standard Euclidean distances\n    dist_matrix = pairwise_distances(X_pca, metric='euclidean')\n\n    # Create a penalty matrix\n    # FIX: Convert pandas Series/Categorical to numpy array first\n    batch_labels = adata.obs['batch'].values\n    batch_labels_array = np.asarray(batch_labels)\n\n    # This creates a matrix where M[i, j] is 1 if batches are different, 0 otherwise\n    is_diff_batch = batch_labels_array[:, np.newaxis] != batch_labels_array[np.newaxis, :]\n    penalty_matrix = is_diff_batch.astype(np.float32) * batch_penalty\n\n    # Add the penalty to the distance matrix\n    penalized_dist_matrix = dist_matrix + penalty_matrix\n\n    print(f\"  [Stage 2] Penalty of {batch_penalty} applied to cross-batch connections.\")\n\n    # === STAGE 3: Find Neighbors and Construct Graph ===\n    print(\"  [Stage 3] Finding k-NN and constructing graph...\")\n\n    # Find the k+1 nearest neighbors for each cell (including self)\n    # We use argpartition for efficiency as we don't need the full sorted list\n    neighbor_indices = np.argpartition(penalized_dist_matrix, kth=n_neighbors + 1, axis=1)[:, :n_neighbors + 1]\n\n    # Create sparse matrices for graph\n    distances_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    connectivities_out = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        # Exclude self from neighbors\n        neighbors = neighbor_indices[i, neighbor_indices[i] != i]\n\n        # Get the original (unpenalized) distances to these neighbors\n        dists = dist_matrix[i, neighbors]\n\n        distances_out[i, neighbors] = dists\n        # Simple connectivity: 1 for connected, 0 otherwise\n        connectivities_out[i, neighbors] = 1\n\n    # Symmetrize matrices\n    distances_out = distances_out.tocsr().maximum(distances_out.T)\n    connectivities_out = connectivities_out.tocsr().maximum(connectivities_out.T)\n\n    print(\"  [Stage 3] Graph construction complete.\")\n\n    # === STAGE 4: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsp={\n            'connectivities': connectivities_out,\n            'distances': distances_out,\n        },\n        uns={'method_id': 'penalized_distance_knn'}\n    )\n\n    print(f\"\u2713 Penalized Distance Graph complete.\")\n    return output\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nGraph Correction with Penalized Distance: Starting...\n  [Stage 1] Normalizing and computing PCA...\n  [Stage 2] Calculating penalized distance matrix...\n  [Stage 2] Penalty of 1.0 applied to cross-batch connections.\n  [Stage 3] Finding k-NN and constructing graph...\n  [Stage 3] Graph construction complete.\n\u2713 Penalized Distance Graph complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/85047355-4106-4a5a-8de5-cdecc1bd3da2/result_human.h5ad\n\nRESULT_UUID: 85047355-4106-4a5a-8de5-cdecc1bd3da2\n\n\nSTDERR:\n\n```"
+  }
+}

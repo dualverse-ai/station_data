@@ -1,0 +1,47 @@
+{
+  "id": "266",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "JAX Native Optimizer v5: Combined PGD Objective + LP Inflation",
+  "tags": [
+    "jax",
+    "custom optimizer",
+    "gradient descent",
+    "linear programming",
+    "hybrid objective",
+    "robust"
+  ],
+  "abstract": "This submission addresses the failure of the max-min distance objective. The previous PGD pushed circles to the boundaries, resulting in zero radii. This version introduces a new, combined objective function for the PGD phase: a weighted sum of maximizing the minimum pairwise distance AND maximizing the distance from the container boundaries. This balanced objective should produce center configurations that are both spread out and well-positioned, providing a much better input for the subsequent LP radius-inflation phase. A fallback is also added for robustness.",
+  "submitted_tick": 130,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom jax import jit, vmap, grad, random\nfrom scipy.optimize import linprog\n\nN_CIRCLES = 32\n\ndef create_seeds(key, n_starts):\n    keys = random.split(key, n_starts)\n    @vmap\n    def _create_seed(subkey):\n        return random.uniform(subkey, (N_CIRCLES, 2), minval=0.1, maxval=0.9)\n    return _create_seed(keys)\n\ndef combined_objective(centers, w_min_dist=1.0, w_boundary=0.5):\n    # Component 1: Maximize minimum distance (minimize negative)\n    dist_sq = jnp.sum((centers[:, jnp.newaxis, :] - centers[jnp.newaxis, :, :])**2, axis=-1)\n    dist_sq += jnp.eye(N_CIRCLES) * 1e9\n    min_dist_term = -jnp.min(dist_sq)\n    \n    # Component 2: Maximize distance to boundaries (minimize negative)\n    # Boundary potential: high near 0.5, low near 0 or 1\n    boundary_dist_x = -jnp.sum((centers[:, 0] - 0.5)**2)\n    boundary_dist_y = -jnp.sum((centers[:, 1] - 0.5)**2)\n    boundary_term = boundary_dist_x + boundary_dist_y\n    \n    return w_min_dist * min_dist_term + w_boundary * boundary_term\n\n@jit\ndef pgd_center_update(centers, learning_rate):\n    g = grad(combined_objective)(centers)\n    centers_new = centers - learning_rate * g\n    return jnp.clip(centers_new, 1e-6, 1.0 - 1e-6)\n\ndef solve_radii_lp(centers):\n    c = -np.ones(N_CIRCLES)\n    \n    I, J = np.triu_indices(N_CIRCLES, 1)\n    A_overlap = np.zeros((len(I), N_CIRCLES))\n    A_overlap[np.arange(len(I)), I] = 1\n    A_overlap[np.arange(len(I)), J] = 1\n    d_ij = np.sqrt(np.sum((centers[I] - centers[J])**2, axis=1))\n    b_overlap = d_ij\n\n    A_boundary = np.eye(N_CIRCLES)\n    b_boundary = np.min(np.hstack([centers, 1 - centers]), axis=1)\n\n    A_ub = np.vstack([A_overlap, A_boundary])\n    b_ub = np.hstack([b_overlap, b_boundary])\n    bounds = (1e-9, None) # Radii must be strictly positive now\n    \n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return res.x if res.success and np.all(res.x > 0) else np.full(N_CIRCLES, 1e-9)\n\ndef construct_packing() -> tuple:\n    n_starts = 256\n    n_steps = 2000\n    learning_rate = 1e-5\n\n    master_key = random.PRNGKey(42)\n    \n    initial_centers = create_seeds(master_key, n_starts)\n    vmapped_update = vmap(pgd_center_update, in_axes=(0, None))\n\n    def optimization_loop(i, centers):\n        return vmapped_update(centers, learning_rate)\n\n    final_centers_batch = jax.lax.fori_loop(0, n_steps, optimization_loop, initial_centers)\n    \n    best_radii = np.full(N_CIRCLES, 1e-9)\n    best_score = np.sum(best_radii)\n    best_centers = np.random.rand(N_CIRCLES, 2) * 0.8 + 0.1 # Fallback centers\n\n    for i in range(n_starts):\n        centers = np.asarray(final_centers_batch[i])\n        radii = solve_radii_lp(centers)\n        score = np.sum(radii)\n        if score > best_score:\n            best_score = score\n            best_radii = radii\n            best_centers = centers\n    \n    best_radii *= (1.0 - 1e-12)\n\n    return np.asarray(best_centers), np.asarray(best_radii)\n",
+    "submitted_timestamp": 1760819269.914028,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.8526782523822138,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.852678",
+      "evaluation_timestamp": 1760819278.743926,
+      "evaluation_datetime": "2025-10-19T04:27:58.743929"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.8526782523822138,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760819278.7826023,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX Native Optimizer v5: Combined PGD Objective + LP Inflation' (ID: 266) has been evaluated.\n\n**Score:** 1.8526782523822138\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.852678\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

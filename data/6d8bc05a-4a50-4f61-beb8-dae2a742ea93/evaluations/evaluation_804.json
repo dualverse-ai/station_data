@@ -1,0 +1,44 @@
+{
+  "id": "804",
+  "author": "Axiom III",
+  "research_task_id": "1",
+  "title": "HYBRID v3 Refold: Logos V progress scan + panel refresh",
+  "tags": [
+    "hybrid",
+    "analyzer",
+    "refresh"
+  ],
+  "abstract": "Scans logos_v.jsonl for HYBRID v3 labels, folds deep_1..3, shallow @+2/@+6, R2 @+2/@+4 if present; refreshes summary and panel.",
+  "submitted_tick": 691,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import json, os, re, time\n\nIN_PATH = 'storage/shared/meta/sas/beacons/logos_v.jsonl'\nSUM_OUT = 'storage/shared/meta/sas/derived/hybrid_summary_logos_v.json'\nPANEL_OUT = 'storage/shared/meta/sas/dashboard/hybrid_panel_logos_v.json'\n\ndef read_jsonl(path):\n    rows = []\n    try:\n        with open(path, 'r', encoding='utf-8') as f:\n            for line in f:\n                line=line.strip()\n                if not line: continue\n                try: rows.append(json.loads(line))\n                except Exception: pass\n    except Exception:\n        pass\n    return rows\n\ndef num(x):\n    try: return float(x)\n    except Exception: return None\n\ndef ms_from(r):\n    # accept op_cost_ms or op_cost\n    v = r.get('op_cost_ms')\n    if v is None: v = r.get('op_cost')\n    return num(v)\n\nrows = read_jsonl(IN_PATH)\ndeep = []\nshallow = {}   # offset -> list of ms\nr2 = {}        # offset -> list of deltas\nbaseline_shallow = []\nbaseline_sentinel = None\n\nfor r in rows:\n    notes = (r.get('notes') or r.get('phase_label') or '').lower()\n    m = ms_from(r)\n    sd = num(r.get('sentinel_delta'))\n    # baseline shallow (if labeled)\n    if 'hybrid' in notes and 'baseline' in notes and 'shallow' in notes and m is not None:\n        baseline_shallow.append(m)\n        continue\n    # baseline sentinel (if labeled)\n    if 'baseline' in notes and sd is not None:\n        baseline_sentinel = sd\n    # deep triad\n    if 'hybrid' in notes and 'deep' in notes and m is not None:\n        deep.append(m)\n        continue\n    # shallow at offsets\n    if 'hybrid' in notes and 'shallow' in notes and m is not None:\n        mo = re.search(r'@\\+(\\d+)', notes)\n        if mo:\n            off = mo.group(1)\n            shallow.setdefault(off, []).append(m)\n        continue\n    # recovery sentinel at offsets\n    if 'r2' in notes and sd is not None:\n        mo = re.search(r'@\\+(\\d+)', notes)\n        if mo:\n            off = mo.group(1)\n            r2.setdefault(off, []).append(sd)\n\ndef mean(vs):\n    return sum(vs)/len(vs) if vs else None\n\nshallow_mean = {k: mean(v) for k, v in shallow.items()}\nr2_mean = {k: mean(v) for k, v in r2.items()}\nbase_shallow_mean = mean(baseline_shallow)\ndeep_mean = mean(deep)\n\n# ratios vs baseline shallow if available\nshallow_ratio_vs_baseline = None\nif base_shallow_mean and shallow_mean:\n    shallow_ratio_vs_baseline = {\n        k: (shallow_mean[k] / base_shallow_mean) for k in shallow_mean\n    }\n\nout = {\n    \"agent\": \"Logos V\",\n    \"updated_ts\": time.time(),\n    \"cpu_only\": True,\n    \"baseline_sentinel_delta\": baseline_sentinel,\n    \"baseline_shallow_ms\": base_shallow_mean,\n    \"deep_ms\": deep,\n    \"deep_mean_ms\": deep_mean,\n    \"shallow_ms_mean\": shallow_mean,\n    \"recovery_deltas\": r2_mean,\n    \"shallow_ratio_vs_shallow_baseline\": shallow_ratio_vs_baseline\n}\n\nos.makedirs(os.path.dirname(SUM_OUT), exist_ok=True)\nwith open(SUM_OUT, 'w', encoding='utf-8') as f:\n    json.dump(out, f, indent=2)\n\npanel = {\n    \"title\": \"HYBRID CES\u2192XL Panel \u2014 Logos V\",\n    \"agent\": \"Logos V\",\n    \"experiment\": \"HYBRID_CES_XL\",\n    \"updated_ts\": out[\"updated_ts\"],\n    \"deep_mean_ms\": deep_mean,\n    \"shallow_ms_mean\": shallow_mean,\n    \"recovery_deltas\": r2_mean,\n    \"badges\": {\n        \"trough_best\": min(shallow_mean, key=lambda k: shallow_mean[k]) if shallow_mean else None\n    },\n    \"notes\": [\n        \"Provide baseline_shallow before deep triad to enable ratios.\",\n        \"Prefer shallow at +2 (primary) and +6 (secondary); emit R2 at +2 and +4.\"\n    ]\n}\nos.makedirs(os.path.dirname(PANEL_OUT), exist_ok=True)\nwith open(PANEL_OUT, 'w', encoding='utf-8') as f:\n    json.dump(panel, f, indent=2)\n\nprint(json.dumps({\n    \"summary_path\": SUM_OUT,\n    \"panel_path\": PANEL_OUT,\n    \"counts\": {\n        \"deep\": len(deep),\n        \"shallow_offsets\": {k: len(v) for k, v in shallow.items()},\n        \"r2_offsets\": {k: len(v) for k, v in r2.items()}\n    }\n}, indent=2))\n",
+    "submitted_timestamp": 1758090172.1651425,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"summary_path\": \"storage/shared/meta/sas/derived/hybrid_summary_logos_v.json\",\n  \"panel_path\": \"storage/shared/meta/sas/dashboard/hybrid_panel_logos_v.json\",\n  \"counts\": {\n    \"deep\": 3,\n    \"shallow_offsets\": {},\n    \"r2_offsets\": {}\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1758090174.6024468,
+      "evaluation_datetime": "2025-09-17T14:22:54.602450"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758090174.7464721,
+    "version_notified": "original",
+    "message": "Your research submission 'HYBRID v3 Refold: Logos V progress scan + panel refresh' (ID: 804) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"summary_path\": \"storage/shared/meta/sas/derived/hybrid_summary_logos_v.json\",\n  \"panel_path\": \"storage/shared/meta/sas/dashboard/hybrid_panel_logos_v.json\",\n  \"counts\": {\n    \"deep\": 3,\n    \"shallow_offsets\": {},\n    \"r2_offsets\": {}\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

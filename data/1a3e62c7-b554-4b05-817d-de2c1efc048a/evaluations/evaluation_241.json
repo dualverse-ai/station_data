@@ -1,0 +1,46 @@
+{
+  "id": "241",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Multi-Start SLSQP with Force-Directed Seeding",
+  "tags": [
+    "hybrid-algorithm",
+    "physics-based",
+    "force-directed",
+    "seeding",
+    "slsqp"
+  ],
+  "abstract": "To break a persistent performance plateau, this submission replaces the SA seeder with a novel physics-based 'Force-Directed Seeding' algorithm. This method simulates physical repulsion forces between circles and boundaries, driving an initially random configuration into a stable, non-overlapping state. This structurally different seed is then fed into the multi-start SLSQP optimizer for refinement. The goal is to discover entirely new basins of attraction inaccessible to previous methods.",
+  "submitted_tick": 151,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\ndef _force_directed_seed(seed):\n    \"\"\"\n    Generates an initial configuration using a physics-based force-directed layout.\n    \"\"\"\n    np.random.seed(seed)\n    n_circles = 26\n    \n    # 1. Initialization: Randomly place circles\n    centers = np.random.rand(n_circles, 2)\n    # Start with a plausible average radius for force calculations\n    radii = np.full(n_circles, 0.1) \n\n    # 2. Force Simulation\n    n_steps = 300\n    learning_rate = 0.01\n    \n    for step in range(n_steps):\n        force_vectors = np.zeros_like(centers)\n        \n        # Repulsion forces between circles\n        for i in range(n_circles):\n            for j in range(i + 1, n_circles):\n                delta = centers[j] - centers[i]\n                dist_sq = np.sum(delta**2)\n                if dist_sq == 0: dist_sq = 1e-6 # Avoid division by zero\n                dist = np.sqrt(dist_sq)\n                rad_sum = radii[i] + radii[j]\n                \n                if dist < rad_sum:\n                    overlap = rad_sum - dist\n                    # Force is proportional to overlap and pushes circles apart\n                    force = (delta / dist) * overlap\n                    force_vectors[i] -= force\n                    force_vectors[j] += force\n\n        # Repulsion forces from walls\n        for i in range(n_circles):\n            x, y = centers[i]\n            r = radii[i]\n            if x - r < 0: force_vectors[i, 0] += (r - x)\n            if x + r > 1: force_vectors[i, 0] -= (x + r - 1)\n            if y - r < 0: force_vectors[i, 1] += (r - y)\n            if y + r > 1: force_vectors[i, 1] -= (y + r - 1)\n        \n        # 3. Update positions\n        centers += learning_rate * force_vectors\n        centers = np.clip(centers, 0, 1) # Keep centers within bounds\n        \n    # The radii from the simulation are not used, SLSQP will find optimal ones\n    initial_radii = np.full(n_circles, 0.05) # Small initial radii for SLSQP\n    initial_guess = np.zeros(n_circles * 3)\n    initial_guess[0::3] = centers[:, 0]\n    initial_guess[1::3] = centers[:, 1]\n    initial_guess[2::3] = initial_radii\n    return initial_guess\n\ndef _run_slsqp_optimization(initial_guess):\n    n_circles = 26\n    def objective(p): return -np.sum(p[2::3])\n    constraints = []\n    for i in range(n_circles):\n        constraints.extend([\n            {'type': 'ineq', 'fun': lambda p, i=i: p[i*3] - p[i*3+2]}, {'type': 'ineq', 'fun': lambda p, i=i: 1-p[i*3]-p[i*3+2]},\n            {'type': 'ineq', 'fun': lambda p, i=i: p[i*3+1]-p[i*3+2]}, {'type': 'ineq', 'fun': lambda p, i=i: 1-p[i*3+1]-p[i*3+2]}\n        ])\n        for j in range(i + 1, n_circles):\n            constraints.append({'type': 'ineq', 'fun': lambda p, i=i, j=j: (p[i*3]-p[j*3])**2 + (p[i*3+1]-p[j*3+1])**2 - (p[i*3+2]+p[j*3+2])**2})\n    bounds = []\n    for i in range(n_circles): bounds.extend([(0,1), (0,1), (1e-6, 0.5)])\n    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 250})\n    p = result.x\n    centers = np.vstack((p[0::3], p[1::3])).T; radii = p[2::3]\n    return centers, radii\n\ndef _ensure_validity(centers, radii):\n    n = centers.shape[0]; safety_factor = 1.0 - 1e-9\n    for i in range(n): radii[i] = min(radii[i], centers[i,0], 1-centers[i,0], centers[i,1], 1-centers[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    violations+=1;\n                    if rad_sum > 0: scale = (dist/rad_sum)*safety_factor; radii[i]*=scale; radii[j]*=scale\n        if violations == 0: break\n    return centers, np.maximum(radii, 0)\n\ndef construct_packing() -> tuple:\n    num_starts = 16\n    best_score = -1\n    best_packing = (None, None)\n\n    for i in range(num_starts):\n        initial_guess = _force_directed_seed(seed=i)\n        centers, radii = _run_slsqp_optimization(initial_guess)\n        centers, radii = _ensure_validity(centers, radii)\n        current_score = np.sum(radii)\n        \n        if current_score > best_score:\n            best_score = current_score\n            best_packing = (centers, radii)\n    \n    return best_packing\n",
+    "submitted_timestamp": 1760886025.5480192,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.628595748683777,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.628596",
+      "evaluation_timestamp": 1760886093.1682518,
+      "evaluation_datetime": "2025-10-19T23:01:33.168257"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.628595748683777,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760886093.1854837,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start SLSQP with Force-Directed Seeding' (ID: 241) has been evaluated.\n\n**Score:** 2.628595748683777\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.628596\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

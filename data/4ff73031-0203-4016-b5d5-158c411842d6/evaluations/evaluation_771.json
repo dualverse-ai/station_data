@@ -1,0 +1,47 @@
+{
+  "id": "771",
+  "author": "Insight I",
+  "research_task_id": "1",
+  "title": "Insight I: Mechanistic Probe - ConvLSTM Input Normalization Feature Statistics (Test-Only)",
+  "tags": [
+    "stagnation",
+    "probe",
+    "normalization",
+    "feature statistics",
+    "convlstm",
+    "test-only"
+  ],
+  "abstract": "This mechanistic probe investigates the impact of 'ConvLSTM Input Normalization' (Idea 2 from Stagnation Protocol I, ID 733: 73.5%) on the feature statistics of the CNN backbone output, directly at the input to the ConvLSTM. The probe quantifies changes in mean, standard deviation, variance, and L2 magnitude of features before and after the application of an external LayerNorm layer, aiming to explain its observed performance gains by demonstrating its stabilizing effect on feature distributions. This is a follow-up to Archive #28, addressing reviewer suggestions.",
+  "submitted_tick": 446,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing import Tuple, Dict, Any, Optional\n\n# --- Shared CNN Backbone for Feature Extraction ---\nclass ResidualBlock(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features, (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(x)\n        y = nn.relu(y)\n        y = nn.Conv(self.features, (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(y)\n        return nn.relu(x + y)\n\nclass CNNBackbone(nn.Module):\n    cnn_features_1: int\n    cnn_features_2: int\n    @nn.compact\n    def __call__(self, x: jnp.ndarray):\n        x = nn.Conv(self.cnn_features_1, (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(x); x = nn.relu(x)\n        x = ResidualBlock(self.cnn_features_1)(x)\n        x = nn.Conv(self.cnn_features_2, (3,3), padding='SAME',\n                    kernel_init=nn.initializers.xavier_uniform())(x); x = nn.relu(x)\n        x = ResidualBlock(self.cnn_features_2)(x)\n        return x\n\n# --- Test function for mechanistic probe ---\ndef test():\n    print(\"Running mechanistic probe: ConvLSTM Input Normalization effect on CNN features.\")\n    \n    # Dummy input observation (1 batch, 8x8 spatial, 8 channels)\n    dummy_obs = jnp.zeros((1, 8, 8, 8), dtype=jnp.float32)\n    \n    # Hyperparameters for network instantiation (from baseline)\n    hparams = {\n        'cnn_features_1': 32,\n        'cnn_features_2': 64,\n    }\n    \n    # Instantiate the CNN backbone\n    cnn_backbone = CNNBackbone(\n        cnn_features_1=hparams['cnn_features_1'],\n        cnn_features_2=hparams['cnn_features_2'],\n    )\n    \n    # Initialize parameters for the CNN backbone and a separate LayerNorm module\n    key = jax.random.PRNGKey(0)\n    cnn_params = cnn_backbone.init(key, dummy_obs)['params']\n    \n    # Get the CNN output features (input to ConvLSTM for baseline)\n    baseline_cnn_out_features = cnn_backbone.apply({'params': cnn_params}, dummy_obs)\n\n    # Simulate ConvLSTM Input Normalization\n    ln_module = nn.LayerNorm(name=\"simulated_convlstm_input_layernorm\", epsilon=1e-5)\n    ln_params = ln_module.init(key, baseline_cnn_out_features)['params']\n    normalized_cnn_out_after = ln_module.apply({'params': ln_params}, baseline_cnn_out_features)\n\n    # Calculate statistics\n    def compute_stats(features):\n        mean = jnp.mean(features)\n        std = jnp.std(features)\n        variance = jnp.var(features)\n        magnitude = jnp.linalg.norm(features) # L2 norm\n        return mean, std, variance, magnitude\n\n    mean_base, std_base, var_base, mag_base = compute_stats(baseline_cnn_out_features)\n    mean_after_norm, std_after_norm, var_after_norm, mag_after_norm = compute_stats(normalized_cnn_out_after)\n\n    # Print results\n    print(f\"\\n--- Feature Statistics (after CNN backbone, before ConvLSTM) ---\")\n    print(f\"Baseline CNN Output Features (No Input Norm):\")\n    print(f\"  Mean: {mean_base:.4f}\")\n    print(f\"  Std Dev: {std_base:.4f}\")\n    print(f\"  Variance: {var_base:.4f}\")\n    print(f\"  Magnitude (L2): {mag_base:.4f}\")\n\n    print(f\"\\nSimulated Input LayerNorm (on Baseline CNN Output):\")\n    print(f\"  After LayerNorm:\")\n    print(f\"    Mean: {mean_after_norm:.4f}\")\n    print(f\"    Std Dev: {std_after_norm:.4f}\")\n    print(f\"    Variance: {var_after_norm:.4f}\")\n    print(f\"    Magnitude (L2): {mag_after_norm:.4f}\")\n\n    # Quantify changes\n    if var_base > 1e-6: # Avoid division by zero/very small numbers\n        print(f\"\\n--- Impact of Simulated Input LayerNorm ---\")\n        print(f\"Relative change in Variance (After vs Before Norm): {(var_after_norm / var_base - 1.0) * 100:.2f}%\")\n        print(f\"Relative change in Std Dev (After vs Before Norm): {(std_after_norm / std_base - 1.0) * 100:.2f}%\")\n        print(f\"Relative change in Magnitude (After vs Before Norm): {(mag_after_norm / mag_base - 1.0) * 100:.2f}%\")\n    else:\n        print(\"\\nVariance before normalization is too small to compute relative change.\")\n\n    return \"Mechanistic probe complete. Check logs for details.\"\n\n# --- Placeholder for required functions (not used in test-only mode) ---\ndef _define_hyperparameters():\n    return {}\ndef create_network(hparams):\n    return nn.CompactNet([]) # Dummy network\ndef create_optimizer(learning_rate: float = 4e-4):\n    return optax.adam(learning_rate)\ndef training_step(network, optimizer, params, opt_state, batch):\n    return params, opt_state\n",
+    "submitted_timestamp": 1758192533.3872194,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nRunning mechanistic probe: ConvLSTM Input Normalization effect on CNN features.\n\n--- Feature Statistics (after CNN backbone, before ConvLSTM) ---\nBaseline CNN Output Features (No Input Norm):\n  Mean: 0.0000\n  Std Dev: 0.0000\n  Variance: 0.0000\n  Magnitude (L2): 0.0000\n\nSimulated Input LayerNorm (on Baseline CNN Output):\n  After LayerNorm:\n    Mean: 0.0000\n    Std Dev: 0.0000\n    Variance: 0.0000\n    Magnitude (L2): 0.0000\n\nVariance before normalization is too small to compute relative change.\nTest completed. Result: Mechanistic probe complete. Check logs for details.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758192539.6599045,
+      "evaluation_datetime": "2025-09-18T18:48:59.659906"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758192539.7447932,
+    "version_notified": "original",
+    "message": "Your research submission 'Insight I: Mechanistic Probe - ConvLSTM Input Normalization Feature Statistics (Test-Only)' (ID: 771) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nRunning mechanistic probe: ConvLSTM Input Normalization effect on CNN features.\n\n--- Feature Statistics (after CNN backbone, before ConvLSTM) ---\nBaseline CNN Output Features (No Input Norm):\n  Mean: 0.0000\n  Std Dev: 0.0000\n  Variance: 0.0000\n  Magnitude (L2): 0.0000\n\nSimulated Input LayerNorm (on Baseline CNN Output):\n  After LayerNorm:\n    Mean: 0.0000\n    Std Dev: 0.0000\n    Variance: 0.0000\n    Magnitude (L2): 0.0000\n\nVariance before normalization is too small to compute relative change.\nTest completed. Result: Mechanistic probe complete. Check logs for details.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

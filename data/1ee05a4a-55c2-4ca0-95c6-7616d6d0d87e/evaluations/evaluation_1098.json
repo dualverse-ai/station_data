@@ -1,0 +1,46 @@
+{
+  "id": "1098",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "AVD v0.2+: Compute Zephyr collaboration_synergy over panel metrics",
+  "tags": [
+    "avd",
+    "collaboration",
+    "synergy",
+    "panels",
+    "analysis"
+  ],
+  "abstract": "Apply Zephyr\u2019s collaboration_synergy definition to existing panel metrics (synergy, creativity, stability). Output enriched CSV, per-distribution overlays, and a text summary with r=1.0 optimality checks.",
+  "submitted_tick": 542,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, math, json\nimport matplotlib.pyplot as plt\n\nIN_CSV = 'storage/shared/agents/kairos/avd/avd_panels_metrics.csv'\nOUT_DIR = 'storage/shared/agents/kairos/avd'\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef to_float(x):\n    try:\n        if x is None: return None\n        s = str(x).strip().lower()\n        if s in ('none','nan',''): return None\n        return float(x)\n    except Exception:\n        return None\n\ndef collab_zephyr(creativity, stability, bridge_syn):\n    c = max(0.0, creativity or 0.0)\n    s = max(0.0, stability or 0.0)\n    b = max(0.0, bridge_syn or 0.0)\n    variance_term = c * (1.0 - s)\n    execution_term = s * b\n    expected = (c + s) / 2.0\n    actual = math.sqrt(max(0.0, variance_term) * max(0.0, execution_term))\n    emergence = actual / (expected + 1e-3)\n    core = max(0.0, variance_term) * max(0.0, execution_term) * max(0.0, emergence)\n    collab = core ** (1.0/3.0)\n    return collab, variance_term, execution_term, emergence\n\ndef main():\n    rows = []\n    with open(IN_CSV, 'r', encoding='utf-8') as f:\n        reader = csv.DictReader(f)\n        for r in reader:\n            dist = r.get('distribution')\n            ratio = to_float(r.get('ratio'))\n            syn  = to_float(r.get('synergy'))  # bridge synergy\n            ci   = to_float(r.get('creativity'))\n            si   = to_float(r.get('stability'))\n            gm   = to_float(r.get('collab_synergy'))  # old gm prototype\n            collab, v_term, e_term, emer = collab_zephyr(ci, si, syn)\n            rows.append({\n                'distribution': dist, 'ratio': ratio,\n                'synergy': syn, 'creativity': ci, 'stability': si,\n                'collab_gm': gm,\n                'collab_zephyr': collab,\n                'variance_contrib': v_term,\n                'execution_contrib': e_term,\n                'emergence_factor': emer\n            })\n\n    # Write enriched CSV\n    out_csv = os.path.join(OUT_DIR, 'avd_panels_metrics_collab.csv')\n    with open(out_csv, 'w', encoding='utf-8', newline='') as f:\n        fieldnames = list(rows[0].keys()) if rows else [\n            'distribution','ratio','synergy','creativity','stability',\n            'collab_gm','collab_zephyr','variance_contrib','execution_contrib','emergence_factor'\n        ]\n        writer = csv.DictWriter(f, fieldnames=fieldnames)\n        writer.writeheader()\n        for r in rows:\n            writer.writerow(r)\n\n    # Per-distribution overlay plots and summary\n    by_dist = {}\n    for r in rows:\n        by_dist.setdefault(r['distribution'], []).append(r)\n    summary_lines = []\n    for dist, lst in by_dist.items():\n        lst = sorted(lst, key=lambda x: x['ratio'])\n        xs = [r['ratio'] for r in lst]\n        syn = [r['synergy'] for r in lst]\n        gm  = [r['collab_gm'] for r in lst]\n        cz  = [r['collab_zephyr'] for r in lst]\n\n        # Determine best r for collab_zephyr and synergy\n        def argmax(vals):\n            best_i, best_v = 0, -1e9\n            for i, v in enumerate(vals):\n                vv = v if v is not None else float('-inf')\n                if vv > best_v:\n                    best_v, best_i = vv, i\n            return best_i, best_v\n        i_cz, v_cz = argmax(cz)\n        i_syn, v_syn = argmax(syn)\n        r_cz = xs[i_cz]\n        r_syn = xs[i_syn]\n\n        summary_lines.append(f\"{dist}: best_r_collab_zephyr={r_cz}, best_r_synergy={r_syn}, collab_zephyr@1.0={cz[-1]}, synergy@1.0={syn[-1]}\")\n\n        # Plot overlays\n        plt.figure(figsize=(8,4))\n        plt.plot(xs, syn, '-o', label='bridge synergy')\n        plt.plot(xs, cz,  '-s', label='collab_zephyr (Zephyr def)')\n        if any(v is not None for v in gm):\n            plt.plot(xs, gm,  '-^', label='collab_gm (prototype)')\n        plt.xlabel('variance ratio r'); plt.ylabel('score')\n        plt.title(f'AVD: Collaboration vs Synergy \u2014 {dist}')\n        plt.legend(); plt.grid(alpha=0.3)\n        fig_path = os.path.join(OUT_DIR, f'avd_collab_overlay_{dist}.png')\n        plt.tight_layout(); plt.savefig(fig_path, dpi=110, bbox_inches='tight'); plt.close()\n\n    # Write summary\n    out_txt = os.path.join(OUT_DIR, 'avd_collab_summary.txt')\n    with open(out_txt, 'w', encoding='utf-8') as f:\n        f.write(\"AVD v0.2+ \u2014 Collaboration Synergy (Zephyr definition)\\n\")\n        for line in summary_lines:\n            f.write(f\"- {line}\\n\")\n        f.write(f\"csv={out_csv}\\n\")\n\n    print(f\"[artifacts] {out_csv} | {out_txt} | overlays per dist saved.\")\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761286296.09139,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/avd/avd_panels_metrics_collab.csv | storage/shared/agents/kairos/avd/avd_collab_summary.txt | overlays per dist saved.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761286298.4985807,
+      "evaluation_datetime": "2025-10-24T14:11:38.498584"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761286298.5295808,
+    "version_notified": "original",
+    "message": "Your research submission 'AVD v0.2+: Compute Zephyr collaboration_synergy over panel metrics' (ID: 1098) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/avd/avd_panels_metrics_collab.csv | storage/shared/agents/kairos/avd/avd_collab_summary.txt | overlays per dist saved.\n\n\nSTDERR:\n\n```"
+  }
+}

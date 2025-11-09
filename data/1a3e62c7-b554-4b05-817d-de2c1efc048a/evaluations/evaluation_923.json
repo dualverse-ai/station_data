@@ -1,0 +1,46 @@
+{
+  "id": "923",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 3: GA + SLSQP Hybrid (v1)",
+  "tags": [
+    "episteme",
+    "innovation",
+    "genetic algorithm",
+    "hybrid method",
+    "global search"
+  ],
+  "abstract": "Initiating a new research arc to escape the SOTA plateau. This experiment introduces a hybrid method combining a Genetic Algorithm (GA) for global search with SLSQP for local refinement.\nThe GA evolves a population of random packings to find a promising, novel configuration.\nThe best individual from the GA is then passed to the SLSQP optimizer for final polishing.\nThis approach aims to discover an entirely new basin of attraction, superior to the current SOTA.",
+  "submitted_tick": 581,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\nN = 26\n\n# --- Genetic Algorithm Components ---\nPOPULATION_SIZE = 20\nGENERATIONS = 30\nMUTATION_RATE = 0.1\nMUTATION_STRENGTH = 0.05\n\ndef _ensure_validity(c, r, repair_iters=5):\n    for _ in range(repair_iters):\n        violations = 0\n        # Non-overlap repair\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j])\n                rad_sum = r[i] + r[j]\n                if dist < rad_sum:\n                    violations += 1\n                    overlap = rad_sum - dist\n                    direction = (c[i] - c[j]) / (dist + 1e-9)\n                    c[i] += direction * overlap * 0.5\n                    c[j] -= direction * overlap * 0.5\n        if violations == 0:\n            break\n    # Boundary repair\n    r_vec = r.reshape(-1, 1)\n    c = np.clip(c, r_vec, 1.0 - r_vec)\n    return c, np.maximum(r, 1e-6)\n\ndef create_individual():\n    centers = np.random.rand(N, 2)\n    radii = np.random.uniform(0.05, 0.1, size=N)\n    return _ensure_validity(centers, radii)\n\ndef fitness(individual):\n    return np.sum(individual[1])\n\ndef crossover(parent1, parent2):\n    c1, r1 = parent1\n    c2, r2 = parent2\n    split = N // 2\n    child_c = np.vstack([c1[:split], c2[split:]])\n    child_r = np.concatenate([r1[:split], r2[split:]])\n    return child_c, child_r\n\ndef mutate(individual):\n    centers, radii = individual\n    for i in range(N):\n        if np.random.rand() < MUTATION_RATE:\n            centers[i] += np.random.uniform(-MUTATION_STRENGTH, MUTATION_STRENGTH, 2)\n            radii[i] *= np.random.uniform(1 - MUTATION_STRENGTH, 1 + MUTATION_STRENGTH)\n    return centers, radii\n\ndef construct_packing() -> tuple:\n    np.random.seed(42)\n    # --- Stage 1: Genetic Algorithm ---\n    population = [create_individual() for _ in range(POPULATION_SIZE)]\n    \n    for gen in range(GENERATIONS):\n        population.sort(key=fitness, reverse=True)\n        next_gen = population[:POPULATION_SIZE // 2]\n        for i in range(POPULATION_SIZE // 2):\n            parent1 = next_gen[np.random.randint(len(next_gen))]\n            parent2 = next_gen[np.random.randint(len(next_gen))]\n            child_c, child_r = crossover(parent1, parent2)\n            child_c, child_r = mutate((child_c, child_r))\n            child_c, child_r = _ensure_validity(child_c, child_r)\n            next_gen.append((child_c, child_r))\n        population = next_gen\n\n    best_ga_packing = max(population, key=fitness)\n    ga_centers, ga_radii = best_ga_packing\n\n    # --- Stage 2: SLSQP Refinement ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    \n    initial_z = cr_to_z(ga_centers, ga_radii)\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1500, 'ftol': 1e-10})\n    \n    if res.success:\n        c_res, r_res = z_to_cr(res.x)\n        return _ensure_validity(c_res, r_res, repair_iters=10)\n    else:\n        return ga_centers, ga_radii\n",
+    "submitted_timestamp": 1761010210.1107097,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 0 and 2 overlap: dist=0.2245296139817294, r1+r2=0.22452961398182147",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 0 and 2 overlap: dist=0.2245296139817294, r1+r2=0.22452961398182147",
+      "evaluation_timestamp": 1761010215.8874402,
+      "evaluation_datetime": "2025-10-21T09:30:15.887443"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761010215.902781,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 3: GA + SLSQP Hybrid (v1)' (ID: 923) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 0 and 2 overlap: dist=0.2245296139817294, r1+r2=0.22452961398182147\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

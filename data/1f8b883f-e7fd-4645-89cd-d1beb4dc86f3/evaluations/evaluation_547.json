@@ -1,0 +1,71 @@
+{
+  "id": "547",
+  "author": "Ariadne II",
+  "research_task_id": "1",
+  "title": "Analysis: \u03b3[t]\u2013Difficulty Alignment and Condition Effects (CPU, no training)",
+  "tags": [
+    "analysis",
+    "gamma",
+    "interpretability",
+    "per-condition",
+    "fourier-ln"
+  ],
+  "abstract": "CPU-only analysis that reads exported \u03b3[t] profiles and per-condition step MAEs from lineage storage, computes \u03b3\u2013difficulty correlations and condition contributions, and writes a concise report to storage/ariadne/analyses/ariadne2_cond_gamma_report.md.",
+  "submitted_tick": 304,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob\nimport numpy as np\n\ndef _safe_mean(xs, axis=None):\n    xs = np.asarray(xs, dtype=float)\n    return float(np.mean(xs, axis=axis))\n\ndef _find_len32_sequence(obj):\n    # Recursively search for a length-32 numeric sequence in nested dict/list\n    if isinstance(obj, dict):\n        for v in obj.values():\n            out = _find_len32_sequence(v)\n            if out is not None:\n                return out\n    elif isinstance(obj, (list, tuple)):\n        # If it's exactly a list of 32 scalars, return it\n        if len(obj) == 32 and all(isinstance(x, (int, float)) for x in obj):\n            return list(map(float, obj))\n        # Else search elements\n        for v in obj:\n            out = _find_len32_sequence(v)\n            if out is not None:\n                return out\n    return None\n\ndef _load_gamma_vectors(path_pat):\n    gammas = []\n    for p in sorted(glob.glob(path_pat)):\n        try:\n            with open(p, 'r') as f:\n                data = json.load(f)\n            g = None\n            # Heuristic key tries\n            for k in ['gamma', 'gamma_t', 'gamma_values', 'gamma_list']:\n                if k in data and isinstance(data[k], (list, tuple)) and len(data[k]) == 32:\n                    g = list(map(float, data[k]))\n                    break\n            if g is None:\n                g = _find_len32_sequence(data)\n            if g is not None and len(g) == 32:\n                gammas.append(np.array(g, dtype=float))\n        except Exception as e:\n            print(f\"[warn] Failed to parse gamma file {p}: {e}\")\n    return gammas\n\ndef _load_per_condition_step_mae(path_pat):\n    # Expect dict[condition] -> list[32] or a nested map containing such\n    step_lists = []\n    for p in sorted(glob.glob(path_pat)):\n        try:\n            with open(p, 'r') as f:\n                data = json.load(f)\n            candidates = []\n            # Search for dict of lists-of-32\n            stack = [data]\n            while stack:\n                obj = stack.pop()\n                if isinstance(obj, dict):\n                    # If values are all lists of len 32, collect them\n                    vals = list(obj.values())\n                    if vals and all(isinstance(v, (list, tuple)) and len(v) == 32 for v in vals):\n                        # collect\n                        for v in vals:\n                            candidates.append(np.array(list(map(float, v))))\n                    else:\n                        stack.extend(vals)\n                elif isinstance(obj, list):\n                    stack.extend(obj)\n            if candidates:\n                # average across conditions within this file -> [32]\n                step_lists.append(np.mean(np.stack(candidates, axis=0), axis=0))\n            else:\n                # fallback: try to find a single len-32 sequence and treat it as overall step MAE\n                seq = _find_len32_sequence(data)\n                if seq is not None:\n                    step_lists.append(np.array(seq, dtype=float))\n        except Exception as e:\n            print(f\"[warn] Failed to parse per-condition file {p}: {e}\")\n    return step_lists\n\ndef test():\n    os.makedirs(\"storage/ariadne/analyses\", exist_ok=True)\n    gamma_files = \"storage/ariadne/analyses/fourier_learn_gamma_export_v2/*.json\"\n    cond_files  = \"storage/ariadne/analyses/fourier_learn_gamma_per_condition/*.json\"\n\n    gammas = _load_gamma_vectors(gamma_files)\n    step_mae_lists = _load_per_condition_step_mae(cond_files)\n\n    report = []\n    report.append(\"# \u03b3[t]\u2013Difficulty Alignment (Ariadne II analysis)\")\n    report.append(\"\")\n    report.append(f\"Gamma files parsed: {len(gammas)}\")\n    report.append(f\"Per-condition files parsed: {len(step_mae_lists)}\")\n\n    if gammas:\n        g_mean = np.mean(np.stack(gammas, axis=0), axis=0)  # [32]\n        report.append(\"gamma_mean (first 8 steps): \" + \", \".join(f\"{x:.3f}\" for x in g_mean[:8]))\n        report.append(\"gamma_mean (last 8 steps):  \" + \", \".join(f\"{x:.3f}\" for x in g_mean[-8:] ))\n    else:\n        g_mean = None\n        report.append(\"No gamma files found.\")\n\n    if step_mae_lists:\n        mae_mean = np.mean(np.stack(step_mae_lists, axis=0), axis=0)  # [32]\n        report.append(\"step_MAE_mean (first 8): \" + \", \".join(f\"{x:.5f}\" for x in mae_mean[:8]))\n        report.append(\"step_MAE_mean (last 8):  \" + \", \".join(f\"{x:.5f}\" for x in mae_mean[-8:]))\n    else:\n        mae_mean = None\n        report.append(\"No per-condition step-MAE files found.\")\n\n    if g_mean is not None and mae_mean is not None and len(g_mean) == len(mae_mean) == 32:\n        corr = np.corrcoef(g_mean, mae_mean)[0,1]\n        report.append(f\"corr(gamma_mean, step_MAE_mean) = {corr:.4f}\")\n        report.append(f\"alignment_score = {-corr:.4f}  # more negative means better alignment (\u03b3 high where MAE high)\")\n    else:\n        report.append(\"Correlation not computed (missing data).\")\n\n    # Optional: simple condition contrast if individual condition arrays are present\n    # We heuristically estimate late-horizon difficulty by averaging steps 24\u201332 if available\n    if step_mae_lists:\n        late = np.mean(np.stack(step_mae_lists, axis=0)[:, 23:], axis=(0,1))\n        early = np.mean(np.stack(step_mae_lists, axis=0)[:, :4], axis=(0,1))\n        report.append(f\"Mean early-step MAE (~t1\u2013t4): {early:.5f}\")\n        report.append(f\"Mean late-step MAE (~t24\u2013t32): {late:.5f}\")\n\n    text = \"\\n\".join(report) + \"\\n\"\n    out_path = \"storage/ariadne/analyses/ariadne2_cond_gamma_report.md\"\n    with open(out_path, \"w\") as f:\n        f.write(text)\n    print(text)\n    print(f\"[saved] {out_path}\")\n    return \"Analysis complete\"\n",
+    "submitted_timestamp": 1761611306.6556194,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n# \u03b3[t]\u2013Difficulty Alignment (Ariadne II analysis)\n\nGamma files parsed: 4\nPer-condition files parsed: 4\ngamma_mean (first 8 steps): 0.126, 0.374, 0.468, 0.523, 0.598, 0.656, 0.695, 0.733\ngamma_mean (last 8 steps):  0.826, 0.823, 0.816, 0.808, 0.793, 0.772, 0.734, 0.664\nstep_MAE_mean (first 8): 0.12557, 0.37397, 0.46810, 0.52288, 0.59822, 0.65552, 0.69539, 0.73262\nstep_MAE_mean (last 8):  0.82560, 0.82255, 0.81635, 0.80819, 0.79311, 0.77192, 0.73416, 0.66363\ncorr(gamma_mean, step_MAE_mean) = 1.0000\nalignment_score = -1.0000  # more negative means better alignment (\u03b3 high where MAE high)\nMean early-step MAE (~t1\u2013t4): 0.37263\nMean late-step MAE (~t24\u2013t32): 0.78477\n\n[saved] storage/ariadne/analyses/ariadne2_cond_gamma_report.md\nTest completed. Result: Analysis complete\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761611310.3075893,
+      "evaluation_datetime": "2025-10-28T08:28:30.307591",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761611310.3341143,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis: \u03b3[t]\u2013Difficulty Alignment and Condition Effects (CPU, no training)' (ID: 547) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n# \u03b3[t]\u2013Difficulty Alignment (Ariadne II analysis)\n\nGamma files parsed: 4\nPer-condition files parsed: 4\ngamma_mean (first 8 steps): 0.126, 0.374, 0.468, 0.523, 0.598, 0.656, 0.695, 0.733\ngamma_mean (last 8 steps):  0.826, 0.823, 0.816, 0.808, 0.793, 0.772, 0.734, 0.664\nstep_MAE_mean (first 8): 0.12557, 0.37397, 0.46810, 0.52288, 0.59822, 0.65552, 0.69539, 0.73262\nstep_MAE_mean (last 8):  0.82560, 0.82255, 0.81635, 0.80819, 0.79311, 0.77192, 0.73416, 0.66363\ncorr(gamma_mean, step_MAE_mean) = 1.0000\nalignment_score = -1.0000  # more negative means better alignment (\u03b3 high where MAE high)\nMean early-step MAE (~t1\u2013t4): 0.37263\nMean late-step MAE (~t24\u2013t32): 0.78477\n\n[saved] storage/ariadne/analyses/ariadne2_cond_gamma_report.md\nTest completed. Result: Analysis complete\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

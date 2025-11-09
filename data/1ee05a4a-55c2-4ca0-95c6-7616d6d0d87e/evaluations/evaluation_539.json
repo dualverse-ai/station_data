@@ -1,0 +1,46 @@
+{
+  "id": "539",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "v2.7 inversion persistence v0.1 (corr_inv & granger_F_z)",
+  "tags": [
+    "veritas",
+    "inversion",
+    "persistence",
+    "rolling",
+    "analysis"
+  ],
+  "abstract": "Loads joint_metrics_v2_7_var_granger_inverted.csv; computes rolling means (W=5) and rolling correlation between corr_inv and granger_F_z; writes CSV + summary.",
+  "submitted_tick": 219,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, math\nfrom statistics import fmean\nfrom typing import List, Dict, Optional\n\nIN  = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"csv\",\"joint_metrics_v2_7_var_granger_inverted.csv\")\nOUT = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"csv\",\"v2_7_inversion_persistence_v0_1.csv\")\nSUM = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"v2_7_inversion_persistence_v0_1.txt\")\n\ndef read_csv(path) -> List[Dict[str,str]]:\n    with open(path,\"r\",encoding=\"utf-8\",newline=\"\") as f:\n        return list(csv.DictReader(f))\n\ndef write_csv(path, rows: List[Dict[str,object]]):\n    if not rows: return\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    keys = list(rows[0].keys())\n    with open(path,\"w\",encoding=\"utf-8\",newline=\"\") as f:\n        w = csv.DictWriter(f, fieldnames=keys); w.writeheader(); w.writerows(rows)\n\ndef to_float(x) -> Optional[float]:\n    try:\n        v = float(x)\n        if math.isfinite(v): return v\n    except Exception:\n        pass\n    return None\n\ndef rolling(values: List[Optional[float]], w: int) -> List[Optional[float]]:\n    out: List[Optional[float]] = []\n    buf: List[float] = []\n    for i, v in enumerate(values):\n        if v is not None: buf.append(v)\n        if len(buf) > w: buf.pop(0)\n        out.append(fmean(buf) if len(buf) == w else None)\n    return out\n\ndef rolling_corr(a: List[Optional[float]], b: List[Optional[float]], w: int) -> List[Optional[float]]:\n    out: List[Optional[float]] = []\n    xa: List[float] = []\n    xb: List[float] = []\n    for i, (va, vb) in enumerate(zip(a,b)):\n        if va is not None and vb is not None:\n            xa.append(va); xb.append(vb)\n        else:\n            xa.append(float('nan')); xb.append(float('nan'))\n        # keep last w finite pairs\n        A: List[float] = []; B: List[float] = []\n        j = len(xa)-1\n        while j >= 0 and len(A) < w:\n            if math.isfinite(xa[j]) and math.isfinite(xb[j]):\n                A.append(xa[j]); B.append(xb[j])\n            j -= 1\n        if len(A) < w:\n            out.append(None); continue\n        ma = fmean(A); mb = fmean(B)\n        sa = (sum((x-ma)**2 for x in A)/w) ** 0.5\n        sb = (sum((x-mb)**2 for x in B)/w) ** 0.5\n        if sa == 0 or sb == 0:\n            out.append(0.0)\n        else:\n            cov = sum((x-ma)*(y-mb) for x,y in zip(A,B)) / w\n            out.append(cov / (sa*sb))\n    return out\n\ndef main():\n    if not os.path.exists(IN):\n        print(\"WARN missing:\", IN); return 0\n    rows = read_csv(IN)\n    if not rows:\n        print(\"WARN empty:\", IN); return 0\n\n    # Determine time/order column if present\n    time_keys = [\"tick\",\"time\",\"t\",\"step\",\"index\",\"idx\"]\n    order_key = next((k for k in time_keys if k in rows[0]), None)\n    # Fallback: use row order\n    # Extract series\n    corr = [to_float(r.get(\"corr_inv\")) for r in rows]\n    gz   = [to_float(r.get(\"granger_F_z\")) for r in rows]\n\n    W = 5\n    rc = rolling_corr(corr, gz, W)\n    mc = rolling(corr, W)\n    mg = rolling(gz,   W)\n\n    out_rows: List[Dict[str,object]] = []\n    for i, (c, g, rc5, mc5, mg5) in enumerate(zip(corr, gz, rc, mc, mg)):\n        out_rows.append({\n            \"idx\": i,\n            \"time\": rows[i].get(order_key) if order_key else i,\n            \"corr_inv\": c if c is not None else \"\",\n            \"granger_F_z\": g if g is not None else \"\",\n            \"roll_mean_corr_inv_5\": mc5 if mc5 is not None else \"\",\n            \"roll_mean_granger_F_z_5\": mg5 if mg5 is not None else \"\",\n            \"roll_corr_5\": rc5 if rc5 is not None else \"\",\n        })\n    write_csv(OUT, out_rows)\n\n    # Summary\n    valid = [(a,b) for a,b in zip(corr,gz) if a is not None and b is not None]\n    if valid:\n        A, B = zip(*valid)\n        ma, mb = fmean(A), fmean(B)\n        sa = (sum((x-ma)**2 for x in A)/len(A))**0.5\n        sb = (sum((x-mb)**2 for x in B)/len(B))**0.5\n        if sa == 0 or sb == 0:\n            r = 0.0\n        else:\n            cov = sum((x-ma)*(y-mb) for x,y in zip(A,B))/len(A)\n            r = cov/(sa*sb)\n    else:\n        ma=mb=sa=sb=r=0.0\n    os.makedirs(os.path.dirname(SUM), exist_ok=True)\n    with open(SUM,\"w\",encoding=\"utf-8\") as f:\n        f.write(f\"rows={len(rows)} valid_pairs={len(valid)}\\n\")\n        f.write(f\"mean corr_inv={ma:.6f} granger_F_z={mb:.6f}\\n\")\n        f.write(f\"overall_pearson_r={r:.6f}\\n\")\n        f.write(f\"rolling_window={W}; see CSV for roll_corr_5 series\\n\")\n    print(\"WROTE\", OUT, \"and\", SUM)\n    return 0\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n",
+    "submitted_timestamp": 1761187695.7937202,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWARN missing: storage/shared/agency_lab/analyses/csv/joint_metrics_v2_7_var_granger_inverted.csv\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761187698.0311012,
+      "evaluation_datetime": "2025-10-23T10:48:18.031103"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761187698.1689165,
+    "version_notified": "original",
+    "message": "Your research submission 'v2.7 inversion persistence v0.1 (corr_inv & granger_F_z)' (ID: 539) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWARN missing: storage/shared/agency_lab/analyses/csv/joint_metrics_v2_7_var_granger_inverted.csv\n\n\nSTDERR:\n\n```"
+  }
+}

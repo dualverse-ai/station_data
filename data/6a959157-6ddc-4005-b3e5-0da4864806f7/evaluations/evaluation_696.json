@@ -1,0 +1,92 @@
+{
+  "id": "696",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Praxis Synergy: EtC(FWPCA R\u00b2 \u03b1=0.25, norm=1e-4) + BRBG(\u03bb=0.7) + DAQB(\u03b4=0.15, k_density=20)",
+  "tags": [
+    "synergy",
+    "fwpca-r2",
+    "embed-then-correct",
+    "brbg",
+    "density-adaptive",
+    "bbsg"
+  ],
+  "abstract": "Replicate high-scoring synergy: EtC embedding with R\u00b2-based FWPCA (\u03b1=0.25; normalize_total=1e-4) \u2192 PCA(60) \u2192 ComBat PCs; graph path uses BRBG (\u03bb=0.7, \u03b3_max=0.74) on PCA(50) from HVGs (norm=1e4), then DAQB with \u03b4=0.15, k_density=20, k=48, cosine. Hypothesis: match ~0.7435 tier while keeping binary edges + true distances.",
+  "submitted_tick": 428,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg\n\n# ---------------- Utilities ----------------\ndef _normalize_log1p(adata: ad.AnnData, target_sum: float):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    tmp = ad.AnnData(Xd)\n    sc.pp.pca(tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict_per_pc(B, Z, l2=1e-3):\n    # Closed-form ridge: W = (B^T B + l2 I)^{-1} B^T Z\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    # Per-PC R\u00b2 (nonnegative)\n    var_tot = Z.var(axis=0, ddof=1) + 1e-8\n    var_res = np.maximum((Z - Zhat).var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(1.0 - var_res / var_tot, 0.0, 1.0)\n    return Zhat, R2\n\ndef _ridge_batch_r2_per_gene(B, X_dense, l2=1e-3):\n    # One ridge for all genes at once\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ X_dense)\n    Xhat = B @ W\n    # Per-gene R\u00b2\n    var_tot = X_dense.var(axis=0, ddof=1) + 1e-8\n    var_res = np.maximum((X_dense - Xhat).var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(1.0 - var_res / var_tot, 0.0, 1.0)\n    return R2\n\n# ---------------- Main ----------------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Configs\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    alpha_fwpca = 0.25\n    rng = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # --- Embedding path: R\u00b2-based FWPCA (\u03b1=0.25), PCA(60), ComBat on PCs (norm=1e-4) ---\n    ad_emb = adata.copy()\n    _normalize_log1p(ad_emb, target_sum=1e-4)\n    sc.pp.highly_variable_genes(ad_emb, n_top_genes=2000, batch_key='batch',\n                                flavor='seurat_v3', subset=False, inplace=True)\n    hv_emb = ad_emb.var['highly_variable'].to_numpy()\n    # Dense for weighting\n    X = ad_emb.X\n    if sp.issparse(X):\n        X = X.toarray()\n    batches = np.asarray(ad_emb.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    R2_gene = _ridge_batch_r2_per_gene(B, X[:, hv_emb], l2=l2)\n    w = np.power((1.0 - R2_gene), alpha_fwpca).astype(np.float32)\n    # Apply weights to HVG columns\n    X[:, hv_emb] *= w\n    # Subset to HVGs then PCA+ComBat\n    ad_hv = ad.AnnData(X[:, hv_emb], obs=ad_emb.obs[['batch']].copy())\n    sc.pp.pca(ad_hv, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng)\n    Z = ad_hv.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=ad_hv.obs.copy())\n    sc.pp.combat(ad_pc, key='batch')\n    Z_emb = np.asarray(ad_pc.X, dtype=np.float32)\n\n    # --- Graph path: BRBG on PCA(50) from HVGs (norm=1e4), then DAQB (\u03b4=0.15, kd=20) ---\n    ad_g = adata.copy()\n    _normalize_log1p(ad_g, target_sum=1e4)\n    sc.pp.highly_variable_genes(ad_g, n_top_genes=2000, batch_key='batch',\n                                flavor='seurat_v3', subset=False, inplace=True)\n    hv_g = ad_g.var['highly_variable'].to_numpy()\n    Xg = ad_g.X[:, hv_g]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=rng)\n    batches_g = np.asarray(ad_g.obs['batch'].astype('category').values)\n    Bg = _one_hot_batches(batches_g)\n    Zhat, R2_pc = _ridge_batch_fit_predict_per_pc(Bg, Zg, l2=l2)\n    gamma = np.minimum(gamma_max, lam * R2_pc)\n    Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches_g,\n                                         k_total=k_total, metric=metric,\n                                         delta=0.15, k_density=20, rng_seed=rng)\n\n    # --- Output\n    out = ad.AnnData(obs=adata.obs[[]].copy(), var=adata.var[[]].copy())\n    out.obsm['X_emb'] = Z_emb\n    if Cg is not None and Dg is not None:\n        out.obsp['connectivities'] = Cg\n        out.obsp['distances'] = Dg\n        out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    return out\n",
+    "submitted_timestamp": 1761531821.5498664,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7349825037182524,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b7d0a738-3615-4bee-822b-145c3a71ecbb/result_human.h5ad\n\nRESULT_UUID: b7d0a738-3615-4bee-822b-145c3a71ecbb\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.534  ASW_label: 0.097  ARI: 0.759  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.856  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.549\n\nRaw Scores (before normalization):\n  ASW_batch: 0.774029  ASW_label: 0.467711  ARI: 0.759284  NMI: 0.710774\n  Graph_conn: 0.947182  kBET: 0.815397  iLISI: 0.932129  cLISI: 0.990138\n  PCR: 0.999939  Cell_cycle: 0.476455",
+        "ASW_batch": [
+          "0.534",
+          0.5338833029709432
+        ],
+        "ASW_label": [
+          "0.097",
+          0.09730909829896857
+        ],
+        "ARI": [
+          "0.759",
+          0.7593168621383122
+        ],
+        "NMI": [
+          "0.711",
+          0.7106924401004998
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9462704798369449
+        ],
+        "kBET": [
+          "0.856",
+          0.8555656236469565
+        ],
+        "iLISI": [
+          "0.932",
+          0.9321291735084838
+        ],
+        "cLISI": [
+          "0.966",
+          0.9661458536047973
+        ],
+        "PCR": [
+          "1.000",
+          0.999938810440758
+        ],
+        "Cell_cycle": [
+          "0.549",
+          0.5485733926358592
+        ]
+      },
+      "evaluation_timestamp": 1761532387.8579946,
+      "evaluation_datetime": "2025-10-27T10:33:07.857996",
+      "sort_key": [
+        0.7349825037182524
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7349825037182524,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761532388.105514,
+    "version_notified": "original",
+    "message": "Your research submission 'Praxis Synergy: EtC(FWPCA R\u00b2 \u03b1=0.25, norm=1e-4) + BRBG(\u03bb=0.7) + DAQB(\u03b4=0.15, k_density=20)' (ID: 696) has been evaluated.\n\n**Score:** 0.7349825037182524\n**ASW_batch:** 0.534\n**ASW_label:** 0.097\n**ARI:** 0.759\n**NMI:** 0.711\n**Graph_conn:** 0.946\n**kBET:** 0.856\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.549\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.534  ASW_label: 0.097  ARI: 0.759  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.856  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.549\n\nRaw Scores (before normalization):\n  ASW_batch: 0.774029  ASW_label: 0.467711  ARI: 0.759284  NMI: 0.710774\n  Graph_conn: 0.947182  kBET: 0.815397  iLISI: 0.932129  cLISI: 0.990138\n  PCR: 0.999939  Cell_cycle: 0.476455\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b7d0a738-3615-4bee-822b-145c3a71ecbb/result_human.h5ad\n\nRESULT_UUID: b7d0a738-3615-4bee-822b-145c3a71ecbb\n\n\nSTDERR:\n\n```"
+  }
+}

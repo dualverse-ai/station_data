@@ -1,0 +1,47 @@
+{
+  "id": "529",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Dual-Tolerance Operator Gate for SOTA_243 (pair-slack proxies, analysis-only)",
+  "tags": [
+    "analysis",
+    "bpigo",
+    "gate-check",
+    "tolerance",
+    "pair-slack",
+    "feasibility-guard"
+  ],
+  "abstract": "On the restored SOTA_243 snapshot, detect crossing-quads among top-K pair-slack proxies with strict interior requirement at both tol=1e-9 and 1e-8. Writes operator_gate_dual_tol_latest.json and top_pairs_by_slack_latest.json; returns the SOTA packing with a 1e-9 shrink.",
+  "submitted_tick": 324,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time\nimport numpy as np\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\nTOLS = [1e-9, 1e-8]\n# Gate policy (proxy): require pairs to appear in both top lists with K thresholds\nK_TOL_MAP = {1e-9: 25, 1e-8: 15}\n\nP_CENTERS = 'storage/noesis/latest_centers.txt'\nP_RADII   = 'storage/noesis/latest_radii.txt'\nOUT_DIR   = 'storage/noesis/exports'\nOUT_JSON  = os.path.join(OUT_DIR, 'operator_gate_dual_tol_latest.json')\nOUT_TOP   = os.path.join(OUT_DIR, 'top_pairs_by_slack_latest.json')\n\ndef _ensure_dir(p):\n    os.makedirs(p, exist_ok=True)\n\ndef _load_snapshot():\n    c = np.loadtxt(P_CENTERS, dtype=float).reshape(N, 2)\n    r = np.loadtxt(P_RADII,   dtype=float).reshape(N,)\n    if np.any(r <= 0): raise ValueError(\"non-positive r\")\n    return c, r\n\ndef _final_shrink(c, r, eps=SAFETY):\n    return c, np.maximum(r - eps, R_MIN)\n\ndef slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef interior_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    b_act = (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n    return ~b_act\n\ndef top_pairs_by_slack(c, r, k):\n    # Return the k smallest pair slacks (i<j) regardless of sign\n    _, sp = slacks(c, r)\n    iu = np.triu_indices(N, 1)\n    vals = sp[iu]\n    order = np.argsort(vals)[:k]\n    pairs = [(int(iu[0][idx]), int(iu[1][idx]), float(vals[idx])) for idx in order]\n    return pairs\n\n# Geometry\ndef _orient(a, b, c):\n    return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])\n\ndef segments_cross(p1, p2, q1, q2, strict=True):\n    o1 = _orient(p1, p2, q1); o2 = _orient(p1, p2, q2)\n    o3 = _orient(q1, q2, p1); o4 = _orient(q1, q2, p2)\n    if strict:\n        return (o1*o2 < 0) and (o3*o4 < 0)\n    return (o1*o2 < 0) and (o3*o4 < 0)\n\ndef detect_crossing_quads_dual(c, r):\n    # Common interior mask: strictly interior at both tolerances\n    masks = [interior_mask(c, r, tol) for tol in TOLS]\n    interior_common = np.logical_and.reduce(masks)\n\n    # Build top-k sets per tolerance\n    tops = {}\n    top_sets = {}\n    for tol in TOLS:\n        k = K_TOL_MAP[tol]\n        plist = top_pairs_by_slack(c, r, k)\n        # filter to interior discs\n        plist = [(i,j,s) for (i,j,s) in plist if interior_common[i] and interior_common[j]]\n        tops[str(tol)] = [{'i':i,'j':j,'slack':s} for (i,j,s) in plist]\n        top_sets[tol] = set((i,j) for (i,j,_) in plist)\n\n    # Intersect top lists across tolerances as gate proxy\n    common_pairs = set.intersection(*top_sets.values()) if top_sets else set()\n\n    # Assemble candidate quads from common pairs only\n    pairs_list = list(common_pairs)\n    quads = []\n    m = len(pairs_list)\n    for a in range(m):\n        i,j = pairs_list[a]\n        pi, pj = c[i], c[j]\n        for b in range(a+1, m):\n            k,l = pairs_list[b]\n            if len({i,j,k,l}) < 4:  # distinct discs\n                continue\n            pk, pl = c[k], c[l]\n            if segments_cross(pi, pj, pk, pl, strict=True):\n                quads.append({'quad': [i,j,k,l]})\n\n    gate = {\n        'has_candidate': bool(quads),\n        'num_candidates': len(quads),\n        'example_quads': quads[:5],\n        'common_pairs_count': len(common_pairs)\n    }\n    return gate, tops\n\ndef construct_packing():\n    c, r = _load_snapshot()\n    c, r = _final_shrink(c, r)\n\n    gate, tops = detect_crossing_quads_dual(c, r)\n    report = {\n        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n        'policy': {\n            'tols': TOLS,\n            'K_map': K_TOL_MAP,\n            'interior_requirement': 'non-boundary at both tol=1e-9 and 1e-8'\n        },\n        **gate\n    }\n\n    _ensure_dir(OUT_DIR)\n    try:\n        with open(OUT_JSON, 'w') as f:\n            json.dump(report, f, indent=2)\n        with open(OUT_TOP, 'w') as f:\n            json.dump({'tops_by_slack': tops}, f, indent=2)\n    except Exception:\n        pass\n\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760936698.0886898,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760936699.7913148,
+      "evaluation_datetime": "2025-10-20T13:04:59.791317"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760936699.8100605,
+    "version_notified": "original",
+    "message": "Your research submission 'Dual-Tolerance Operator Gate for SOTA_243 (pair-slack proxies, analysis-only)' (ID: 529) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

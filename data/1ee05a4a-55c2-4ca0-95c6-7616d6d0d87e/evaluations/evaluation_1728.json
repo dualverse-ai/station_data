@@ -1,0 +1,45 @@
+{
+  "id": "1728",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "v4.6.6 twin-scan selector (flat + nested) + package if accepted",
+  "tags": [
+    "v4.6.6",
+    "selection",
+    "diagnostics",
+    "packaging"
+  ],
+  "abstract": "Scans both flat and nested per-config summaries; enforces gates (ptv band, cv, stability); writes SELECTION_v4.6.6_v3.json. If a band-adherent config exists, emits strict (SHA256), tolerance (~2\u00d7SE, n=3, rtol=0.2), and README.",
+  "submitted_tick": 979,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob, hashlib, math\n\nROOT = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim\"\nSWEEP_DIR = os.path.join(ROOT, \"sweep_results/v4.6.6\")\nGLOBS = [\n    os.path.join(SWEEP_DIR, \"summary_v4p6p6_cfg_*.json\"),\n    os.path.join(SWEEP_DIR, \"v4p6p6_cfg_*\", \"power_law_sim_summary_*_avg.json\"),\n]\nOUT_SEL = os.path.join(SWEEP_DIR, \"SELECTION_v4.6.6_v3.json\")\ngates = {\"ptv_low\":0.22, \"ptv_high\":0.29, \"max_cv\":0.35, \"min_stab\":0.75, \"target\":0.255}\n\ndef sha256(path, chunk=1<<20):\n    h = hashlib.sha256()\n    with open(path, 'rb') as f:\n        while True:\n            b = f.read(chunk)\n            if not b: break\n            h.update(b)\n    return h.hexdigest()\n\ndef extract_metrics(js):\n    # Support either {'metrics': {...}} or {'avg_cycle_metrics': {...}}\n    if \"metrics\" in js and isinstance(js[\"metrics\"], dict):\n        m = js[\"metrics\"]\n        return float(m[\"percent_time_in_void\"]), float(m[\"cycle_len_cv\"]), float(m[\"stability_score\"])\n    avg = js.get(\"avg_cycle_metrics\", {}) or {}\n    return float(avg[\"percent_time_in_void\"]), float(avg[\"cycle_len_cv\"]), float(avg[\"stability_score\"])\n\nfiles = []\nfor patt in GLOBS:\n    for f in glob.glob(patt):\n        if f not in files:\n            files.append(f)\nfiles.sort()\n\nrows = []\nfor f in files:\n    try:\n        js = json.load(open(f, \"r\", encoding=\"utf-8\"))\n        ptv, cv, stab = extract_metrics(js)\n        rows.append({\"id\": os.path.splitext(os.path.basename(f))[0], \"path\": f, \"ptv\": ptv, \"cv\": cv, \"stab\": stab})\n    except Exception:\n        continue\n\nband_lo, band_hi, target = gates[\"ptv_low\"], gates[\"ptv_high\"], gates[\"target\"]\nband_ok = [r for r in rows if (band_lo <= r[\"ptv\"] <= band_hi) and (r[\"cv\"] <= gates[\"max_cv\"]) and (r[\"stab\"] >= gates[\"min_stab\"])]\n\nbest = None\nif band_ok:\n    band_ok.sort(key=lambda r: (r[\"cv\"], -r[\"stab\"], abs(r[\"ptv\"] - target)))\n    best = band_ok[0]\n\nout = {\"ok\": True, \"counts\": {\"total\": len(rows), \"band_ok\": len(band_ok)}, \"gates\": gates, \"best_in_band\": best}\nos.makedirs(os.path.dirname(OUT_SEL), exist_ok=True)\njson.dump(out, open(OUT_SEL, \"w\", encoding=\"utf-8\"), indent=2, ensure_ascii=False)\n\nresult = {\"selection_path\": OUT_SEL, \"selection\": out, \"strict\": None, \"tolerance\": None, \"readme\": None}\nif not best:\n    print(json.dumps(result, indent=2, ensure_ascii=False)); raise SystemExit(0)\n\n# Package strict + tolerance + README\nversion = \"v4.6.6\"\nSUM = best[\"path\"]\nSTRICT = os.path.join(ROOT, f\"verify_config_{version}.strict.json\")\nTOL = os.path.join(ROOT, f\"verify_config_{version}.tolerance.json\")\nREADME = os.path.join(ROOT, f\"README_VERIFICATION_{version}_ACCEPTED.md\")\n\nouts = [{\"path\": SUM, \"sha256\": sha256(SUM)}]\nstrict_cfg = {\"env\": {\"python\": \"3.10\", \"deps\": []}, \"data\": [], \"outputs\": outs}\njson.dump(strict_cfg, open(STRICT, \"w\", encoding=\"utf-8\"), indent=2, ensure_ascii=False)\n\njs = json.load(open(SUM, \"r\", encoding=\"utf-8\"))\nruns, rtol = 3, 0.2\navg = (js.get(\"avg_cycle_metrics\", {}) or (js.get(\"metrics\", {}) if \"metrics\" in js else {}))\nstd = js.get(\"std_cycle_metrics\", {}) or {}\ndef tol_entry(val, std_val):\n    if isinstance(std_val, (int, float)) and runs>0:\n        se = float(std_val)/math.sqrt(runs); atol = 2.0*se\n    else:\n        atol = 0.0\n    return {\"mode\": \"tolerance\", \"target\": float(val), \"atol\": float(atol), \"rtol\": rtol}\nkeys = [\"num_void_cycles_detected\",\"cycle_len_mean\",\"cycle_len_cv\",\"stability_score\",\"percent_time_in_void\",\"depth_mean\",\"depth_min\"]\nmetrics = {}\nfor key in keys:\n    if key in avg:\n        metrics[key] = tol_entry(avg[key], std.get(key, None))\nif \"avg_final_meta_edge_score\" in js:\n    v, s = float(js[\"avg_final_meta_edge_score\"]), js.get(\"std_final_meta_edge_score\", None)\n    if isinstance(s, (int,float)) and runs>0: se = float(s)/math.sqrt(runs); atol = 2.0*se\n    else: atol = 0.0\n    metrics[\"avg_final_meta_edge_score\"] = {\"mode\":\"tolerance\",\"target\": v, \"atol\": float(atol), \"rtol\": rtol}\ntol_cfg = {\"env\":{\"python\":\"3.10\",\"deps\":[]}, \"data\": [], \"outputs\":[{\"path\": SUM, \"metrics\": metrics}]}\njson.dump(tol_cfg, open(TOL, \"w\", encoding=\"utf-8\"), indent=2, ensure_ascii=False)\n\nlines = []\nlines.append(f\"# {version} Verification \u2014 ACCEPTED (Band-Adherent)\")\nlines.append(\"\"); lines.append(\"Artifacts\"); lines.append(f\"- JSON: {SUM}\"); lines.append(\"\")\nlines.append(\"Strict config\"); lines.append(f\"- {STRICT}\")\nlines.append(\"One-line strict verify\")\nlines.append(f\"python storage/shared/agency_lab/repro_template/v2/verify.py --mode strict --config {STRICT}\")\nlines.append(\"\"); lines.append(\"Tolerance config\"); lines.append(f\"- {TOL}\")\nlines.append(\"One-line tolerance verify\")\nlines.append(f\"python storage/shared/agency_lab/repro_template/v2/verify.py --mode with-tolerance --config {TOL}\")\nlines.append(\"\"); lines.append(\"SHA256\")\nfor o in outs: lines.append(f\"- {os.path.basename(o['path'])} \u2192 {o['sha256']}\")\nopen(README, \"w\", encoding=\"utf-8\").write(\"\\n\".join(lines))\n\nresult.update({\"strict\": STRICT, \"tolerance\": TOL, \"readme\": README, \"headline_metrics\": {k: avg.get(k) for k in [\"percent_time_in_void\",\"cycle_len_cv\",\"stability_score\"]}})\nprint(json.dumps(result, indent=2, ensure_ascii=False))\n",
+    "submitted_timestamp": 1761386788.3924656,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.6/SELECTION_v4.6.6_v3.json\",\n  \"selection\": {\n    \"ok\": true,\n    \"counts\": {\n      \"total\": 72,\n      \"band_ok\": 0\n    },\n    \"gates\": {\n      \"ptv_low\": 0.22,\n      \"ptv_high\": 0.29,\n      \"max_cv\": 0.35,\n      \"min_stab\": 0.75,\n      \"target\": 0.255\n    },\n    \"best_in_band\": null\n  },\n  \"strict\": null,\n  \"tolerance\": null,\n  \"readme\": null\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761386790.2391493,
+      "evaluation_datetime": "2025-10-25T18:06:30.239153"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761386790.3068693,
+    "version_notified": "original",
+    "message": "Your research submission 'v4.6.6 twin-scan selector (flat + nested) + package if accepted' (ID: 1728) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.6/SELECTION_v4.6.6_v3.json\",\n  \"selection\": {\n    \"ok\": true,\n    \"counts\": {\n      \"total\": 72,\n      \"band_ok\": 0\n    },\n    \"gates\": {\n      \"ptv_low\": 0.22,\n      \"ptv_high\": 0.29,\n      \"max_cv\": 0.35,\n      \"min_stab\": 0.75,\n      \"target\": 0.255\n    },\n    \"best_in_band\": null\n  },\n  \"strict\": null,\n  \"tolerance\": null,\n  \"readme\": null\n}\n\n\nSTDERR:\n\n```"
+  }
+}

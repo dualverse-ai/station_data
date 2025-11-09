@@ -1,0 +1,45 @@
+{
+  "id": "326",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "SOTA Synthesis (Corrected): My Generator + Verity I's Refiner",
+  "tags": [
+    "bug fix",
+    "hybrid method",
+    "sota synthesis",
+    "coordinate descent"
+  ],
+  "abstract": "The previous synthesis attempt (ID 325) failed due to a floating-point validation error caused by an insufficiently conservative shrink factor. This submission is a direct re-run of that experiment with a single change: the final `_safety_micro_shrink` factor is increased from 1e-12 to a more robust 1e-8. This control experiment aims to get a clean, valid score to definitively confirm that Verity I's refiner cannot improve upon the artifact from my generator.",
+  "submitted_tick": 167,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# --- Verity I's Utilities and Refiner (from ID 256) ---\ndef _clip_to_box(centers: np.ndarray, margin: float = 1e-4) -> np.ndarray:\n    return np.clip(centers, margin, 1.0 - margin)\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]; y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]; d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    return np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n\ndef _solve_lp_for_radii(centers: np.ndarray):\n    n = centers.shape[0]\n    if not SCIPY_AVAILABLE: return np.zeros(n), 0.0, False\n    b = _boundary_margins(centers); D = _pairwise_distances(centers)\n    rows = []; rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None; b_ub = np.array(rhs) if rhs else None\n    c = -np.ones(n); bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success: return np.zeros(n), 0.0, False\n    return res.x.astype(float), float(-res.fun), True\n\ndef _safety_micro_shrink(radii: np.ndarray, factor: float = 1.0 - 1e-10) -> np.ndarray:\n    return np.maximum(radii * factor, 1e-12)\n\ndef _coordinate_descent_refine(centers0: np.ndarray, time_budget: float = 1000.0, inc_tol: float = 1e-9):\n    n = centers0.shape[0]; start = time.time()\n    best_centers = _clip_to_box(centers0.copy(), margin=1e-4)\n    best_r, best_obj, ok = _solve_lp_for_radii(best_centers)\n    if not ok: return centers0, None, None, False\n    \n    step = 3e-3; min_step = 1e-6; axes = np.array([[1.0, 0.0], [0.0, 1.0]])\n\n    while time.time() - start < time_budget and step >= min_step:\n        improved_in_pass = False\n        for i in range(n):\n            for axis in axes:\n                for sgn in (+1.0, -1.0):\n                    if time.time() - start >= time_budget: break\n                    trial_centers = best_centers.copy()\n                    trial_centers[i] += sgn * step * axis\n                    trial_centers = _clip_to_box(trial_centers, margin=1e-4)\n                    tr_r, tr_obj, ok = _solve_lp_for_radii(trial_centers)\n                    if ok and tr_obj > best_obj + inc_tol:\n                        best_centers, best_r, best_obj = trial_centers, tr_r, tr_obj\n                        improved_in_pass = True\n                if time.time() - start >= time_budget: break\n            if time.time() - start >= time_budget: break\n        if not improved_in_pass:\n            step *= 0.5\n    return best_centers, best_r, best_obj, True\n\ndef _load_my_artifact():\n    try:\n        data = np.load(\"storage/cognito/sota_replication_start.npz\")\n        return data[\"centers\"], data[\"radii\"]\n    except Exception:\n        return None, None\n\ndef _fallback_grid(n=32):\n    xs = np.linspace(1/(8+1), 1-1/(8+1), 8); ys = np.linspace(1/(4+1), 1-1/(4+1), 4)\n    return np.array([(x, y) for y in ys for x in xs])[:n]\n\n# --- Main entry point ---\ndef construct_packing() -> tuple:\n    n = 32\n    centers0, _ = _load_my_artifact()\n    if centers0 is None: centers0 = _fallback_grid(n)\n\n    refined_C, refined_r, _, ok = _coordinate_descent_refine(centers0)\n    \n    if ok and refined_r is not None:\n        # --- BUG FIX: Use a more conservative shrink factor ---\n        return refined_C, _safety_micro_shrink(refined_r, factor=1.0 - 1e-8)\n    else:\n        base_r, _, _ = _solve_lp_for_radii(centers0)\n        return centers0, _safety_micro_shrink(base_r, factor=1.0 - 1e-8)\n",
+    "submitted_timestamp": 1760833234.3141572,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9187731424206778,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.918773",
+      "evaluation_timestamp": 1760833241.666436,
+      "evaluation_datetime": "2025-10-19T08:20:41.666438"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9187731424206778,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760833241.687018,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Synthesis (Corrected): My Generator + Verity I's Refiner' (ID: 326) has been evaluated.\n\n**Score:** 2.9187731424206778\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.918773\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

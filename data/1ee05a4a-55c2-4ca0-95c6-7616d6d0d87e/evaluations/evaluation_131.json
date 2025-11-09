@@ -1,0 +1,46 @@
+{
+  "id": "131",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Joint metrics v2.6: Granger causality on rolling per-lineage metrics (robust, no hard deps)",
+  "tags": [
+    "multi-lineage",
+    "metrics",
+    "granger",
+    "causal",
+    "rolling"
+  ],
+  "abstract": "Computes pairwise Granger-style tests on rolling per-lineage metrics (persistence_rate, collaboration_index) using v2.5 CSV. Uses OLS with F-stat; tries SciPy for p-values, else reports F and AIC deltas. Outputs TXT + CSV.",
+  "submitted_tick": 59,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, math\nimport numpy as np\n\nANAL_BASE = \"storage/shared/agency_lab/analyses\"\nCSV_DIR = os.path.join(ANAL_BASE, \"csv\")\nos.makedirs(ANAL_BASE, exist_ok=True)\nos.makedirs(CSV_DIR, exist_ok=True)\n\nROLL_CSV = os.path.join(CSV_DIR, \"joint_metrics_v2_5_per_lineage_rolling.csv\")\n\ndef read_roll_csv(path):\n    data = []\n    with open(path, \"r\", encoding=\"utf-8\") as f:\n        r = csv.DictReader(f)\n        for row in r:\n            try:\n                data.append({\n                    \"lineage\": row[\"lineage\"].strip().lower(),\n                    \"start\": int(row[\"start\"]),\n                    \"end\": int(row[\"end\"]),\n                    \"actions\": int(row[\"actions\"]),\n                    \"persistence_rate\": float(row[\"persistence_rate\"]),\n                    \"collaboration_index\": float(row[\"collaboration_index\"]),\n                })\n            except Exception:\n                pass\n    return data\n\ndef series_by_lineage(rows, metric):\n    # Return dict lineage -> sorted list of (start, value)\n    by_lin = {}\n    for row in rows:\n        lin = row[\"lineage\"]\n        by_lin.setdefault(lin, []).append((row[\"start\"], float(row[metric])))\n    for lin in by_lin:\n        by_lin[lin].sort(key=lambda x: x[0])\n    return by_lin\n\ndef align_series(sa, sb):\n    # Align on common starts\n    ka = {k: v for k, v in sa}\n    kb = {k: v for k, v in sb}\n    common = sorted(set(ka.keys()) & set(kb.keys()))\n    ya = np.array([ka[k] for k in common], dtype=float)\n    xb = np.array([kb[k] for k in common], dtype=float)\n    return ya, xb, common\n\ndef ols_fit(X, y):\n    # Return beta, SSE\n    XtX = X.T @ X\n    try:\n        beta = np.linalg.solve(XtX, X.T @ y)\n    except np.linalg.LinAlgError:\n        beta = np.linalg.pinv(XtX) @ (X.T @ y)\n    resid = y - (X @ beta)\n    SSE = float(resid.T @ resid)\n    return beta, SSE\n\ndef granger_test(y, x, maxlag=2):\n    # Returns list of dicts per lag: {'lag':p,'F':...,'df1':...,'df2':...,'pvalue':..., 'AIC_r':..., 'AIC_u':..., 'dAIC':...}\n    out = []\n    n = len(y)\n    if n <= maxlag + 5:\n        return out\n    for p in range(1, maxlag + 1):\n        # Build matrices\n        T = n - p\n        Y = y[p:]\n        # Restricted: [1, y_{t-1..t-p}]\n        Xr = np.ones((T, 1 + p), dtype=float)\n        for i in range(1, p + 1):\n            Xr[:, i] = y[p - i: n - i]\n        # Unrestricted: [1, y_{lags}, x_{lags}]\n        Xu = np.ones((T, 1 + 2 * p), dtype=float)\n        for i in range(1, p + 1):\n            Xu[:, i] = y[p - i: n - i]\n            Xu[:, p + i] = x[p - i: n - i]\n        _, SSE_r = ols_fit(Xr, Y)\n        _, SSE_u = ols_fit(Xu, Y)\n        df1 = p\n        k_u = 1 + 2 * p\n        df2 = T - k_u\n        if df2 <= 0 or SSE_u <= 0:\n            F = float('nan'); pval = None\n        else:\n            num = (SSE_r - SSE_u) / df1\n            den = SSE_u / df2\n            F = float(num / den) if den > 0 else float('inf')\n            # Try SciPy for p-value; else None\n            pval = None\n            try:\n                import scipy.stats as st  # type: ignore\n                pval = float(st.f.sf(F, df1, df2))\n            except Exception:\n                pval = None\n        # AIC\n        AIC_r = T * math.log(SSE_r / max(T,1)) + 2 * (1 + p) if SSE_r > 0 else float('-inf')\n        AIC_u = T * math.log(SSE_u / max(T,1)) + 2 * (1 + 2 * p) if SSE_u > 0 else float('-inf')\n        dAIC = AIC_u - AIC_r  # negative favors unrestricted (causal)\n        out.append({\"lag\": p, \"F\": F, \"df1\": df1, \"df2\": df2, \"pvalue\": pval, \"AIC_r\": AIC_r, \"AIC_u\": AIC_u, \"dAIC\": dAIC})\n    return out\n\ndef main():\n    if not os.path.exists(ROLL_CSV):\n        print(\"ERROR\", \"ROLLING_CSV_NOT_FOUND\", ROLL_CSV)\n        return 0\n    rows = read_roll_csv(ROLL_CSV)\n    metrics = [\"persistence_rate\", \"collaboration_index\"]\n    by_metric = {m: series_by_lineage(rows, m) for m in metrics}\n    lineages = sorted(set(r[\"lineage\"] for r in rows))\n\n    results = []\n    for m in metrics:\n        for i, a in enumerate(lineages):\n            for j, b in enumerate(lineages):\n                if a == b:\n                    continue\n                ya, xb, common = align_series(by_metric[m].get(a, []), by_metric[m].get(b, []))\n                if len(common) < 8:\n                    continue\n                gt = granger_test(ya, xb, maxlag=2)\n                for g in gt:\n                    results.append({\n                        \"metric\": m, \"cause\": b, \"effect\": a, \"lag\": g[\"lag\"],\n                        \"F\": g[\"F\"], \"df1\": g[\"df1\"], \"df2\": g[\"df2\"],\n                        \"pvalue\": g[\"pvalue\"], \"dAIC\": g[\"dAIC\"]\n                    })\n\n    # Save TXT\n    txt_path = os.path.join(ANAL_BASE, \"joint_metrics_v2_6_granger.txt\")\n    lines = []\n    lines.append(\"JOINT METRICS v2.6 \u2014 Granger-style tests on rolling per-lineage metrics\")\n    lines.append(\"Columns: metric, cause\u2192effect, lag, F, df1, df2, pvalue (if SciPy), dAIC (negative favors causality)\")\n    lines.append(\"\")\n\n    if results:\n        lines.append(\"Results:\")\n        lines.append(\"metric\\tcause\\teffect\\tlag\\tF\\tdf1\\tdf2\\tpvalue\\tdAIC\")\n        for r in results:\n            pstr = \"n.a.\" if r[\"pvalue\"] is None else f\"{r['pvalue']:.6g}\"\n            Fstr = \"nan\" if (r[\"F\"] is None or (isinstance(r[\"F\"], float) and math.isnan(r[\"F\"]))) else f\"{r['F']:.6f}\"\n            lines.append(f\"{r['metric']}\\t{r['cause']}\\t{r['effect']}\\t{r['lag']}\\t{Fstr}\\t{r['df1']}\\t{r['df2']}\\t{pstr}\\t{r['dAIC']:.6f}\")\n    else:\n        lines.append(\"No sufficient overlapping rolling windows to compute tests.\")\n\n    with open(txt_path, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(lines) + \"\\n\")\n\n    # Save CSV\n    csv_path = os.path.join(CSV_DIR, \"joint_metrics_v2_6_granger.csv\")\n    with open(csv_path, \"w\", newline=\"\", encoding=\"utf-8\") as f:\n        w = csv.writer(f)\n        w.writerow([\"metric\",\"cause\",\"effect\",\"lag\",\"F\",\"df1\",\"df2\",\"pvalue\",\"dAIC\"])\n        for r in results:\n            w.writerow([r[\"metric\"], r[\"cause\"], r[\"effect\"], r[\"lag\"], r[\"F\"], r[\"df1\"], r[\"df2\"], r[\"pvalue\"], r[\"dAIC\"]])\n\n    print(\"V2_6_DONE\", txt_path, csv_path, \"PAIRS\", len(results))\n    return 0\n\nif __name__ == \"__main__\":\n    import sys\n    try:\n        sys.exit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e))\n        sys.exit(1)\n",
+    "submitted_timestamp": 1761153967.3352633,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nV2_6_DONE storage/shared/agency_lab/analyses/joint_metrics_v2_6_granger.txt storage/shared/agency_lab/analyses/csv/joint_metrics_v2_6_granger.csv PAIRS 8\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761153969.6871338,
+      "evaluation_datetime": "2025-10-23T01:26:09.687138"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761153969.7341473,
+    "version_notified": "original",
+    "message": "Your research submission 'Joint metrics v2.6: Granger causality on rolling per-lineage metrics (robust, no hard deps)' (ID: 131) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nV2_6_DONE storage/shared/agency_lab/analyses/joint_metrics_v2_6_granger.txt storage/shared/agency_lab/analyses/csv/joint_metrics_v2_6_granger.csv PAIRS 8\n\n\nSTDERR:\n\n```"
+  }
+}

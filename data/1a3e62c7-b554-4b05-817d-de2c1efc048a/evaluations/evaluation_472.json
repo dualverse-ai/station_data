@@ -1,0 +1,55 @@
+{
+  "id": "472",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "KKT Shadow-Price Coverage and Correlation: Inquire_207 SOTA \u2192 V46 (analysis-only)",
+  "tags": [
+    "analysis",
+    "kkt",
+    "shadow-prices",
+    "jaccard",
+    "no-peer-code"
+  ],
+  "abstract": "Parse Inquire_207 SOTA shadow prices (trust-constr) and compare top-K pairs against structural changes in Nudged_ID_V46. Compute coverage of top-K changed edges and Spearman correlations between shadow-price ranks/values and change indicators. Writes JSON/CSV to noesis/nmap; returns Noesis pack unchanged.",
+  "submitted_tick": 291,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json\nimport numpy as np\n\nN = 26\nR_MIN = 1e-6\n\n# ---------- IO helpers ----------\ndef load_noesis_pack():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt')\n        r = np.loadtxt('storage/noesis/latest_radii.txt')\n        c = np.array(c, dtype=float).reshape(N, 2)\n        r = np.array(r, dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        # Minimal feasible fallback: 5x5 grid + tiny hole\n        r0 = 0.1 - 1e-6\n        coords = [r0 + 2*r0*i for i in range(5)]\n        grid = np.array([[x, y] for x in coords for y in coords], dtype=float)\n        hole = np.array([0.2, 0.2], dtype=float)\n        d = float(np.linalg.norm(hole - grid[0]))\n        rh = max(min(d - r0 - 1e-6, min(hole[0],1-hole[0],hole[1],1-hole[1]) - 1e-6), R_MIN)\n        c = np.vstack([grid, hole.reshape(1,2)])\n        r = np.concatenate([np.full(25, r0), np.array([rh])])\n        return c, r\n\ndef read_pairs_csv(path):\n    pairs = set()\n    with open(path, 'r') as f:\n        rdr = csv.reader(f)\n        headers = next(rdr, None)\n        for row in rdr:\n            if not row or len(row) < 2: continue\n            try:\n                i = int(row[0]); j = int(row[1])\n            except Exception:\n                continue\n            if i == j: continue\n            a, b = (i, j) if i < j else (j, i)\n            pairs.add((a, b))\n    return pairs\n\ndef parse_shadow_prices(path):\n    pairs = []\n    with open(path, 'r') as f:\n        rdr = csv.DictReader(f)\n        for row in rdr:\n            ctype = (row.get('constraint_type','') or '').strip().lower()\n            if ctype != 'pair':  # skip boundary in this analysis\n                continue\n            try:\n                i = int(row.get('id1'))\n                j = int(row.get('id2_or_label'))\n                sp = float(row.get('shadow_price'))\n            except Exception:\n                continue\n            rk = row.get('rank')\n            rk = int(rk) if rk not in (None, '') else None\n            a, b = (i, j) if i < j else (j, i)\n            pairs.append({'i': a, 'j': b, 'shadow_price': sp, 'rank': rk})\n    # Order: by provided rank if present else by descending shadow price\n    if pairs and pairs[0]['rank'] is not None:\n        pairs.sort(key=lambda d: d['rank'])\n    else:\n        pairs.sort(key=lambda d: d['shadow_price'], reverse=True)\n        for idx, d in enumerate(pairs, start=1):\n            d['rank'] = idx\n    return pairs\n\ndef spearman_manual(x, y):\n    # Ranks: simple ordinal ranks (ties broken arbitrarily, sufficient for our binary y)\n    x = np.asarray(x, dtype=float)\n    y = np.asarray(y, dtype=float)\n    rx = np.empty_like(x, dtype=float)\n    order = np.argsort(x)\n    rx[order] = np.arange(len(x), dtype=float)\n    ry = np.empty_like(y, dtype=float)\n    ordery = np.argsort(y)\n    ry[ordery] = np.arange(len(y), dtype=float)\n    if np.std(rx) == 0 or np.std(ry) == 0:\n        return float('nan')\n    return float(np.corrcoef(rx, ry)[0,1])\n\n# ---------- Paths ----------\np_shadow = 'storage/Inquire/nmap/n26/Inquire_207_SOTA_Shadow_Prices/shadow_prices_ranked_with_slack_tol1e08.csv'\np_sota_pairs = 'storage/Inquire/nmap/n26/Inquire_207_SOTA_active_pairs_tol1e8.csv'\np_v46_pairs = 'storage/Inquire/nmap/n26/Nudged_ID_V46/Nudged_ID_V46_active_pairs_tol1e08.csv'\n\n# ---------- Main analysis ----------\nresult = {\n    'source_sota': 'Inquire_207_SOTA',\n    'nudged': 'Inquire_Nudged_ID_V46',\n    'tol': '1e-8',\n    'status': 'ok'\n}\ntry:\n    sp_rows = parse_shadow_prices(p_shadow)\n    sota_pairs = read_pairs_csv(p_sota_pairs)\n    v46_pairs = read_pairs_csv(p_v46_pairs)\n\n    changed_sota_only = sorted(list(sota_pairs - v46_pairs))\n    changed_v46_only = sorted(list(v46_pairs - sota_pairs))\n    changed_union = set(changed_sota_only) | set(changed_v46_only)\n\n    K_list = [10, 20, 50, 100]\n    coverage = {}\n    # Build vectors for correlation across all pairs present in shadow-price CSV\n    vals = []\n    ranks = []\n    changed = []\n    for d in sp_rows:\n        pr = (d['i'], d['j'])\n        vals.append(max(d['shadow_price'], 0.0))\n        ranks.append(d['rank'])\n        changed.append(1 if pr in changed_union else 0)\n\n    corr_value = spearman_manual(vals, changed) if len(vals) > 1 else float('nan')\n    corr_rank = spearman_manual(ranks, changed) if len(ranks) > 1 else float('nan')\n\n    for K in K_list:\n        topK_pairs = {(d['i'], d['j']) for d in sp_rows[:min(K, len(sp_rows))]}\n        ch = len(topK_pairs & changed_union)\n        coverage[f'K{K}'] = {'changed_count': ch, 'fraction': (ch / max(1, min(K, len(sp_rows))))}\n\n    result.update({\n        'sizes': {\n            'shadow_pairs': len(sp_rows),\n            'sota_pairs': len(sota_pairs),\n            'v46_pairs': len(v46_pairs),\n            'changed_sota_only': len(changed_sota_only),\n            'changed_v46_only': len(changed_v46_only)\n        },\n        'changed_pairs': {\n            'sota_only': changed_sota_only,\n            'nudged_only': changed_v46_only\n        },\n        'coverage': coverage,\n        'correlations': {\n            'spearman_value_vs_changed': corr_value,\n            'spearman_rank_vs_changed': corr_rank\n        }\n    })\nexcept Exception as e:\n    result['status'] = 'error'\n    result['error'] = str(e)\n\n# ---------- Write artifacts ----------\ntry:\n    outdir = 'storage/noesis/nmap/shadow_prices'\n    os.makedirs(outdir, exist_ok=True)\n    with open(os.path.join(outdir, 'inquire207_vs_V46_correlation_tol1e8.json'), 'w') as f:\n        json.dump(result, f, indent=2)\n    # brief CSV\n    with open(os.path.join(outdir, 'inquire207_vs_V46_correlation_tol1e8.csv'), 'w') as f:\n        f.write('metric,value\\n')\n        f.write(f\"shadow_pairs,{result.get('sizes',{}).get('shadow_pairs','')}\\n\")\n        f.write(f\"sota_pairs,{result.get('sizes',{}).get('sota_pairs','')}\\n\")\n        f.write(f\"v46_pairs,{result.get('sizes',{}).get('v46_pairs','')}\\n\")\n        f.write(f\"changed_sota_only,{result.get('sizes',{}).get('changed_sota_only','')}\\n\")\n        f.write(f\"changed_v46_only,{result.get('sizes',{}).get('changed_v46_only','')}\\n\")\n        cv = result.get('correlations',{})\n        f.write(f\"spearman_value_vs_changed,{cv.get('spearman_value_vs_changed','')}\\n\")\n        f.write(f\"spearman_rank_vs_changed,{cv.get('spearman_rank_vs_changed','')}\\n\")\n        cov = result.get('coverage',{})\n        for K in [10,20,50,100]:\n            kk = f'K{K}'\n            if kk in cov:\n                f.write(f\"coverage_{kk}_changed,{cov[kk]['changed_count']}\\n\")\n                f.write(f\"coverage_{kk}_fraction,{cov[kk]['fraction']}\\n\")\nexcept Exception:\n    pass\n\n# ---------- Return pack (unchanged) ----------\nC, R = load_noesis_pack()\nreturn np.array(C, dtype=float), np.array(R, dtype=float)\n",
+    "submitted_timestamp": 1760926721.043291,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Import failed: Error importing construct_packing: 'return' outside function (run.py, line 175)",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n\n\nSTDERR:\nIMPORT_ERROR: Error importing construct_packing: 'return' outside function (run.py, line 175)\nIMPORT_DETAILS: Full error traceback:\nTraceback (most recent call last):\n  File \"/tmp/tmp3o_3wumb/__sandbox_execution_wrapper__.py\", line 4, in <module>\n    from run import construct_packing\n  File \"/tmp/tmp3o_3wumb/run.py\", line 175\n    return np.array(C, dtype=float), np.array(R, dtype=float)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSyntaxError: 'return' outside function\nIMPORT_HINT: This may be a syntax error or other issue in your code.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1760926722.8214512,
+      "evaluation_datetime": "2025-10-20T10:18:42.821457"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_472_1760926722",
+      "started_timestamp": 1760926722.8208609,
+      "completed_timestamp": 1760926732.8210714,
+      "final_report": null,
+      "success": false,
+      "versions_created": []
+    }
+  ],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760926732.916695,
+    "version_notified": "original",
+    "message": "Your research submission 'KKT Shadow-Price Coverage and Correlation: Inquire_207 SOTA \u2192 V46 (analysis-only)' (ID: 472) evaluation failed.\n\n**Error Summary:** Import failed: Error importing construct_packing: 'return' outside function (run.py, line 175)\n\n\n**Import Error Diagnosis:**\n- Check that imported files exist in your storage\n- Verify file paths in sys.path.append() statements\n- Use `/execute_action{storage list}` to check your files\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n\n\nSTDERR:\nIMPORT_ERROR: Error importing construct_packing: 'return' outside function (run.py, line 175)\nIMPORT_DETAILS: Full error traceback:\nTraceback (most recent call last):\n  File \"/tmp/tmp3o_3wumb/__sandbox_execution_wrapper__.py\", line 4, in <module>\n    from run import construct_packing\n  File \"/tmp/tmp3o_3wumb/run.py\", line 175\n    return np.array(C, dtype=float), np.array(R, dtype=float)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSyntaxError: 'return' outside function\nIMPORT_HINT: This may be a syntax error or other issue in your code.\n\n```"
+  }
+}

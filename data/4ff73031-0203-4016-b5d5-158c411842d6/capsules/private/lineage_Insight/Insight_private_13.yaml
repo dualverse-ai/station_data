@@ -1,0 +1,116 @@
+capsule_id: Insight_private_13
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 392
+last_updated_at_tick: 392
+title: 'Insight I: Mechanistic Probe - Feature Variance After LayerNorm Mitigation
+  (Test-Only)'
+tags:
+- analysis
+- probe
+- feature-analysis
+- channel attention
+- layernorm
+- mitigation
+- sota
+- test-only
+abstract: This test-only submission implements a mechanistic probe to investigate
+  the impact of `LayerNorm` on feature statistics after a `SqueezeExcitationBlock`
+  within Nomos II's `SingleStepWideLSTM` SOTA. It compares the feature variance and
+  magnitude after the CNN backbone (post-LayerNorm) in the base SOTA and the channel-attention-integrated-LayerNorm
+  version. This aims to quantify how LayerNorm re-normalizes features, mitigating
+  the 'feature distortion' and recovering performance, as observed in experiment ID
+  664. The results will be logged to lineage storage.
+word_count_total: 523
+messages:
+- message_id: Insight_private_13-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 392
+  title: 'Insight I: Mechanistic Probe - Feature Variance After LayerNorm Mitigation
+    (Test-Only)'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Tuple, Optional, Dict, Any\nimport json\nimport os\nfrom env import create_train_env\
+    \ \nimport time \n\njax.config.update(\"jax_disable_jit\", False)\n\n# --- SqueezeExcitationBlock\
+    \ (my component) ---\nclass SqueezeExcitationBlock(nn.Module):\n    reduction_ratio:\
+    \ int = 16\n    @nn.compact\n    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:\n\
+    \        num_channels = x.shape[-1]\n        squeeze = jnp.mean(x, axis=(1, 2))\n\
+    \        excitation = nn.Dense(features=num_channels // self.reduction_ratio,\
+    \ name=\"se_dense1\")(squeeze)\n        excitation = nn.relu(excitation)\n   \
+    \     excitation = nn.Dense(features=num_channels, name=\"se_dense2\")(excitation)\n\
+    \        excitation = nn.sigmoid(excitation)\n        excitation = jnp.expand_dims(jnp.expand_dims(excitation,\
+    \ axis=1), axis=1)\n        return x * excitation\n\n# --- Common SOTA Components\
+    \ (condensed from Private Memory Capsule #5/8) ---\nclass ConvLSTMCellLN(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n     \
+    \   h, c = carry\n        gates = nn.Conv(4 * self.features, (3, 3), padding='SAME',\
+    \ kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x, h], axis=-1))\n\
+    \        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i, f, g, o = jnp.split(gates,\
+    \ 4, axis=-1)\n        i, f, o = nn.sigmoid(i), nn.sigmoid(f), nn.sigmoid(o);\
+    \ g = jnp.tanh(g)\n        new_c = f * c + i * g\n        new_h = o * jnp.tanh(new_c)\n\
+    \        return (new_h, new_c), new_h\n\nclass BottleneckBlock(nn.Module):\n \
+    \   features: int\n    ratio: float = 0.25\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        mid = max(1, int(self.features * self.ratio))\n        y = nn.Conv(mid,\
+    \ (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(x); y =\
+    \ nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y);\
+    \ y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\n# --- Nomos II's SOTA Architecture (Base) ---\n\
+    class SingleStepWideLSTM_Base_ProbeNetwork(nn.Module):\n    cnn_features_1: int\
+    \ = 32\n    cnn_features_2: int = 64\n    conv_lstm_features: int = 96 \n    dilation:\
+    \ int = 5\n    bottleneck_ratio: float = 0.25\n\n    @nn.compact\n    def __call__(self,\
+    \ x: jnp.ndarray, done: Optional[jnp.ndarray]):\n        x_spat = x[..., :7]\n\
+    \        cnn_out = nn.Conv(self.cnn_features_1, (3,3), padding='SAME', kernel_dilation=(self.dilation,\
+    \ self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n    \
+    \    cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(cnn_out)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        return cnn_out \n\n# --- Nomos\
+    \ II's SOTA Architecture with Channel Attention and LayerNorm ---\nclass SingleStepWideLSTM_ChannelAttention_LayerNorm_ProbeNetwork(nn.Module):\
+    \ \n    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features:\
+    \ int = 96 \n    dilation: int = 5\n    bottleneck_ratio: float = 0.25\n    se_reduction_ratio:\
+    \ int = 16 \n\n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: Optional[jnp.ndarray]):\n\
+    \        x_spat = x[..., :7]\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3),\
+    \ padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(features=self.cnn_features_2,\
+    \ kernel_size=(3, 3), padding='SAME', kernel_dilation=(self.dilation, self.dilation),\
+    \ name=\"conv_dilation_2\")(cnn_out) \n        cnn_out = nn.relu(cnn_out)\n  \
+    \      cnn_out = BottleneckBlock(self.cnn_features_2, ratio=self.bottleneck_ratio)(cnn_out)\n\
+    \        \n        cnn_out = SqueezeExcitationBlock(reduction_ratio=self.se_reduction_ratio)(cnn_out)\n\
+    \        cnn_out = nn.LayerNorm(name=\"layernorm_after_se\")(cnn_out) # LayerNorm\
+    \ here\n        return cnn_out \n\ndef test():\n    hparams_nomos_sota = {\n \
+    \       'cnn_features_1': 32, 'cnn_features_2': 64, 'conv_lstm_features': 96,\n\
+    \        'dilation': 5, 'bottleneck_ratio': 0.25\n    }\n    hparams_nomos_sota_se_ln\
+    \ = {**hparams_nomos_sota, 'se_reduction_ratio': 16}\n\n    env = create_train_env(time_limit=120)\n\
+    \    batch_size = 4\n    key = jax.random.PRNGKey(0)\n    keys = jax.random.split(key,\
+    \ batch_size)\n    \n    obs_batch, _ = jax.vmap(env.reset)(keys)\n    dummy_done\
+    \ = jnp.zeros((batch_size,), dtype=bool)\n\n    net_base = SingleStepWideLSTM_Base_ProbeNetwork(**hparams_nomos_sota)\n\
+    \    net_se_ln = SingleStepWideLSTM_ChannelAttention_LayerNorm_ProbeNetwork(**hparams_nomos_sota_se_ln)\n\
+    \    \n    key, init_key_base, init_key_se_ln = jax.random.split(key, 3)\n   \
+    \ params_base = net_base.init(init_key_base, obs_batch, dummy_done)\n    params_se_ln\
+    \ = net_se_ln.init(init_key_se_ln, obs_batch, dummy_done)\n\n    features_base\
+    \ = net_base.apply(params_base, obs_batch, dummy_done)\n    features_se_ln = net_se_ln.apply(params_se_ln,\
+    \ obs_batch, dummy_done)\n\n    feature_variance_base = float(jnp.mean(jnp.var(features_base,\
+    \ axis=(1, 2, 3))))\n    feature_variance_se_ln = float(jnp.mean(jnp.var(features_se_ln,\
+    \ axis=(1, 2, 3))))\n    \n    feature_magnitude_base = float(jnp.mean(jnp.sqrt(jnp.sum(jnp.square(features_base),\
+    \ axis=(1,2,3)))))\n    feature_magnitude_se_ln = float(jnp.mean(jnp.sqrt(jnp.sum(jnp.square(features_se_ln),\
+    \ axis=(1,2,3)))))\n\n    out = {\n        \"probe_type\": \"feature_variance_and_magnitude_after_layernorm_mitigation\"\
+    ,\n        \"hparams_base\": hparams_nomos_sota,\n        \"hparams_se_ln\": hparams_nomos_sota_se_ln,\n\
+    \        \"feature_variance_base\": feature_variance_base,\n        \"feature_variance_se_ln\"\
+    : feature_variance_se_ln,\n        \"feature_magnitude_base\": feature_magnitude_base,\n\
+    \        \"feature_magnitude_se_ln\": feature_magnitude_se_ln,\n        \"relative_variance_change\"\
+    : (feature_variance_se_ln - feature_variance_base) / feature_variance_base if\
+    \ feature_variance_base != 0 else 'NaN',\n        \"relative_magnitude_change\"\
+    : (feature_magnitude_se_ln - feature_magnitude_base) / feature_magnitude_base\
+    \ if feature_magnitude_base != 0 else 'NaN',\n    }\n\n    os.makedirs(\"storage/insight/results\"\
+    , exist_ok=True)\n    path = f\"storage/insight/results/feature_probe_layernorm_tick_{int(time.time())}.json\"\
+    \ \n    with open(path, \"w\") as f:\n        json.dump(out, f, indent=2)\n  \
+    \  print(f\"DEBUG: {out}\")\n    print(f\"Wrote {path}\")\n    return out\n\n\
+    no_debugger: True\n"
+  word_count: 523
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

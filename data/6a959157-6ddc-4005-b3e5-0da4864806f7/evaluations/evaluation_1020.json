@@ -1,0 +1,92 @@
+{
+  "id": "1020",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Masked-weights (row-normalized) using DAQB mask from MPB\u2011GraphFWPCA (k=50, kd=22, \u03bb=0.605, \u03b4=0.10)",
+  "tags": [
+    "graph",
+    "weighted",
+    "daqb",
+    "mpb-graphfwpca",
+    "neighbors",
+    "scrna-seq"
+  ],
+  "abstract": "We derive the SOTA DAQB edge set from MPB\u2011GraphFWPCA (k=50,kd=22,\u03bb=0.605,\u03b4=0.10,cap=2.0), then mask original scanpy connectivities/distances onto those edges and row-normalize the connectivities (0.5*(P+P^T)). Goal: keep the winning topology while restoring informative weights.",
+  "submitted_tick": 659,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, numpy as np, scipy.sparse as sp\nimport scanpy as sc\nimport anndata as ad\n\nsys.path.append('storage/praxis')\nimport mpb_graphfwpca_override as mpb\n\ndef _ensure_csr(m):\n    return m.tocsr() if hasattr(m, \"tocsr\") else sp.csr_matrix(m)\n\ndef _row_normalize(C):\n    C = _ensure_csr(C)\n    rs = np.array(C.sum(axis=1)).ravel()\n    rs[rs == 0.0] = 1.0\n    inv = 1.0 / rs\n    return sp.diags(inv) @ C\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Work on a copy to build DAQB mask and get embedding\n    ad2 = adata.copy()\n\n    # Run MPB\u2011GraphFWPCA pipeline to produce DAQB graph and X_emb at SOTA params\n    ad2 = mpb.eliminate_mpb_graphfwpca(\n        ad2,\n        lam_override=0.605, delta=0.10,\n        kdensity=22, k_total=50, cap=2.0,\n        rng_seed=0\n    )\n    # DAQB mask from final graph\n    Cg = _ensure_csr(ad2.obsp['connectivities'])\n    M = Cg.copy()\n    M.data[:] = 1.0  # binary mask on selected edges\n\n    # Base neighbors on the same embedding for weighted edges/distances\n    sc.pp.neighbors(ad2, n_neighbors=50, use_rep='X_emb', metric='euclidean', random_state=0)\n    C0 = _ensure_csr(ad2.obsp['connectivities'])\n    D0 = _ensure_csr(ad2.obsp['distances'])\n\n    # Mask weights/distances to DAQB-selected edges and symmetrize\n    Cw = (C0.multiply(M)).maximum((C0.T).multiply(M.T))\n    Dw = (D0.multiply(M)).maximum((D0.T).multiply(M.T))\n\n    # Row-normalize then symmetrize: P_s = 0.5 * (P + P^T)\n    P = _row_normalize(Cw)\n    Cn = (P + P.T) * 0.5\n\n    ad2.obsp['connectivities'] = _ensure_csr(Cn)\n    ad2.obsp['distances'] = _ensure_csr(Dw)\n    return ad2\n",
+    "submitted_timestamp": 1761618498.4388175,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6625974549592069,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d4706dda-c5d1-4bec-8f82-e3e960186c31/result_human.h5ad\n\nRESULT_UUID: d4706dda-c5d1-4bec-8f82-e3e960186c31\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.626  NMI: 0.722\n  Graph_conn: 0.913  kBET: 0.789  iLISI: 0.352  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.625596  NMI: 0.722478\n  Graph_conn: 0.914185  kBET: 0.752618  iLISI: 0.351649  cLISI: 0.997220\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.626",
+          0.6256472035073225
+        ],
+        "NMI": [
+          "0.722",
+          0.7223997261991112
+        ],
+        "Graph_conn": [
+          "0.913",
+          0.9127040634530494
+        ],
+        "kBET": [
+          "0.789",
+          0.788763890350234
+        ],
+        "iLISI": [
+          "0.352",
+          0.3516488832422735
+        ],
+        "cLISI": [
+          "0.990",
+          0.990456060012563
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761618773.8024287,
+      "evaluation_datetime": "2025-10-28T10:32:53.802429",
+      "sort_key": [
+        0.6625974549592069
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6625974549592069,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761618773.838119,
+    "version_notified": "original",
+    "message": "Your research submission 'Masked-weights (row-normalized) using DAQB mask from MPB\u2011GraphFWPCA (k=50, kd=22, \u03bb=0.605, \u03b4=0.10)' (ID: 1020) has been evaluated.\n\n**Score:** 0.6625974549592069\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.626\n**NMI:** 0.722\n**Graph_conn:** 0.913\n**kBET:** 0.789\n**iLISI:** 0.352\n**cLISI:** 0.990\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.626  NMI: 0.722\n  Graph_conn: 0.913  kBET: 0.789  iLISI: 0.352  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.625596  NMI: 0.722478\n  Graph_conn: 0.914185  kBET: 0.752618  iLISI: 0.351649  cLISI: 0.997220\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d4706dda-c5d1-4bec-8f82-e3e960186c31/result_human.h5ad\n\nRESULT_UUID: d4706dda-c5d1-4bec-8f82-e3e960186c31\n\n\nSTDERR:\n\n```"
+  }
+}

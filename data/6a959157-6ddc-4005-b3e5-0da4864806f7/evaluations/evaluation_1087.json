@@ -1,0 +1,92 @@
+{
+  "id": "1087",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Hybrid v3: Latent Standardization + BBKNN Graph",
+  "tags": [
+    "hybrid",
+    "pca",
+    "standardization",
+    "bbknn",
+    "graph-based",
+    "sotw"
+  ],
+  "abstract": "This method builds upon the successful 'Latent Space Standardization' technique. First, it corrects the PCA latent space for both mean and variance differences between batches. Then, a BBKNN graph is constructed on this globally standardized embedding. The hypothesis is that this well-corrected latent space will enable BBKNN to effectively interleave local neighborhoods, dramatically improving the iLISI score while retaining the high overall performance.",
+  "submitted_tick": 706,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nHybrid v3: Latent Space Standardization followed by BBKNN Graph Construction.\n\nThis is a two-stage method combining the strengths of SOTA embedding correction\nand SOTA graph-based local mixing.\n\n1.  **Latent Space Standardization:** The PCA space is corrected to align\n    both the mean and variance of each batch with the global distribution.\n    This creates a globally consistent and well-shaped embedding.\n2.  **BBKNN Graph Construction:** A batch-balanced k-NN graph is built upon\n    this corrected embedding to specifically address local mixing (iLISI).\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Performs batch correction using Latent Standardization followed by BBKNN.\n    \"\"\"\n    print(\"Hybrid v3: Starting Latent Standardization + BBKNN...\")\n\n    # === STAGE 1: Latent Space Standardization ===\n    print(\"  [Stage 1] Performing latent space standardization...\")\n\n    # Normalize and compute initial PCA\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n    \n    # Perform standardization\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        global_mean, global_std = pc_vector.mean(), pc_vector.std()\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc_vector = pc_vector[batch_mask]\n                batch_mean, batch_std = batch_pc_vector.mean(), batch_pc_vector.std()\n                \n                if batch_std < 1e-8: batch_std = 1.0\n\n                standardized = (batch_pc_vector - batch_mean) / batch_std\n                rescaled = standardized * global_std + global_mean\n                X_pca_corrected[batch_mask, pc_idx] = rescaled\n\n    print(f\"  [Stage 1] Standardization complete. Corrected PCA shape: {X_pca_corrected.shape}\")\n\n    # === STAGE 2: BBKNN Graph Construction ===\n    print(\"  [Stage 2] Building BBKNN graph on standardized embedding...\")\n    \n    neighbors_within_batch = 3\n    n_cells = adata.n_obs\n    batch_to_indices = {b: np.where(batch_labels == b)[0] for b in unique_batches}\n\n    all_neighbors, all_distances = [[] for _ in range(n_cells)], [[] for _ in range(n_cells)]\n\n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        if len(batch_indices) == 0: continue\n        \n        nn_model = NearestNeighbors(\n            n_neighbors=min(neighbors_within_batch + 1, len(batch_indices)),\n            metric='euclidean', n_jobs=1\n        ).fit(X_pca_corrected[batch_indices])\n        \n        distances_all, indices_all = nn_model.kneighbors(X_pca_corrected)\n\n        for i in range(n_cells):\n            global_indices = batch_indices[indices_all[i]]\n            mask = global_indices != i\n            n_to_add = min(neighbors_within_batch, np.sum(mask))\n            all_neighbors[i].extend(global_indices[mask][:n_to_add])\n            all_distances[i].extend(distances_all[i][mask][:n_to_add])\n\n    print(\"    Creating final connectivity and distance matrices...\")\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    for i in range(n_cells):\n        if all_neighbors[i]:\n            distances_matrix[i, all_neighbors[i]] = all_distances[i]\n    \n    distances_matrix = distances_matrix.tocsr().maximum(distances_matrix.T)\n    connectivities_matrix = distances_matrix.copy()\n    if len(connectivities_matrix.data) > 0:\n        connectivities_matrix.data = np.exp(-(connectivities_matrix.data ** 2))\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n    \n    print(\"  [Stage 2] BBKNN graph construction complete.\")\n    \n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsp={\n            'connectivities': connectivities_matrix.astype(np.float32),\n            'distances': distances_matrix.astype(np.float32),\n        },\n        uns={'method_id': 'standardization_bbknn_hybrid'}\n    )\n    \n    print(\"\u2713 Hybrid v3 method complete.\")\n    return output\n",
+    "submitted_timestamp": 1761637078.8283026,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.1758602036755566,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid v3: Starting Latent Standardization + BBKNN...\n  [Stage 1] Performing latent space standardization...\n  [Stage 1] Standardization complete. Corrected PCA shape: (20000, 50)\n  [Stage 2] Building BBKNN graph on standardized embedding...\n    Creating final connectivity and distance matrices...\n  [Stage 2] BBKNN graph construction complete.\n\u2713 Hybrid v3 method complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/59e36be2-b423-4046-ba4d-4e4d399b7fd1/result_human.h5ad\n\nRESULT_UUID: 59e36be2-b423-4046-ba4d-4e4d399b7fd1\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.117  NMI: 0.431\n  Graph_conn: 0.210  kBET: 0.000  iLISI: 0.000  cLISI: 1.000\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.117182  NMI: 0.431236\n  Graph_conn: 0.223621  kBET: nan  iLISI: 0.000000  cLISI: 1.000000\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.117",
+          0.11730186977162753
+        ],
+        "NMI": [
+          "0.431",
+          0.43107502191604585
+        ],
+        "Graph_conn": [
+          "0.210",
+          0.2102251450678925
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.000",
+          2.9605947323337506e-16
+        ],
+        "cLISI": [
+          "1.000",
+          1.0
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761637113.9784255,
+      "evaluation_datetime": "2025-10-28T15:38:33.978429",
+      "sort_key": [
+        0.1758602036755566
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.1758602036755566,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761637114.0029187,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid v3: Latent Standardization + BBKNN Graph' (ID: 1087) has been evaluated.\n\n**Score:** 0.1758602036755566\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.117\n**NMI:** 0.431\n**Graph_conn:** 0.210\n**kBET:** 0.000\n**iLISI:** 0.000\n**cLISI:** 1.000\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.117  NMI: 0.431\n  Graph_conn: 0.210  kBET: 0.000  iLISI: 0.000  cLISI: 1.000\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.117182  NMI: 0.431236\n  Graph_conn: 0.223621  kBET: nan  iLISI: 0.000000  cLISI: 1.000000\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nHybrid v3: Starting Latent Standardization + BBKNN...\n  [Stage 1] Performing latent space standardization...\n  [Stage 1] Standardization complete. Corrected PCA shape: (20000, 50)\n  [Stage 2] Building BBKNN graph on standardized embedding...\n    Creating final connectivity and distance matrices...\n  [Stage 2] BBKNN graph construction complete.\n\u2713 Hybrid v3 method complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/59e36be2-b423-4046-ba4d-4e4d399b7fd1/result_human.h5ad\n\nRESULT_UUID: 59e36be2-b423-4046-ba4d-4e4d399b7fd1\n\n\nSTDERR:\n\n```"
+  }
+}

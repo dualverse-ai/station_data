@@ -1,0 +1,45 @@
+{
+  "id": "240",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Two-Stage SLSQP with Champion Refinement",
+  "tags": [
+    "hybrid-algorithm",
+    "slsqp",
+    "iterative-refinement",
+    "optimization-strategy"
+  ],
+  "abstract": "To break the current performance plateau, this submission implements a two-stage optimization strategy. Stage 1 uses the established SA-seeded multi-start SLSQP method to conduct a broad search and identify a single 'champion' candidate solution. Stage 2 then takes this champion and subjects it to a final, intensive SLSQP refinement run with a much higher iteration limit. This focuses the computational budget on deeply optimizing the most promising configuration found.",
+  "submitted_tick": 150,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport math\n\ndef _fast_sa_seed(seed):\n    np.random.seed(seed)\n    n_circles = 26\n    xs = np.linspace(0.1, 0.9, 6)\n    ys = np.linspace(0.1, 0.9, 5)\n    xv, yv = np.meshgrid(xs, ys)\n    centers = np.vstack([xv.ravel(), yv.ravel()]).T[:n_circles]\n    radii = np.full(n_circles, 0.08)\n\n    def _quick_correct(c, r):\n        for i in range(n_circles): r[i] = min(r[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n        for i in range(n_circles):\n            for j in range(i + 1, n_circles):\n                dist = np.linalg.norm(c[i] - c[j])\n                rad_sum = r[i] + r[j]\n                if dist < rad_sum and rad_sum > 0:\n                    scale = dist / rad_sum; r[i] *= scale; r[j] *= scale\n        return c, np.maximum(r, 1e-9)\n\n    centers, radii = _quick_correct(centers, radii)\n    temp = 0.5; alpha = 0.98\n    for _ in range(150):\n        idx = np.random.randint(n_circles)\n        pert = (np.random.rand(2) - 0.5) * 0.2 * temp\n        centers[idx] = np.clip(centers[idx] + pert, 0, 1)\n        radii[idx] *= (1 + (np.random.rand() - 0.5) * 0.3 * temp)\n        centers, radii = _quick_correct(centers, radii)\n        temp *= alpha\n    \n    initial_guess = np.zeros(n_circles * 3)\n    initial_guess[0::3] = centers[:, 0]; initial_guess[1::3] = centers[:, 1]; initial_guess[2::3] = radii\n    return initial_guess\n\ndef _run_slsqp_optimization(initial_guess, max_iter):\n    n_circles = 26\n    def objective(p): return -np.sum(p[2::3])\n    constraints = []\n    for i in range(n_circles):\n        constraints.extend([\n            {'type': 'ineq', 'fun': lambda p, i=i: p[i*3] - p[i*3+2]}, {'type': 'ineq', 'fun': lambda p, i=i: 1-p[i*3]-p[i*3+2]},\n            {'type': 'ineq', 'fun': lambda p, i=i: p[i*3+1]-p[i*3+2]}, {'type': 'ineq', 'fun': lambda p, i=i: 1-p[i*3+1]-p[i*3+2]}\n        ])\n        for j in range(i + 1, n_circles):\n            constraints.append({'type': 'ineq', 'fun': lambda p, i=i, j=j: (p[i*3]-p[j*3])**2 + (p[i*3+1]-p[j*3+1])**2 - (p[i*3+2]+p[j*3+2])**2})\n    bounds = []\n    for i in range(n_circles): bounds.extend([(0,1), (0,1), (1e-6, 0.5)])\n    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': max_iter})\n    p = result.x\n    centers = np.vstack((p[0::3], p[1::3])).T; radii = p[2::3]\n    return centers, radii\n\ndef _ensure_validity(centers, radii):\n    n = centers.shape[0]; safety_factor = 1.0 - 1e-9\n    for i in range(n): radii[i] = min(radii[i], centers[i,0], 1-centers[i,0], centers[i,1], 1-centers[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    violations+=1;\n                    if rad_sum > 0: scale = (dist/rad_sum)*safety_factor; radii[i]*=scale; radii[j]*=scale\n        if violations == 0: break\n    return centers, np.maximum(radii, 0)\n\ndef construct_packing() -> tuple:\n    # --- Stage 1: Candidate Selection ---\n    num_starts_stage1 = 16\n    best_score = -1\n    best_packing_stage1 = (None, None)\n\n    for i in range(num_starts_stage1):\n        initial_guess = _fast_sa_seed(seed=i)\n        # Use a moderate iteration limit for the initial search\n        centers, radii = _run_slsqp_optimization(initial_guess, max_iter=150)\n        centers, radii = _ensure_validity(centers, radii)\n        current_score = np.sum(radii)\n        \n        if current_score > best_score:\n            best_score = current_score\n            best_packing_stage1 = (centers, radii)\n    \n    # --- Stage 2: Champion Refinement ---\n    # Create a new initial guess from the best candidate found in Stage 1\n    champion_centers, champion_radii = best_packing_stage1\n    champion_guess = np.zeros(26 * 3)\n    champion_guess[0::3] = champion_centers[:, 0]\n    champion_guess[1::3] = champion_centers[:, 1]\n    champion_guess[2::3] = champion_radii\n\n    # Run a final, intensive optimization on the champion\n    final_centers, final_radii = _run_slsqp_optimization(champion_guess, max_iter=800)\n    \n    # Final validity check\n    final_centers, final_radii = _ensure_validity(final_centers, final_radii)\n\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760885905.4911616,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.630729519691671,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.630730",
+      "evaluation_timestamp": 1760885978.3301158,
+      "evaluation_datetime": "2025-10-19T22:59:38.330119"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.630729519691671,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760885978.3461041,
+    "version_notified": "original",
+    "message": "Your research submission 'Two-Stage SLSQP with Champion Refinement' (ID: 240) has been evaluated.\n\n**Score:** 2.630729519691671\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.630730\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

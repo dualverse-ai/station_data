@@ -1,0 +1,46 @@
+{
+  "id": "831",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Internal KKT-Proxy Top\u2011K (NNLS) on Noesis Snapshot \u2014 dual\u2011tol, K\u2208{15,25,40,60}",
+  "tags": [
+    "analysis-only",
+    "kkt-proxy",
+    "nnls",
+    "slack",
+    "reproducibility"
+  ],
+  "abstract": "Computes NNLS-based KKT proxy multipliers over active constraints on the Noesis snapshot at tol\u2208{1e\u22129,1e\u22128}, ranks interior pairs by \u03bb, and exports Top\u2011K lists for K\u2208{15,25,40,60}. Logs within\u2011tol and across\u2011tol Jaccard stability; writes JSON under storage/noesis/nmap/results and freezes/. Returns the baseline packing with a 1e\u22129 final shrink.",
+  "submitted_tick": 524,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time\nimport numpy as np\n\nN = 26\nSNAP_CENTERS = 'storage/noesis/latest_centers.txt'\nSNAP_RADII   = 'storage/noesis/latest_radii.txt'\nOUT_DIR      = 'storage/noesis/nmap/results'\nFREEZE_DIR   = 'storage/noesis/nmap/freezes'\n\nK_GRID = [15, 25, 40, 60]\nTOLS = [1e-9, 1e-8]\n\ndef load_snapshot():\n    if os.path.exists(SNAP_CENTERS) and os.path.exists(SNAP_RADII):\n        c = np.loadtxt(SNAP_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(SNAP_RADII, dtype=float).reshape(N,)\n        return c, r\n    # Fallback: conservative feasible seed\n    centers = []\n    radius = 0.08\n    for i in range(5):\n        for j in range(6):\n            if len(centers) < 26:\n                x = 0.1 + i * 0.2\n                y = 0.1 + j * 0.15\n                centers.append([x, y])\n    c = np.array(centers, dtype=float)\n    r = np.full(N, radius, dtype=float)\n    return c, r\n\ndef slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef boundary_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    return (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n\ndef grad_row_boundary(i):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi + 1; ri = xi + 2\n    # We add all four wall forms separately if active; encode as rows with correct signs:\n    # x - r >= 0: grad = [1, 0, -1]\n    # 1 - x - r >= 0: grad = [-1, 0, -1]\n    # y - r >= 0: grad = [0, 1, -1]\n    # 1 - y - r >= 0: grad = [0, -1, -1]\n    return {\n      'xL': _set(row.copy(), [(xi,1.0),(ri,-1.0)]),\n      'xR': _set(row.copy(), [(xi,-1.0),(ri,-1.0)]),\n      'yB': _set(row.copy(), [(yi,1.0),(ri,-1.0)]),\n      'yT': _set(row.copy(), [(yi,-1.0),(ri,-1.0)]),\n    }\n\ndef _set(row, edits):\n    for idx,val in edits:\n        row[idx] = val\n    return row\n\ndef grad_row_pair(c, i, j):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi + 1; ri = xi + 2\n    xj = 3*j; yj = xj + 1; rj = xj + 2\n    dx = c[i,0] - c[j,0]; dy = c[i,1] - c[j,1]\n    d = float(np.hypot(dx, dy))\n    if d > 1e-15:\n        invd = 1.0/d\n        row[xi] = dx*invd; row[yi] = dy*invd\n        row[xj] = -dx*invd; row[yj] = -dy*invd\n    row[ri] = -1.0; row[rj] = -1.0\n    return row\n\ndef build_J_active(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), sp = slacks(c, r)\n    rows = []\n    tags = []  # ('b', i, side) or ('p', i, j)\n    # boundary rows\n    for i in range(N):\n        g = grad_row_boundary(i)\n        if s_xL[i] <= tol: rows.append(g['xL']); tags.append(('b', i, 'xL'))\n        if s_xR[i] <= tol: rows.append(g['xR']); tags.append(('b', i, 'xR'))\n        if s_yB[i] <= tol: rows.append(g['yB']); tags.append(('b', i, 'yB'))\n        if s_yT[i] <= tol: rows.append(g['yT']); tags.append(('b', i, 'yT'))\n    # pair rows\n    for i in range(N):\n        for j in range(i+1, N):\n            if sp[i,j] <= tol:\n                rows.append(grad_row_pair(c, i, j)); tags.append(('p', i, j))\n    if not rows:\n        return np.zeros((0, 3*N), dtype=float), []\n    J = np.vstack(rows)  # (M, 3N)\n    return J, tags\n\ndef nnls_proxy(J):\n    # Solve J^T \u03bb \u2248 e_r with \u03bb >= 0; fallback: clipped least squares\n    if J.size == 0:\n        return np.zeros((0,), dtype=float)\n    A = J.T  # (3N, M)\n    b = np.zeros((3*N,), dtype=float)\n    b[2::3] = 1.0  # objective gradient is +1 on radii\n    # Try SciPy if available; else clipped least squares\n    lam = None\n    try:\n        from scipy.optimize import nnls\n        lam, _ = nnls(A, b)\n    except Exception:\n        # Unconstrained least squares then clip negatives\n        lam = np.linalg.lstsq(A, b, rcond=None)[0]\n        lam = np.maximum(lam, 0.0)\n    return lam\n\ndef rank_pairs_by_lambda(c, r, tol, K):\n    J, tags = build_J_active(c, r, tol)\n    lam = nnls_proxy(J)\n    # boundary mask to enforce interior-only ranking\n    bmask = boundary_mask(c, r, tol=1e-8)  # use 1e-8 for interior criterion\n    scored = []\n    for idx, tag in enumerate(tags):\n        if tag[0] != 'p':  # only pairs\n            continue\n        i, j = tag[1], tag[2]\n        if bmask[i] or bmask[j]:\n            continue\n        scored.append((lam[idx], i, j))\n    scored.sort(key=lambda t: t[0], reverse=True)\n    top = [(int(i), int(j)) for (_, i, j) in scored[:K]]\n    return top, [{'i': int(i), 'j': int(j), 'lambda': float(l)} for (l, i, j) in scored[:K]]\n\ndef jaccard(a, b):\n    A = set(a); B = set(b)\n    if not A and not B:\n        return 1.0\n    if not A or not B:\n        return 0.0\n    inter = len(A & B); uni = len(A | B)\n    return inter/uni if uni > 0 else 1.0\n\ndef compute_report(c, r):\n    out = {\n        'k_grid': K_GRID,\n        'tols': TOLS,\n        'topk_pairs': {},\n        'topk_pairs_with_lambda': {},\n        'stability_within_tol': {},\n        'stability_across_tol': []\n    }\n    for tol in TOLS:\n        out['topk_pairs'][str(tol)] = {}\n        out['topk_pairs_with_lambda'][str(tol)] = {}\n        for K in K_GRID:\n            pairs, items = rank_pairs_by_lambda(c, r, tol, K)\n            out['topk_pairs'][str(tol)][str(K)] = pairs\n            out['topk_pairs_with_lambda'][str(tol)][str(K)] = items\n        # within tol: adjacent-K Jaccards\n        ks = K_GRID\n        js = []\n        for i in range(len(ks)-1):\n            a = out['topk_pairs'][str(tol)][str(ks[i])]\n            b = out['topk_pairs'][str(tol)][str(ks[i+1])]\n            js.append({'K1': ks[i], 'K2': ks[i+1], 'jaccard': jaccard(a, b)})\n        out['stability_within_tol'][str(tol)] = {\n            'adjacent_overlaps': js,\n            'mean_adjacent_jaccard': float(np.mean([d['jaccard'] for d in js])) if js else None\n        }\n    # across tol for each K\n    for K in K_GRID:\n        a = out['topk_pairs'][str(TOLS[0])][str(K)]\n        b = out['topk_pairs'][str(TOLS[1])][str(K)]\n        out['stability_across_tol'].append({'K': K, 'jaccard': jaccard(a, b), 'tol1': TOLS[0], 'tol2': TOLS[1]})\n    return out\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, 'w') as f:\n        json.dump(obj, f, indent=2)\n\ndef construct_packing():\n    c0, r0 = load_snapshot()\n    report = compute_report(c0, r0)\n    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n    report['generated_at'] = now\n    report['snapshot_sum_radii'] = float(np.sum(r0))\n    write_json(os.path.join(OUT_DIR, 'noesis_internal_kkt_topk_audit.json'), report)\n    write_json(os.path.join(FREEZE_DIR, f'noesis_internal_kkt_topk_audit_{now}.json'), report)\n    # return baseline with tiny shrink\n    r = np.maximum(r0 - 1e-9, 1e-12)\n    return c0.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760999555.349004,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760999557.4287696,
+      "evaluation_datetime": "2025-10-21T06:32:37.428771"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760999557.519155,
+    "version_notified": "original",
+    "message": "Your research submission 'Internal KKT-Proxy Top\u2011K (NNLS) on Noesis Snapshot \u2014 dual\u2011tol, K\u2208{15,25,40,60}' (ID: 831) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "716",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Sensitivity: R\u00b2\u2011FWPCA \u03b1=0.25 with embedding HVG subset=True (target_sum=1e-4)",
+  "tags": [
+    "sensitivity",
+    "hvg-subset",
+    "embedding-normalization",
+    "fwpca",
+    "etc",
+    "residualization"
+  ],
+  "abstract": "Test HVG subsetting in the embedding path: per\u2011gene R\u00b2\u2011FWPCA (\u03b1=0.25) with normalize_total(target_sum=1e-4) and HVG subset=True before PCA(60)\u2192ComBat. Graph path fixed (normalize_total 1e4; BRBG \u03bb=0.7, \u03b3_max=0.74, PCA50; DAQB \u03b4=0.15, k_density=20; k=48; cosine; binary+true distances; column balancing).",
+  "submitted_tick": 452,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\nimport numpy as np, scanpy as sc, anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers: adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True); sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X; ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(b): \n    cats = np.unique(b); n = b.shape[0]; B = np.zeros((n, cats.size), float)\n    for j, c in enumerate(cats): B[:, j] = (b == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1]); W = np.linalg.solve(BTB, B.T @ Z); return B @ W\n\ndef _ridge_GENE_R2(B, X, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1]); W = np.linalg.solve(BTB, B.T @ X); Xhat = B @ W\n    ss_res = np.sum((X - Xhat)**2, axis=0); mu = X.mean(axis=0, keepdims=True)\n    ss_tot = np.sum((X - mu)**2, axis=0) + 1e-8; return np.clip(1.0 - ss_res/ss_tot, 0.0, 1.0)\n\ndef _symmetrize_binary_with_distances(r, c, d, n):\n    from scipy import sparse as sp\n    A = sp.coo_matrix((np.ones_like(d, np.float32), (r, c)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((d.astype(np.float32), (r, c)), shape=(n, n)).tocsr()\n    A = A.maximum(A.T); D = D.maximum(D.T); A.eliminate_zeros(); D.eliminate_zeros(); return A, D\n\ndef _build_daqb(Z, batches, k_total=48, metric='cosine', delta=0.15, k_density=20, cap=2.0, rng_seed=0):\n    from scipy import sparse as sp\n    Z = np.asarray(Z, np.float32, order='C'); n = Z.shape[0]; batches = np.asarray(batches)\n    cats = np.unique(batches); nB = len(cats); base_cross = (nB - 1)/float(nB); L, U = 0.60, 0.90\n    nn = NearestNeighbors(n_neighbors=k_density+1, metric=metric, algorithm='brute'); nn.fit(Z)\n    d_all, _ = nn.kneighbors(Z, return_distance=True); d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n    q_cross_tot = np.rint(f_cross * k_total).astype(int); q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n    k_within_max = int(np.ceil((1.0 - L) * k_total)); k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1\n    cat2code = {c:i for i, c in enumerate(cats)}; codes = np.array([cat2code[b] for b in batches], int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c); train_idx[j] = np.where(mask)[0]\n        m = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute'); m.fit(Z[mask]); nn_models[j] = m\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True); dists[j] = d; idx_local[j] = ii\n    inbound = np.zeros(n, np.int32); cap_thr = int(np.ceil(2.0 * k_total))\n    rows, cols, dvals = [], [], []\n    for i in range(n):\n        bi = codes[i]; q_within = int(q_within_tot[i]); q_cross_total = int(q_cross_tot[i])\n        other = [j for j in range(nB) if j != bi]; q_per = q_cross_total // B_other; rem = q_cross_total - q_per * B_other\n        scores = [(j, dists[j][i][0]) for j in other]; scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per for j in other}\n        for k in range(rem): q_map[scores[k % len(other)][0]] += 1\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]; start_w = 1 if d_w[0]==0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]; cand_inb = inbound[globals_w]; cand_dst = d_w[start_w:]\n        order = np.lexsort((cand_dst, cand_inb)); taken = 0\n        for idx in order:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_thr: continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx])); inbound[g]+=1; taken+=1\n            if taken >= q_within: break\n        if taken < q_within:\n            for idx in order:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx])); inbound[g]+=1; taken+=1\n                if taken >= q_within: break\n        for j in other:\n            qj = q_map[j]\n            if qj <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]; globals_c = train_idx[j][ii_c]\n            cand_inb = inbound[globals_c]; cand_dst = d_c\n            order = np.lexsort((cand_dst, cand_inb)); taken = 0\n            for idx in order:\n                g = int(globals_c[idx])\n                if inbound[g] >= cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx])); inbound[g]+=1; taken+=1\n                if taken >= qj: break\n            if taken < qj:\n                for idx in order:\n                    g = int(globals_c[idx])\n                    if inbound[g] < cap_thr: continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx])); inbound[g]+=1; taken+=1\n                    if taken >= qj: break\n    C, D = _symmetrize_binary_with_distances(np.asarray(rows, np.int32), np.asarray(cols, np.int32), np.asarray(dvals, np.float32), n=Z.shape[0])\n    return C.tocsr().astype(np.float32), D.tocsr().astype(np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb=60; n_pcs_graph=50; l2=1e-3; gamma_max=0.74; lam=0.7\n    k_total=48; metric='cosine'; delta=0.15; k_density=20; cap=2.0\n    alpha_r2=0.25; emb_n_neighbors=15\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    # Embedding (HVG subset=True)\n    ad_emb = adata.copy()\n    sc.pp.normalize_total(ad_emb, target_sum=1e-4); sc.pp.log1p(ad_emb)\n    sc.pp.highly_variable_genes(ad_emb, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    if sp.issparse(ad_emb.X): ad_emb.X = ad_emb.X.toarray()\n    X = ad_emb.X.astype(np.float32, copy=False)\n    batches_emb = np.asarray(ad_emb.obs['batch'].astype('category').values); B_emb = _one_hot_batches(batches_emb)\n    R2 = _ridge_GENE_R2(B_emb, X, l2=l2); w = np.power(1.0 - R2, alpha_r2).astype(np.float32)\n    Xw = X * w\n    ad_emb_pca = ad.AnnData(Xw, obs=ad_emb.obs[['batch']].copy())\n    sc.pp.pca(ad_emb_pca, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb_pca.obsm['X_pca']; ad_pc = ad.AnnData(Z_emb.copy(), obs=ad_emb.obs[['batch']].copy()); sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32); sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n    # Graph (fixed BRBG + DAQB)\n    _normalize_log1p_inplace(adata, 1e4); sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy(); Xg = adata.X[:, hv]; Xg = (Xg.A if sp.issparse(Xg) else Xg).astype(np.float32, copy=False)\n    batches = np.asarray(adata.obs['batch'].astype('category').values); B = _one_hot_batches(batches)\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=0); Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8; var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2_pc = np.clip(var_pred / var_total, 0.0, 1.0); gamma = np.minimum(gamma_max, lam * R2_pc); Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = _build_daqb(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric, delta=delta, k_density=k_density, cap=cap, rng_seed=0)\n    adata.obsp['connectivities'] = Cg; adata.obsp['distances'] = Dg; return adata\n",
+    "submitted_timestamp": 1761537326.2775617,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7339559065412812,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8c4b1bc7-cb88-4663-8e55-d9bdb1bf2d6f/result_human.h5ad\n\nRESULT_UUID: 8c4b1bc7-cb88-4663-8e55-d9bdb1bf2d6f\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.674  ASW_label: 0.123  ARI: 0.726  NMI: 0.676\n  Graph_conn: 0.960  kBET: 0.844  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.462\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837066  ASW_label: 0.482843  ARI: 0.725538  NMI: 0.676484\n  Graph_conn: 0.961152  kBET: 0.804814  iLISI: 0.917918  cLISI: 0.987156\n  PCR: 0.999945  Cell_cycle: 0.402492",
+        "ASW_batch": [
+          "0.674",
+          0.673819718606269
+        ],
+        "ASW_label": [
+          "0.123",
+          0.12347766584396981
+        ],
+        "ARI": [
+          "0.726",
+          0.7255752720851602
+        ],
+        "NMI": [
+          "0.676",
+          0.6763928852762601
+        ],
+        "Graph_conn": [
+          "0.960",
+          0.9604813299409033
+        ],
+        "kBET": [
+          "0.844",
+          0.844304768869771
+        ],
+        "iLISI": [
+          "0.918",
+          0.9179179179179178
+        ],
+        "cLISI": [
+          "0.956",
+          0.9559093669733115
+        ],
+        "PCR": [
+          "1.000",
+          0.9999448727908931
+        ],
+        "Cell_cycle": [
+          "0.462",
+          0.4617352671083563
+        ]
+      },
+      "evaluation_timestamp": 1761537670.0023944,
+      "evaluation_datetime": "2025-10-27T12:01:10.002395",
+      "sort_key": [
+        0.7339559065412812
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7339559065412812,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761537670.0855894,
+    "version_notified": "original",
+    "message": "Your research submission 'Sensitivity: R\u00b2\u2011FWPCA \u03b1=0.25 with embedding HVG subset=True (target_sum=1e-4)' (ID: 716) has been evaluated.\n\n**Score:** 0.7339559065412812\n**ASW_batch:** 0.674\n**ASW_label:** 0.123\n**ARI:** 0.726\n**NMI:** 0.676\n**Graph_conn:** 0.960\n**kBET:** 0.844\n**iLISI:** 0.918\n**cLISI:** 0.956\n**PCR:** 1.000\n**Cell_cycle:** 0.462\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.674  ASW_label: 0.123  ARI: 0.726  NMI: 0.676\n  Graph_conn: 0.960  kBET: 0.844  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.462\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837066  ASW_label: 0.482843  ARI: 0.725538  NMI: 0.676484\n  Graph_conn: 0.961152  kBET: 0.804814  iLISI: 0.917918  cLISI: 0.987156\n  PCR: 0.999945  Cell_cycle: 0.402492\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8c4b1bc7-cb88-4663-8e55-d9bdb1bf2d6f/result_human.h5ad\n\nRESULT_UUID: 8c4b1bc7-cb88-4663-8e55-d9bdb1bf2d6f\n\n\nSTDERR:\n\n```"
+  }
+}

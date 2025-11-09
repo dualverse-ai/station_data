@@ -1,0 +1,46 @@
+{
+  "id": "604",
+  "author": "Socrates I",
+  "research_task_id": "1",
+  "title": "Unit Test: A Single Iteration of the MM-LP Update Step",
+  "tags": [
+    "unit test",
+    "tdd",
+    "mm-lp",
+    "bug diagnosis",
+    "debugging"
+  ],
+  "abstract": "My full MM-LP replications are failing to optimize. This submission is a targeted diagnostic test to isolate the failure. I hypothesize that my core `solve_center_update_lp` function is fundamentally flawed. To test this, I will load my best-known center configuration and run exactly ONE iteration of the MM-LP update loop (one center update step followed by one radius evaluation). If the resulting score does not improve upon the initial state's potential, it will provide definitive proof that the center-update logic is broken. This is not a performance run; it is a critical diagnostic.",
+  "submitted_tick": 362,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport os\n\nR_MIN = 1e-8\n\ndef solve_exact_radii_lp(centers):\n    n = 32; c = -np.ones(n); A_ub, b_ub = [], []\n    for i in range(n):\n        x_i, y_i = centers[i]\n        r1=np.zeros(n); r1[i]=1; A_ub.append(r1); b_ub.append(x_i)\n        r2=np.zeros(n); r2[i]=1; A_ub.append(r2); b_ub.append(1-x_i)\n        r3=np.zeros(n); r3[i]=1; A_ub.append(r3); b_ub.append(y_i)\n        r4=np.zeros(n); r4[i]=1; A_ub.append(r4); b_ub.append(1-y_i)\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.linalg.norm(centers[i] - centers[j])\n            row = np.zeros(n); row[i]=1; row[j]=1; A_ub.append(row); b_ub.append(dist)\n    bounds = [(R_MIN, 0.5)] * n\n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method='highs')\n    return res.x, -res.fun if res.success else (np.full(n, R_MIN), n*R_MIN)\n\ndef solve_center_update_lp(centers_0, delta):\n    n = 32; c = np.concatenate([np.zeros(2*n), -np.ones(n)]); A_ub, b_ub = [], []\n    for i in range(n):\n        row=np.zeros(3*n); row[i]=-1; row[2*n+i]=1; A_ub.append(row); b_ub.append(0)\n        row=np.zeros(3*n); row[i]=1; row[2*n+i]=1; A_ub.append(row); b_ub.append(1)\n        row=np.zeros(3*n); row[n+i]=-1; row[2*n+i]=1; A_ub.append(row); b_ub.append(0)\n        row=np.zeros(3*n); row[n+i]=1; row[2*n+i]=1; A_ub.append(row); b_ub.append(1)\n    for i in range(n):\n        for j in range(i+1, n):\n            c_i, c_j = centers_0[i], centers_0[j]\n            d_ij = np.linalg.norm(c_i - c_j)\n            if d_ij < 1e-9: continue\n            u_ij = (c_i - c_j) / d_ij\n            row = np.zeros(3*n)\n            row[i]=-u_ij[0]; row[j]=u_ij[0]; row[n+i]=-u_ij[1]; row[n+j]=u_ij[1]\n            row[2*n+i]=1; row[2*n+j]=1; A_ub.append(row); b_ub.append(0)\n    bounds = []\n    for i in range(n): bounds.append((centers_0[i,0]-delta, centers_0[i,0]+delta))\n    for i in range(n): bounds.append((centers_0[i,1]-delta, centers_0[i,1]+delta))\n    bounds.extend([(R_MIN, 0.5)]*n)\n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method='highs')\n    return res.x if res.success else None\n\ndef iterative_finalize(centers, radii):\n    n = 32; final_radii = np.copy(radii); epsilon = 1e-9\n    for _ in range(10):\n        violations = 0\n        for i in range(n):\n            x_i, y_i = centers[i]; new_r = min(final_radii[i], x_i, 1-x_i, y_i, 1-y_i)\n            if new_r < final_radii[i]: final_radii[i] = new_r; violations += 1\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = final_radii[i] + final_radii[j]\n                if rad_sum >= dist - epsilon:\n                    overlap = rad_sum - (dist-epsilon); reduction=overlap/2.0\n                    r_i_new = max(R_MIN, final_radii[i]-reduction); r_j_new = max(R_MIN, final_radii[j]-reduction)\n                    if r_i_new < final_radii[i] or r_j_new < final_radii[j]:\n                        final_radii[i]=r_i_new; final_radii[j]=r_j_new; violations += 1\n        if violations == 0: break\n    return final_radii\n\ndef construct_packing() -> tuple:\n    n = 32\n    # --- LOAD A KNOWN GOOD STARTING POINT ---\n    try:\n        centers = np.load('storage/socrates/slsqp_lp_centers_final.npy')\n    except FileNotFoundError:\n        # Fallback if artifact is missing\n        centers = np.random.rand(n, 2)\n    \n    # --- RUN EXACTLY ONE ITERATION OF THE UPDATE LOOP ---\n    x_new = solve_center_update_lp(centers, delta=0.02)\n    \n    if x_new is None:\n        # If the update fails, return the original state to see its score\n        final_centers = centers\n    else:\n        final_centers = x_new[:64].reshape((32, 2))\n\n    # --- EVALUATE THE RESULT ---\n    lp_radii, _ = solve_exact_radii_lp(final_centers)\n    final_radii = iterative_finalize(final_centers, lp_radii)\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760897134.993428,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.8688735161963437,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.868874",
+      "evaluation_timestamp": 1760897137.4787867,
+      "evaluation_datetime": "2025-10-20T02:05:37.478790"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.8688735161963437,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760897137.498987,
+    "version_notified": "original",
+    "message": "Your research submission 'Unit Test: A Single Iteration of the MM-LP Update Step' (ID: 604) has been evaluated.\n\n**Score:** 0.8688735161963437\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.868874\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

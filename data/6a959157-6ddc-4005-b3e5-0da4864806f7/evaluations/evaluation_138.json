@@ -1,0 +1,117 @@
+{
+  "id": "138",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "BRBG-Dual: ComBat PCA(64) Embedding + Residualized-PC BalancedGraph (k=42)",
+  "tags": [
+    "dual-output",
+    "combat",
+    "residualization",
+    "balanced-knn",
+    "cosine"
+  ],
+  "abstract": "Dual-source approach: X_emb from ComBat-corrected PCA (64 PCs) for strong label structure; Graph from residualized PCs (\u03b3=0.75, l2=1e-3) with batch-balanced cosine kNN (k=42, binary) for strong mixing/connectivity. Goal: combine ARI gains of ComBat embedding with iLISI/Graph_conn of BRBG.",
+  "submitted_tick": 70,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Utilities (as in praxis/brbg_dual_comb_resid_graph.py)\nfrom storage.praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _ridge_batch_fit_predict,\n    _build_balanced_knn,\n)\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_graph = 50\n    n_pcs_emb = 64\n    gamma = 0.75\n    l2 = 1e-3\n    k_total = 42\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Residualized-PC path for Graph\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B, Z, l2=l2)\n    Z_corr = Z - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr, batches, k_total=k_total, metric=metric)\n\n    # ComBat embedding path\n    _ensure_dense_X(adata)\n    sc.pp.combat(adata, key='batch')\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n\n    # Initialize neighbor keys then override graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C\n        adata.obsp['distances'] = D\n    return adata\n",
+    "submitted_timestamp": 1761415605.718218,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\nTraceback (most recent call last):\n  File \"/tmp/tmpo0lxosnb/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpo0lxosnb/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpo0lxosnb/submission.py\", line 50, in eliminate_batch_effect_fn\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_pca/__init__.py\", line 227, in pca\n    mask_var_param, mask_var = _handle_mask_var(\n                               ^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_pca/__init__.py\", line 461, in _handle_mask_var\n    return mask_var, _check_mask(adata, mask_var, \"var\")\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/get/get.py\", line 518, in _check_mask\n    raise ValueError(msg)\nValueError: Did not find `adata.var['highly_variable']`. Either add the mask first to `adata.var`or consider using the mask argument with an array.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761415623.1217353,
+      "evaluation_datetime": "2025-10-26T02:07:03.121739"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_138_1761415623",
+      "started_timestamp": 1761415623.1211488,
+      "completed_timestamp": 1761416067.7734063,
+      "final_report": "# Debug Report for Evaluation 138\n\n## Summary\n**SUCCESS** - Fixed the code crash caused by missing `highly_variable` annotation in `adata.var` after ComBat preprocessing. The submission now runs without errors.\n\n## Root Cause\nThe original code had a critical sequencing issue:\n\n1. Early in the pipeline, the code computed a highly variable genes (HVG) mask: `hvg_mask = _get_hvg_mask(adata)`\n2. Later, it called `sc.pp.combat(adata, key='batch')` which transforms the data\n3. Then it attempted to run `sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')`\n\nThe problem: `sc.pp.combat()` modifies the AnnData object and doesn't preserve the `highly_variable` flag in `adata.var`. When `sc.pp.pca()` was called with `use_highly_variable=True`, it expected to find `adata.var['highly_variable']` but it wasn't there, causing this error:\n\n```\nValueError: Did not find `adata.var['highly_variable']`. Either add the mask first to `adata.var` or consider using the mask argument with an array.\n```\n\n## Fix Applied\nAdded a single line after ComBat and before PCA to restore the highly variable genes annotation:\n\n```python\n# ComBat embedding path\n_ensure_dense_X(adata)\nsc.pp.combat(adata, key='batch')\n\n# FIX: Set the highly_variable flag after ComBat transforms the data\nadata.var['highly_variable'] = hvg_mask\n\nsc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n```\n\nThis simple fix ensures that:\n- The HVG mask computed earlier in the pipeline is preserved\n- The PCA step can correctly identify which genes to use for dimensionality reduction\n- The dual-output architecture (ComBat embedding + residualized-PC balanced graph) can proceed as designed\n\n## Verification\nThe monitor script confirmed success:\n- Version 2 ran for over 300 seconds without crashing (timeout exceeded)\n- Exit code: 0 (success)\n- No errors in execution\n\nThe submission is now executing successfully and will complete its evaluation when the algorithm finishes processing the batch integration task.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Utilities (as in praxis/brbg_dual_comb_resid_graph.py)\nfrom storage.praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _ridge_batch_fit_predict,\n    _build_balanced_knn,\n)\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_graph = 50\n    n_pcs_emb = 64\n    gamma = 0.75\n    l2 = 1e-3\n    k_total = 42\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Residualized-PC path for Graph\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B, Z, l2=l2)\n    Z_corr = Z - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr, batches, k_total=k_total, metric=metric)\n\n    # ComBat embedding path\n    _ensure_dense_X(adata)\n    sc.pp.combat(adata, key='batch')\n\n    # FIX: Set the highly_variable flag after ComBat transforms the data\n    adata.var['highly_variable'] = hvg_mask\n\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n\n    # Initialize neighbor keys then override graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C\n        adata.obsp['distances'] = D\n    return adata\n",
+      "created_timestamp": 1761415660.770559,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.7112678021679806,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/85326806-a644-44c1-96e9-d9bf21445a45/result_human.h5ad\n\nRESULT_UUID: 85326806-a644-44c1-96e9-d9bf21445a45\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.703  ASW_label: 0.217  ARI: 0.721  NMI: 0.685\n  Graph_conn: 0.965  kBET: 0.679  iLISI: 0.929  cLISI: 0.967\n  PCR: 1.000  Cell_cycle: 0.248\n\nRaw Scores (before normalization):\n  ASW_batch: 0.850049  ASW_label: 0.536976  ARI: 0.721294  NMI: 0.685163\n  Graph_conn: 0.965532  kBET: 0.649036  iLISI: 0.928675  cLISI: 0.990270\n  PCR: 0.999957  Cell_cycle: 0.220300",
+          "ASW_batch": [
+            "0.703",
+            0.7026405642146255
+          ],
+          "ASW_label": [
+            "0.217",
+            0.2170919472313386
+          ],
+          "ARI": [
+            "0.721",
+            0.721331631096383
+          ],
+          "NMI": [
+            "0.685",
+            0.6850743756421619
+          ],
+          "Graph_conn": [
+            "0.965",
+            0.9649373682412781
+          ],
+          "kBET": [
+            "0.679",
+            0.678545722689291
+          ],
+          "iLISI": [
+            "0.929",
+            0.9286754002911212
+          ],
+          "cLISI": [
+            "0.967",
+            0.9665979028740407
+          ],
+          "PCR": [
+            "1.000",
+            0.9999567839781158
+          ],
+          "Cell_cycle": [
+            "0.248",
+            0.24782632542144983
+          ]
+        },
+        "evaluation_timestamp": 1761416056.2241259,
+        "evaluation_datetime": "2025-10-26T02:14:16.224131",
+        "sort_key": [
+          0.7112678021679806
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.7112678021679806,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761416067.8153913,
+    "version_notified": "v2",
+    "message": "Your research submission 'BRBG-Dual: ComBat PCA(64) Embedding + Residualized-PC BalancedGraph (k=42)' (ID: 138) succeeded after automatic debugging.\n\n**Score:** 0.7112678021679806\n**ASW_batch:** 0.703\n**ASW_label:** 0.217\n**ARI:** 0.721\n**NMI:** 0.685\n**Graph_conn:** 0.965\n**kBET:** 0.679\n**iLISI:** 0.929\n**cLISI:** 0.967\n**PCR:** 1.000\n**Cell_cycle:** 0.248\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.703  ASW_label: 0.217  ARI: 0.721  NMI: 0.685\n  Graph_conn: 0.965  kBET: 0.679  iLISI: 0.929  cLISI: 0.967\n  PCR: 1.000  Cell_cycle: 0.248\n\nRaw Scores (before normalization):\n  ASW_batch: 0.850049  ASW_label: 0.536976  ARI: 0.721294  NMI: 0.685163\n  Graph_conn: 0.965532  kBET: 0.649036  iLISI: 0.928675  cLISI: 0.990270\n  PCR: 0.999957  Cell_cycle: 0.220300\n\n**Debugger Report:** # Debug Report for Evaluation 138\n\n## Summary\n**SUCCESS** - Fixed the code crash caused by missing `highly_variable` annotation in `adata.var` after ComBat preprocessing. The submission now runs without errors.\n\n## Root Cause\nThe original code had a critical sequencing issue:\n\n1. Early in the pipeline, the code computed a highly variable genes (HVG) mask: `hvg_mask = _get_hvg_mask(adata)`\n2. Later, it called `sc.pp.combat(adata, key='batch')` which transforms the data\n3. Then it attempted to run `sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')`\n\nThe problem: `sc.pp.combat()` modifies the AnnData object and doesn't preserve the `highly_variable` flag in `adata.var`. When `sc.pp.pca()` was called with `use_highly_variable=True`, it expected to find `adata.var['highly_variable']` but it wasn't there, causing this error:\n\n```\nValueError: Did not find `adata.var['highly_variable']`. Either add the mask first to `adata.var` or consider using the mask argument with an array.\n```\n\n## Fix Applied\nAdded a single line after ComBat and before PCA to restore the highly variable genes annotation:\n\n```python\n# ComBat embedding path\n_ensure_dense_X(adata)\nsc.pp.combat(adata, key='batch')\n\n# FIX: Set the highly_variable flag after ComBat transforms the data\nadata.var['highly_variable'] = hvg_mask\n\nsc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n```\n\nThis simple fix ensures that:\n- The HVG mask computed earlier in the pipeline is preserved\n- The PCA step can correctly identify which genes to use for dimensionality reduction\n- The dual-output architecture (ComBat embedding + residualized-PC balanced graph) can proceed as designed\n\n## Verification\nThe monitor script confirmed success:\n- Version 2 ran for over 300 seconds without crashing (timeout exceeded)\n- Exit code: 0 (success)\n- No errors in execution\n\nThe submission is now executing successfully and will complete its evaluation when the algorithm finishes processing the batch integration task.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Utilities (as in praxis/brbg_dual_comb_resid_graph.py)\nfrom storage.praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _ridge_batch_fit_predict,\n    _build_balanced_knn,\n)\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_graph = 50\n    n_pcs_emb = 64\n    gamma = 0.75\n    l2 = 1e-3\n    k_total = 42\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Residualized-PC path for Graph\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B, Z, l2=l2)\n    Z_corr = Z - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr, batches, k_total=k_total, metric=metric)\n\n    # ComBat embedding path\n    _ensure_dense_X(adata)\n    sc.pp.combat(adata, key='batch')\n\n    # FIX: Set the highly_variable flag after ComBat transforms the data\n    adata.var['highly_variable'] = hvg_mask\n\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n\n    # Initialize neighbor keys then override graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C\n        adata.obsp['distances'] = D\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/85326806-a644-44c1-96e9-d9bf21445a45/result_human.h5ad\n\nRESULT_UUID: 85326806-a644-44c1-96e9-d9bf21445a45\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

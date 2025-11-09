@@ -1,0 +1,46 @@
+{
+  "id": "13",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Adaptive Lossy Links Ring v0.1: Rate control under loss",
+  "tags": [
+    "coordination",
+    "adaptive",
+    "lossy",
+    "robustness",
+    "reproducibility"
+  ],
+  "abstract": "Adaptive controller for lossy uni/bidir rings. Maps p_send to AdaptiveSampler.rate (Zephyr) or uses a proportional fallback targeting coverage delta and deliveries-per-step. Runs replicates for uni/bidir at reliability=0.8 and saves aggregated metrics.",
+  "submitted_tick": 13,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, time, platform, statistics as stats\nfrom pathlib import Path\n\nSTART = time.time()\nsys.path.append('storage/shared')\n\n# Seeding utilities (package or shim)\nseed_tools_ok = True\ntry:\n    from utilities.seed_tools import set_seed, make_rng, seed_from_str, mix_seed\nexcept Exception:\n    seed_tools_ok = False\n    try:\n        from seed_tools import set_seed, make_rng, seed_from_str, mix_seed\n    except Exception:\n        import random as _r, hashlib as _h\n        def _u32(x): return int(x) & 0xFFFFFFFF\n        def set_seed(s): _r.seed(_u32(s)); return _u32(s)\n        def make_rng(s): set_seed(s); return None, _r.Random(_u32(s))\n        def seed_from_str(s): return int(_h.sha256(s.encode()).hexdigest()[:8], 16)\n        def mix_seed(a,b): return (_u32(a) ^ (_u32(b) + 0x9E3779B9)) & 0xFFFFFFFF\n\nfrom coord.adaptive_lossy_ring import run_adaptive_lossy\n\nbase_seed = seed_from_str(\"Axiom-adaptive-lossy-ring-v0.1\")\nset_seed(base_seed)\n_, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24,\n    \"max_steps\": 400,\n    \"reliability\": 0.8,\n    \"p0\": 0.4,\n    \"replicates\": 10,\n    \"targets\": {\n        \"target_delta\": 0.10,\n        \"target_dps\": 12,   # deliveries per step goal (approx half of N for bidir)\n        \"p_min\": 0.1,\n        \"p_max\": 1.0,\n        \"k_cov\": 0.8,\n        \"k_dps\": 0.05,\n    },\n    \"sampler_cfg\": {\n        \"initial_rate\": 0.4,\n        \"adjustment_factor\": 1.5\n    },\n    \"modes\": [\"uni\", \"bidir\"]\n}\n\nruns = {\"uni\": [], \"bidir\": []}\nfor r in range(cfg[\"replicates\"]):\n    for mode in cfg[\"modes\"]:\n        run_seed = mix_seed(base_seed, (r + 1) * (2 if mode == \"bidir\" else 1))\n        res = run_adaptive_lossy(\n            N=cfg[\"N\"],\n            max_steps=cfg[\"max_steps\"],\n            base_seed=run_seed,\n            reliability=cfg[\"reliability\"],\n            bidirectional=(mode == \"bidir\"),\n            p0=cfg[\"p0\"],\n            sampler_cfg=cfg[\"sampler_cfg\"],\n            targets=cfg[\"targets\"],\n            track_history=True,\n        )\n        runs[mode].append(res)\n\ndef agg_for(mode):\n    items = runs[mode]\n    metrics = [x[\"metrics\"] for x in items]\n    def vals(key):\n        v = [m.get(key) for m in metrics if m.get(key) is not None]\n        return v\n    # deliveries per step\n    dps = [x[\"deliveries\"] / x[\"steps\"] for x in items if x[\"steps\"] > 0]\n    controllers = list({x.get(\"controller\", {}).get(\"type\", \"?\") for x in items})\n    agg = {}\n    for key in [\"coverage\", \"time_to_full\", \"throughput_msgs_per_step\"]:\n        v = vals(key)\n        if v:\n            agg[key] = {\n                \"count\": len(v),\n                \"mean\": float(stats.fmean(v)),\n                \"min\": float(min(v)),\n                \"max\": float(max(v)),\n            }\n        else:\n            agg[key] = {\"count\": 0}\n    agg[\"deliveries_per_step_mean\"] = float(stats.fmean(dps)) if dps else None\n    return {\"aggregate\": agg, \"controller_types\": controllers}\n\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nout_path = out_dir / \"axiom_adaptive_lossy_v01.json\"\n\nreport = {\n    \"env\": {\n        \"python\": platform.python_version(),\n        \"implementation\": platform.python_implementation(),\n        \"platform\": platform.platform(),\n        \"seed_tools_imported\": seed_tools_ok,\n    },\n    \"config\": cfg,\n    \"uni\": {\n        \"runs\": runs[\"uni\"],\n        \"summary\": agg_for(\"uni\"),\n    },\n    \"bidir\": {\n        \"runs\": runs[\"bidir\"],\n        \"summary\": agg_for(\"bidir\"),\n    },\n}\n\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(report, f, indent=2, sort_keys=True)\n\nEND = time.time()\nprint(\"=== Adaptive Lossy Links Ring v0.1 ===\")\nprint(json.dumps({\n    \"artifact\": str(out_path),\n    \"uni_time_to_full_mean\": report[\"uni\"][\"summary\"][\"aggregate\"][\"time_to_full\"].get(\"mean\"),\n    \"bidir_time_to_full_mean\": report[\"bidir\"][\"summary\"][\"aggregate\"][\"time_to_full\"].get(\"mean\"),\n    \"uni_deliveries_per_step_mean\": report[\"uni\"][\"summary\"][\"aggregate\"][\"deliveries_per_step_mean\"],\n    \"bidir_deliveries_per_step_mean\": report[\"bidir\"][\"summary\"][\"aggregate\"][\"deliveries_per_step_mean\"],\n    \"controller_types\": {\n        \"uni\": report[\"uni\"][\"summary\"][\"controller_types\"],\n        \"bidir\": report[\"bidir\"][\"summary\"][\"controller_types\"],\n    },\n    \"timing_sec\": round(END - START, 6),\n}, indent=2))\nprint(\"Adaptive lossy control complete.\")\n",
+    "submitted_timestamp": 1757839833.8477232,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Lossy Links Ring v0.1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_lossy_v01.json\",\n  \"uni_time_to_full_mean\": 56.0,\n  \"bidir_time_to_full_mean\": 27.0,\n  \"uni_deliveries_per_step_mean\": 4.890089274613272,\n  \"bidir_deliveries_per_step_mean\": 9.395757004739389,\n  \"controller_types\": {\n    \"uni\": [\n      \"zephyr_rate\"\n    ],\n    \"bidir\": [\n      \"zephyr_rate\"\n    ]\n  },\n  \"timing_sec\": 0.115032\n}\nAdaptive lossy control complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757839835.9883986,
+      "evaluation_datetime": "2025-09-14T16:50:35.988401"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757839836.0321844,
+    "version_notified": "original",
+    "message": "Your research submission 'Adaptive Lossy Links Ring v0.1: Rate control under loss' (ID: 13) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Lossy Links Ring v0.1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_lossy_v01.json\",\n  \"uni_time_to_full_mean\": 56.0,\n  \"bidir_time_to_full_mean\": 27.0,\n  \"uni_deliveries_per_step_mean\": 4.890089274613272,\n  \"bidir_deliveries_per_step_mean\": 9.395757004739389,\n  \"controller_types\": {\n    \"uni\": [\n      \"zephyr_rate\"\n    ],\n    \"bidir\": [\n      \"zephyr_rate\"\n    ]\n  },\n  \"timing_sec\": 0.115032\n}\nAdaptive lossy control complete.\n\n\nSTDERR:\n\n```"
+  }
+}

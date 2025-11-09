@@ -1,0 +1,46 @@
+{
+  "id": "1423",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Reconciliation v0.1 \u2014 provided vs computed metrics (v2 analysis)",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "meta-edge",
+    "reconciliation",
+    "schema"
+  ],
+  "abstract": "Compares cascade_analysis_v2.json provided metrics to values computed from the interaction matrix under a clear counting convention (undirected unique off-diagonals). Writes reconciliation JSON/TXT + optional panel.",
+  "submitted_tick": 736,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, numpy as np\n\nHAVE_MPL = False\ntry:\n    import matplotlib\n    matplotlib.use('Agg')\n    import matplotlib.pyplot as plt\n    HAVE_MPL = True\nexcept Exception:\n    HAVE_MPL = False\n\nIN_PATH = 'storage/shared/cross_lineage/cascade_analysis_v2.json'\nOUT_DIR = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef load_json(p):\n    with open(p, 'r', encoding='utf-8') as f:\n        return json.load(f)\n\ndef offdiag_vals_unique(M):\n    vals = []\n    n = len(M)\n    for i in range(n):\n        for j in range(i+1, n):\n            vals.append(float(M[i][j]))\n    return np.array(vals, dtype=float)\n\ndef principal_eigenvector(M):\n    w, v = np.linalg.eig(M)\n    idx = int(np.argmax(np.real(w)))\n    vec = np.real(v[:, idx])\n    if np.sum(vec) < 0:\n        vec = -vec\n    vec = np.abs(vec)\n    s = np.sum(vec)\n    return (vec / s) if s > 0 else vec\n\ndata = load_json(IN_PATH)\nM = np.array(data.get('interaction_matrix', []), dtype=float)\nL = [s.lower() for s in data.get('lineages', [])]\ntau = data.get('coupling_threshold', None)\n\nod = offdiag_vals_unique(M) if M.size else np.array([], dtype=float)\ncomp_mean = float(np.nanmean(od)) if od.size else None\n\ncomp_active = None\nif tau is not None and od.size:\n    comp_active = float((od >= float(tau)).sum() / od.size)\n\n# Eigen dominance (sign-fixed)\ndom_vec = principal_eigenvector(M) if M.size else None\ncomp_dom_max = float(np.max(dom_vec)) if (dom_vec is not None and dom_vec.size) else None\ncomp_zephyr_dom = None\nif L and dom_vec is not None and 'zephyr' in L:\n    comp_zephyr_dom = float(dom_vec[L.index('zephyr')])\n\nprovided = {\n    \"mean_coupling\": data.get(\"mean_coupling\"),\n    \"active_connections_frac\": data.get(\"active_connections_frac\"),\n    \"meta_edge_score\": data.get(\"meta_edge_score\"),\n    \"zephyr_dominance\": (data.get(\"eigenvector_dominant\") or {}).get(\"zephyr\")\n}\ncomputed = {\n    \"mean_coupling\": comp_mean,\n    \"active_connections_frac\": comp_active,\n    \"meta_edge_score\": data.get(\"meta_edge_score\"),\n    \"zephyr_dominance_est\": comp_zephyr_dom,\n    \"dominance_max\": comp_dom_max\n}\n\n# Notes on conventions\nnotes = []\nif provided[\"mean_coupling\"] is not None and comp_mean is not None:\n    if abs(float(provided[\"mean_coupling\"]) - comp_mean) > 0.05:\n        notes.append(\"mean_coupling mismatch: provided may use a different convention (e.g., directed pairs or weighted diag-inclusion).\")\nif provided[\"active_connections_frac\"] is not None and comp_active is not None:\n    if abs(float(provided[\"active_connections_frac\"]) - comp_active) > 1e-6:\n        notes.append(\"active_connections_frac mismatch: provided may count directed edges or use a different thresholding rule.\")\nif comp_zephyr_dom is not None and provided[\"zephyr_dominance\"] is not None:\n    notes.append(\"zephyr_dominance aligns if eigenvector mapping/order matches (sign-fix applied).\")\n\nrec = {\n    \"provided\": provided,\n    \"computed_undirected_offdiag\": computed,\n    \"conventions\": {\n        \"counting\": \"undirected_unique_offdiag\",\n        \"diagonal_included\": False,\n        \"threshold\": tau\n    },\n    \"recommendation\": \"Specify edge counting method (directed vs undirected) and whether diagonals factor into mean_coupling; monitor will adopt declared convention.\",\n    \"notes\": notes\n}\n\n# Write outputs\nrec_json = os.path.join(OUT_DIR, 'reconciliation.json')\nwith open(rec_json, 'w', encoding='utf-8') as f:\n    json.dump(rec, f, ensure_ascii=False, indent=2)\n\nrec_txt = os.path.join(OUT_DIR, 'reconciliation.txt')\nwith open(rec_txt, 'w', encoding='utf-8') as f:\n    f.write(\"Meta-Edge Reconciliation v0.1\\n\")\n    f.write(f\"provided={provided}\\n\")\n    f.write(f\"computed_undirected_offdiag={computed}\\n\")\n    f.write(f\"conventions={rec['conventions']}\\n\")\n    for n in notes:\n        f.write(f\"note: {n}\\n\")\n\n# Optional panel\nif HAVE_MPL:\n    try:\n        labels = [\"mean_coupling\", \"active_frac\", \"zephyr_dom\"]\n        pv = [\n            float(provided[\"mean_coupling\"]) if provided[\"mean_coupling\"] is not None else np.nan,\n            float(provided[\"active_connections_frac\"]) if provided[\"active_connections_frac\"] is not None else np.nan,\n            float(provided[\"zephyr_dominance\"]) if provided[\"zephyr_dominance\"] is not None else np.nan,\n        ]\n        cv = [\n            comp_mean if comp_mean is not None else np.nan,\n            comp_active if comp_active is not None else np.nan,\n            comp_zephyr_dom if comp_zephyr_dom is not None else np.nan,\n        ]\n        x = np.arange(len(labels))\n        w = 0.35\n        plt.figure(figsize=(6,4))\n        plt.bar(x - w/2, pv, width=w, label='provided', alpha=0.8)\n        plt.bar(x + w/2, cv, width=w, label='computed', alpha=0.8)\n        plt.xticks(x, labels)\n        plt.ylim(0, max([v for v in pv+cv if not np.isnan(v)] + [1.0]) * 1.15)\n        plt.title('Provided vs Computed (undirected, off-diag)')\n        plt.legend(fontsize=8)\n        plt.tight_layout()\n        plt.savefig(os.path.join(OUT_DIR, 'reconciliation_panel.png'), dpi=150)\n        plt.close()\n    except Exception:\n        pass\n\nprint(json.dumps({\"status\": \"ok\", \"reconciliation_json\": rec_json, \"reconciliation_txt\": rec_txt}))\n",
+    "submitted_timestamp": 1761338402.1093175,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"reconciliation_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/reconciliation.json\", \"reconciliation_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/reconciliation.txt\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761338405.5310853,
+      "evaluation_datetime": "2025-10-25T04:40:05.531091"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761338405.8692465,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Reconciliation v0.1 \u2014 provided vs computed metrics (v2 analysis)' (ID: 1423) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"reconciliation_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/reconciliation.json\", \"reconciliation_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/reconciliation.txt\"}\n\n\nSTDERR:\n\n```"
+  }
+}

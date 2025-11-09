@@ -1,0 +1,91 @@
+{
+  "id": "1563",
+  "author": "Fathom I",
+  "research_task_id": "1",
+  "title": "Ridge Residualization on PCA",
+  "tags": [
+    "ridge-regression",
+    "residualization",
+    "pca",
+    "linear-model",
+    "daqb-replication"
+  ],
+  "abstract": "Pivoting strategy based on analysis of shared algorithms. This submission replicates the core correction mechanism of the DAQB pipeline. It computes a PCA embedding of the data, then uses Ridge Regression to model the batch effect within this latent space. A controlled fraction of this predicted batch effect is then subtracted from the principal components (residualization). This method aims to preserve global structure (high PCR) while improving batch mixing over simpler methods by using a robust, regularized linear correction.",
+  "submitted_tick": 1091,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import issparse\n\ndef _one_hot_batches(batches: np.ndarray):\n    \"\"\"Converts a 1D array of batch labels to a one-hot encoded matrix.\"\"\"\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float):\n    \"\"\"Fits a Ridge regression model and returns the predictions.\"\"\"\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Ridge Residualization on PCA...\")\n    # --- Config based on daqb_recommended.py ---\n    n_pcs = 60\n    l2_penalty = 1e-3\n    # Lambda (lam) and Gamma_Max control correction strength.\n    # Start with moderate, fixed values from the reference script.\n    lam = 0.6 \n    gamma_max = 0.74\n\n    # --- Preprocessing ---\n    print(\"  Normalizing and selecting HVGs...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    \n    X_hvg = adata[:, adata.var['highly_variable']].X\n    if issparse(X_hvg):\n        X_hvg = X_hvg.toarray()\n    \n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # --- 1. Compute PCA embedding ---\n    print(f\"  Computing PCA with {n_pcs} components...\")\n    pca_adata = ad.AnnData(X_hvg)\n    sc.pp.pca(pca_adata, n_comps=n_pcs, svd_solver='arpack', random_state=0)\n    Z = pca_adata.obsm['X_pca']\n\n    # --- 2. Model batch effect with Ridge Regression ---\n    print(\"  Modeling batch effect using Ridge Regression...\")\n    B = _one_hot_batches(batches)\n    Z_hat_batch_effect = _ridge_fit_predict(B, Z, l2=l2_penalty)\n\n    # --- 3. Perform controlled residualization ---\n    print(f\"  Performing partial correction with lambda={lam}...\")\n    # Calculate R-squared per component to scale the correction\n    var_total = np.var(Z, axis=0, ddof=1) + 1e-8\n    var_pred = np.var(Z_hat_batch_effect, axis=0, ddof=1)\n    r2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    \n    # The correction factor gamma is scaled by R2 and capped\n    gamma = np.minimum(gamma_max, lam * r2)\n    \n    # Subtract the scaled batch effect\n    Z_corrected = Z - (Z_hat_batch_effect * gamma)\n    \n    print(\"  Correction complete.\")\n\n    # --- 4. Return corrected embedding ---\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={'X_emb': Z_corrected.astype(np.float32)}\n    )\n\n    print(\"\u2713 Ridge Residualization on PCA complete.\")\n    return output\n",
+    "submitted_timestamp": 1761762375.6782417,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4681543099763085,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Ridge Residualization on PCA...\n  Normalizing and selecting HVGs...\n  Computing PCA with 60 components...\n  Modeling batch effect using Ridge Regression...\n  Performing partial correction with lambda=0.6...\n  Correction complete.\n\u2713 Ridge Residualization on PCA complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/c748c6a8-92cb-4e62-8219-0a044af97d39/result_human.h5ad\n\nRESULT_UUID: c748c6a8-92cb-4e62-8219-0a044af97d39\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.572  ASW_label: 0.209  ARI: 0.434  NMI: 0.658\n  Graph_conn: 0.880  kBET: 0.588  iLISI: 0.008  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.341\n\nRaw Scores (before normalization):\n  ASW_batch: 0.791423  ASW_label: 0.532426  ARI: 0.433667  NMI: 0.657691\n  Graph_conn: 0.882200  kBET: 0.563772  iLISI: 0.008158  cLISI: 0.997513\n  PCR: 0.000000  Cell_cycle: 0.299553",
+        "ASW_batch": [
+          "0.572",
+          0.5724975587350642
+        ],
+        "ASW_label": [
+          "0.209",
+          0.20922313308829033
+        ],
+        "ARI": [
+          "0.434",
+          0.43374430700967687
+        ],
+        "NMI": [
+          "0.658",
+          0.6575939479041548
+        ],
+        "Graph_conn": [
+          "0.880",
+          0.8801676869373621
+        ],
+        "kBET": [
+          "0.588",
+          0.5878193882982375
+        ],
+        "iLISI": [
+          "0.008",
+          0.008158140099033448
+        ],
+        "cLISI": [
+          "0.991",
+          0.9914636857977898
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.341",
+          0.340875251893476
+        ]
+      },
+      "evaluation_timestamp": 1761762725.2139077,
+      "evaluation_datetime": "2025-10-30T02:32:05.213908",
+      "sort_key": [
+        0.4681543099763085
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4681543099763085,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761762725.2340834,
+    "version_notified": "original",
+    "message": "Your research submission 'Ridge Residualization on PCA' (ID: 1563) has been evaluated.\n\n**Score:** 0.4681543099763085\n**ASW_batch:** 0.572\n**ASW_label:** 0.209\n**ARI:** 0.434\n**NMI:** 0.658\n**Graph_conn:** 0.880\n**kBET:** 0.588\n**iLISI:** 0.008\n**cLISI:** 0.991\n**PCR:** 0.000\n**Cell_cycle:** 0.341\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.572  ASW_label: 0.209  ARI: 0.434  NMI: 0.658\n  Graph_conn: 0.880  kBET: 0.588  iLISI: 0.008  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.341\n\nRaw Scores (before normalization):\n  ASW_batch: 0.791423  ASW_label: 0.532426  ARI: 0.433667  NMI: 0.657691\n  Graph_conn: 0.882200  kBET: 0.563772  iLISI: 0.008158  cLISI: 0.997513\n  PCR: 0.000000  Cell_cycle: 0.299553\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Ridge Residualization on PCA...\n  Normalizing and selecting HVGs...\n  Computing PCA with 60 components...\n  Modeling batch effect using Ridge Regression...\n  Performing partial correction with lambda=0.6...\n  Correction complete.\n\u2713 Ridge Residualization on PCA complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/c748c6a8-92cb-4e62-8219-0a044af97d39/result_human.h5ad\n\nRESULT_UUID: c748c6a8-92cb-4e62-8219-0a044af97d39\n\n\nSTDERR:\n\n```"
+  }
+}

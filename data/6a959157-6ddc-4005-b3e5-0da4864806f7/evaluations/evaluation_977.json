@@ -1,0 +1,90 @@
+{
+  "id": "977",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: AQG Refinement - k_total=52",
+  "tags": [
+    "sota",
+    "refinement",
+    "aqg",
+    "k-sweep"
+  ],
+  "abstract": "Continuing the systematic sweep of k_total for the AQG SOTA architecture. This run tests k_total=52, building on the previous test of 50. This fine-grained sweep aims to precisely identify the optimal neighborhood size for the AQG.",
+  "submitted_tick": 623,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse, csr_matrix\n\n# My SOTA AQG implementation from Archive #29\ndef build_adaptive_quota_graph(Z, batches, k_total=48, metric='cosine', base_fraction=0.75, delta=0.05, k_density=20, rng_seed=0):\n    n = Z.shape[0]\n    cats = np.unique(batches)\n    from sklearn.neighbors import NearestNeighbors\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='auto', n_jobs=-1)\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    inv_dense = 1.0 - ((d_k - d_min) / (d_max - d_min + 1e-8))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_fraction + mix_delta, 0.0, 1.0)\n    \n    nn = NearestNeighbors(n_neighbors=k_total + 1, metric=metric, algorithm='auto', n_jobs=-1)\n    nn.fit(Z)\n    dists, indices = nn.kneighbors(Z, return_distance=True)\n    \n    rows, cols, dvals = [], [], []\n    for i in range(n):\n        q_cross = int(round(f_cross[i] * k_total))\n        q_within = k_total - q_cross\n        \n        neighbors_i = indices[i, 1:]\n        batches_i = batches[neighbors_i]\n        \n        within_mask = (batches_i == batches[i])\n        cross_mask = ~within_mask\n        \n        within_indices = neighbors_i[within_mask][:q_within]\n        cross_indices = neighbors_i[cross_mask][:q_cross]\n        \n        selected_indices = np.concatenate([within_indices, cross_indices])\n        \n        is_in_k_neighborhood = np.isin(indices[i, 1:], selected_indices)\n        selected_dists = dists[i, 1:][is_in_k_neighborhood]\n\n        rows.extend([i] * len(selected_indices))\n        cols.extend(selected_indices)\n        dvals.extend(selected_dists)\n\n    A = csr_matrix((np.ones_like(rows, dtype=np.float32), (rows, cols)), shape=(n, n))\n    D = csr_matrix((dvals, (rows, cols)), shape=(n, n))\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T).tocsr()\n    D_sym.eliminate_zeros()\n    return A_sym, D_sym\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs = 50\n    alpha_var = 0.5\n    k_total = 52 # <-- PARAMETER UNDER TEST\n    base_fraction = 0.80\n    delta = 0.05\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    X_hvg = adata.X[:, hv]\n\n    Z = _pca_array(X_hvg, n_comps=n_pcs, random_state=0, alpha_var=alpha_var)\n    C, D = build_adaptive_quota_graph(Z, batches, k_total=k_total, base_fraction=base_fraction, delta=delta, k_density=k_density)\n\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    adata.obsm['X_emb'] = Z\n\n    return adata\n",
+    "submitted_timestamp": 1761602942.6007655,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.45963987911608956,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7a60211c-1b25-4a76-9f92-9a7f8e37bb6a/result_human.h5ad\n\nRESULT_UUID: 7a60211c-1b25-4a76-9f92-9a7f8e37bb6a\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.218  ARI: 0.437  NMI: 0.662\n  Graph_conn: 0.904  kBET: 0.562  iLISI: 0.002  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753184  ASW_label: 0.537657  ARI: 0.436904  NMI: 0.661936\n  Graph_conn: 0.905242  kBET: 0.539942  iLISI: 0.001522  cLISI: 0.997908\n  PCR: 0.000000  Cell_cycle: 0.291389",
+        "ASW_batch": [
+          "0.488",
+          0.48761032158152734
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21826869324575215
+        ],
+        "ARI": [
+          "0.437",
+          0.43698039577763564
+        ],
+        "NMI": [
+          "0.662",
+          0.6618404883214846
+        ],
+        "Graph_conn": [
+          "0.904",
+          0.9036072357008239
+        ],
+        "kBET": [
+          "0.562",
+          0.5624622851098573
+        ],
+        "iLISI": [
+          "0.002",
+          0.0015217531104874116
+        ],
+        "cLISI": [
+          "0.993",
+          0.9928174347342544
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.331",
+          0.3312901835790725
+        ]
+      },
+      "evaluation_timestamp": 1761603515.120516,
+      "evaluation_datetime": "2025-10-28T06:18:35.120520",
+      "sort_key": [
+        0.45963987911608956
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.45963987911608956,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761603515.169712,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: AQG Refinement - k_total=52' (ID: 977) has been evaluated.\n\n**Score:** 0.45963987911608956\n**ASW_batch:** 0.488\n**ASW_label:** 0.218\n**ARI:** 0.437\n**NMI:** 0.662\n**Graph_conn:** 0.904\n**kBET:** 0.562\n**iLISI:** 0.002\n**cLISI:** 0.993\n**PCR:** 0.000\n**Cell_cycle:** 0.331\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.218  ARI: 0.437  NMI: 0.662\n  Graph_conn: 0.904  kBET: 0.562  iLISI: 0.002  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753184  ASW_label: 0.537657  ARI: 0.436904  NMI: 0.661936\n  Graph_conn: 0.905242  kBET: 0.539942  iLISI: 0.001522  cLISI: 0.997908\n  PCR: 0.000000  Cell_cycle: 0.291389\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7a60211c-1b25-4a76-9f92-9a7f8e37bb6a/result_human.h5ad\n\nRESULT_UUID: 7a60211c-1b25-4a76-9f92-9a7f8e37bb6a\n\n\nSTDERR:\n\n```"
+  }
+}

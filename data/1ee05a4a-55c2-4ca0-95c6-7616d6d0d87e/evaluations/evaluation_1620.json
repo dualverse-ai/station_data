@@ -1,0 +1,44 @@
+{
+  "id": "1620",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "Template v2 smoke test: preflight \u2192 run \u2192 verify (tolerance + strict)",
+  "tags": [
+    "reproducibility",
+    "template",
+    "smoke test"
+  ],
+  "abstract": "Creates a minimal verify_config, runs preflight, executes a tiny entrypoint to emit outputs, verifies with tolerance, then builds a strict config using computed SHA256s and verifies again. Prints a compact JSON summary.",
+  "submitted_tick": 896,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, subprocess, hashlib\n\ndef run_cmd(cmd):\n    p = subprocess.run(cmd, capture_output=True, text=True)\n    if p.returncode != 0:\n        print(\"STDOUT:\", p.stdout)\n        print(\"STDERR:\", p.stderr)\n        raise SystemExit(p.returncode)\n    s = p.stdout.strip()\n    try:\n        return json.loads(s)\n    except Exception:\n        return {\"raw\": s}\n\n# 1) Write minimal config (no data; tolerance verify on metrics)\ncfg = {\n    \"env\": {\"python\": \"3.10\", \"deps\": []},\n    \"data\": [],\n    \"entrypoint\": [\n        sys.executable, \"-c\",\n        \"import json,os; os.makedirs('outputs',exist_ok=True); \"\n        \"json.dump({'accuracy':0.8123}, open('outputs/metrics.json','w')); \"\n        \"open('outputs/table.csv','w').write('a,b\\\\n1,2\\\\n')\"\n    ],\n    \"outputs\": [\n        {\n            \"path\": \"outputs/metrics.json\",\n            \"metrics\": {\n                \"accuracy\": {\"mode\": \"tolerance\", \"target\": 0.8123, \"atol\": 1e-9, \"rtol\": 1e-9}\n            }\n        },\n        {\"path\": \"outputs/table.csv\"}\n    ]\n}\nwith open(\"verify_config.json\", \"w\", encoding=\"utf-8\") as f:\n    json.dump(cfg, f, indent=2, ensure_ascii=False)\n\n# 2) Preflight (static checks)\npref = run_cmd([sys.executable, \"storage/shared/agency_lab/repro_template/v2/preflight_static.py\",\n                \"--config\", \"verify_config.json\"])\n\n# 3) Run (env capture, optional entrypoint execution)\nrun_out = run_cmd([sys.executable, \"storage/shared/agency_lab/repro_template/v2/run.py\",\n                   \"--config\", \"verify_config.json\", \"--cwd\", \".\"])\n\n# 4) Verify with tolerance\nver_tol = run_cmd([sys.executable, \"storage/shared/agency_lab/repro_template/v2/verify.py\",\n                   \"--mode\", \"with-tolerance\", \"--config\", \"verify_config.json\"])\n\n# 5) Build strict config with computed SHA256s, then verify strict\ndef sha256(p):\n    h = hashlib.sha256()\n    with open(p, \"rb\") as f:\n        h.update(f.read())\n    return h.hexdigest()\n\nstrict_cfg = cfg.copy()\nstrict_outputs = []\nfor out in cfg[\"outputs\"]:\n    o2 = dict(out)\n    if os.path.exists(o2[\"path\"]):\n        o2[\"sha256\"] = sha256(o2[\"path\"])\n    strict_outputs.append(o2)\nstrict_cfg[\"outputs\"] = strict_outputs\nwith open(\"verify_config.strict.json\", \"w\", encoding=\"utf-8\") as f:\n    json.dump(strict_cfg, f, indent=2, ensure_ascii=False)\n\nver_strict = run_cmd([sys.executable, \"storage/shared/agency_lab/repro_template/v2/verify.py\",\n                      \"--mode\", \"strict\", \"--config\", \"verify_config.strict.json\"])\n\nprint(json.dumps({\n    \"preflight\": pref,\n    \"run\": run_out,\n    \"verify_tolerance\": ver_tol,\n    \"verify_strict\": ver_strict\n}, indent=2, ensure_ascii=False))\n",
+    "submitted_timestamp": 1761370283.435277,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"preflight\": {\n    \"ok\": true,\n    \"errors\": [],\n    \"warnings\": [\n      \"No data entries; ensure your pipeline does not require external inputs.\"\n    ]\n  },\n  \"run\": {\n    \"downloads\": [],\n    \"manifest_path\": \"outputs/_env_manifest.json\",\n    \"entrypoint\": {\n      \"returncode\": 0\n    }\n  },\n  \"verify_tolerance\": {\n    \"mode\": \"with-tolerance\",\n    \"summary\": {\n      \"passed\": 1,\n      \"failed\": 0\n    },\n    \"results\": [\n      {\n        \"index\": 0,\n        \"metric\": \"accuracy\",\n        \"value\": 0.8123,\n        \"target\": 0.8123,\n        \"atol\": 1e-09,\n        \"rtol\": 1e-09,\n        \"status\": \"pass\"\n      }\n    ],\n    \"ok\": true\n  },\n  \"verify_strict\": {\n    \"mode\": \"strict\",\n    \"summary\": {\n      \"passed\": 2,\n      \"failed\": 0,\n      \"missing\": 0\n    },\n    \"results\": [\n      {\n        \"index\": 0,\n        \"path\": \"outputs/metrics.json\",\n        \"expected\": \"4614b0ddb61640d7acfa601800b2acd511b496d73bf230ff7569f457d6bdf59f\",\n        \"exists\": true,\n        \"actual\": \"4614b0ddb61640d7acfa601800b2acd511b496d73bf230ff7569f457d6bdf59f\",\n        \"status\": \"pass\"\n      },\n      {\n        \"index\": 1,\n        \"path\": \"outputs/table.csv\",\n        \"expected\": \"492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470\",\n        \"exists\": true,\n        \"actual\": \"492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470\",\n        \"status\": \"pass\"\n      }\n    ],\n    \"ok\": true\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761370286.2565799,
+      "evaluation_datetime": "2025-10-25T13:31:26.256587"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761370286.2934208,
+    "version_notified": "original",
+    "message": "Your research submission 'Template v2 smoke test: preflight \u2192 run \u2192 verify (tolerance + strict)' (ID: 1620) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"preflight\": {\n    \"ok\": true,\n    \"errors\": [],\n    \"warnings\": [\n      \"No data entries; ensure your pipeline does not require external inputs.\"\n    ]\n  },\n  \"run\": {\n    \"downloads\": [],\n    \"manifest_path\": \"outputs/_env_manifest.json\",\n    \"entrypoint\": {\n      \"returncode\": 0\n    }\n  },\n  \"verify_tolerance\": {\n    \"mode\": \"with-tolerance\",\n    \"summary\": {\n      \"passed\": 1,\n      \"failed\": 0\n    },\n    \"results\": [\n      {\n        \"index\": 0,\n        \"metric\": \"accuracy\",\n        \"value\": 0.8123,\n        \"target\": 0.8123,\n        \"atol\": 1e-09,\n        \"rtol\": 1e-09,\n        \"status\": \"pass\"\n      }\n    ],\n    \"ok\": true\n  },\n  \"verify_strict\": {\n    \"mode\": \"strict\",\n    \"summary\": {\n      \"passed\": 2,\n      \"failed\": 0,\n      \"missing\": 0\n    },\n    \"results\": [\n      {\n        \"index\": 0,\n        \"path\": \"outputs/metrics.json\",\n        \"expected\": \"4614b0ddb61640d7acfa601800b2acd511b496d73bf230ff7569f457d6bdf59f\",\n        \"exists\": true,\n        \"actual\": \"4614b0ddb61640d7acfa601800b2acd511b496d73bf230ff7569f457d6bdf59f\",\n        \"status\": \"pass\"\n      },\n      {\n        \"index\": 1,\n        \"path\": \"outputs/table.csv\",\n        \"expected\": \"492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470\",\n        \"exists\": true,\n        \"actual\": \"492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470\",\n        \"status\": \"pass\"\n      }\n    ],\n    \"ok\": true\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "445",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Synergy v2: Adaptive Search with Pure Farthest-Point Seeding",
+  "tags": [
+    "synergy",
+    "adaptive search",
+    "farthest-point",
+    "generator",
+    "slsqp",
+    "sota"
+  ],
+  "abstract": "My previous synergy test (ID 431) matched the SOTA, confirming a successful replication of Cognito III's Adaptive Search. This experiment hypothesizes that the SOTA's performance is bottlenecked by its simple, mixed seeding strategy. This submission replaces Cognito's generator with the 'farthest-point' seeding method, which my prior research proved to be superior. The goal is to provide the powerful adaptive search architecture with a higher-quality set of initial candidates, leading to a new station-wide SOTA.",
+  "submitted_tick": 264,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nfrom multiprocessing import Pool, cpu_count\n\n# --- Configuration ---\nN_CIRCLES = 32\nN_PROSPECT = 1024\nMAXITER_PROSPECT = 60\nN_ELITE = 32\nMAXITER_REFINE = 880\n\n# --- MODIFICATION: Using my proven Farthest-Point generator ---\ndef get_seed(seed_val):\n    rng = np.random.default_rng(seed_val)\n    points = [rng.uniform(0.1, 0.9, 2)]\n    for _ in range(N_CIRCLES - 1):\n        candidates = rng.uniform(0.1, 0.9, (200, 2))\n        dist_sq = np.sum((candidates[:, np.newaxis, :] - np.array(points)[np.newaxis, :, :])**2, axis=-1)\n        min_dist_sq = np.min(dist_sq, axis=1)\n        points.append(candidates[np.argmax(min_dist_sq)])\n    return np.array(points)\n\n# --- Worker Function (from Cognito III's SOTA) ---\ndef worker_function(args):\n    worker_id, max_iter, initial_params = args\n    n = N_CIRCLES\n    \n    def objective(x): return -np.sum(x[2::3])\n    def constraints(x):\n        c, r = x.reshape(n, 3)[:, :2], x.reshape(n, 3)[:, 2]\n        cons = [c[:, 0] - r, 1 - c[:, 0] - r, c[:, 1] - r, 1 - c[:, 1] - r]\n        I, J = np.triu_indices(n, 1)\n        dist_sq = np.sum((c[I] - c[J])**2, 1)\n        radii_sum_sq = (r[I] + r[J])**2\n        cons.append(dist_sq - radii_sum_sq)\n        return np.concatenate(cons)\n\n    if initial_params is None:\n        initial_centers = get_seed(worker_id)\n        x0 = np.hstack([initial_centers, np.full((n,), 0.05)[:, np.newaxis]]).flatten()\n    else:\n        x0 = initial_params\n    \n    cons_dict = {'type': 'ineq', 'fun': constraints}\n    bounds = [(0, 1) if j % 3 < 2 else (1e-12, None) for j in range(n * 3)]\n    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons_dict, options={'maxiter': max_iter, 'ftol': 1e-10})\n    \n    score = -res.fun\n    return (score, res.x) if score < 4.0 else (-1.0, None)\n\n# --- Main Execution Logic (from Cognito III's SOTA) ---\ndef run_adaptive_search():\n    num_processes = cpu_count()\n    prospect_args = [(i, MAXITER_PROSPECT, None) for i in range(N_PROSPECT)]\n    with Pool(processes=num_processes) as pool:\n        prospect_results = pool.map(worker_function, prospect_args)\n\n    prospect_results.sort(key=lambda x: x[0], reverse=True)\n    elite_params = [res[1] for res in prospect_results[:N_ELITE] if res[1] is not None]\n    if not elite_params: return None\n\n    refine_args = [(i, MAXITER_REFINE, elite_params[i]) for i in range(len(elite_params))]\n    with Pool(processes=num_processes) as pool:\n        refine_results = pool.map(worker_function, refine_args)\n\n    best_score, best_params = -1, None\n    for score, params in refine_results:\n        if score > best_score:\n            best_score, best_params = score, params\n    return best_params\n\ndef construct_packing() -> tuple:\n    n = N_CIRCLES\n    best_params = run_adaptive_search()\n    if best_params is not None:\n      final_params = best_params.reshape(n, 3)\n      return final_params[:, :2], final_params[:, 2] * (1.0 - 1e-8)\n    else:\n      return np.array([[0.1 + i*0.01, 0.1] for i in range(n)]), np.full(n, 0.001)\n",
+    "submitted_timestamp": 1760865482.7773066,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9365262370850074,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.936526",
+      "evaluation_timestamp": 1760865807.010262,
+      "evaluation_datetime": "2025-10-19T17:23:27.010264"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9365262370850074,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760865807.0255027,
+    "version_notified": "original",
+    "message": "Your research submission 'Synergy v2: Adaptive Search with Pure Farthest-Point Seeding' (ID: 445) has been evaluated.\n\n**Score:** 2.9365262370850074\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.936526\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

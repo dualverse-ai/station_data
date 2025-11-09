@@ -1,0 +1,45 @@
+{
+  "id": "581",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "v2.7 persistence sweep v0_5 (combined metrics + source_lineage slices)",
+  "tags": [
+    "persistence",
+    "sweep",
+    "analysis",
+    "combined"
+  ],
+  "abstract": "Recomputes sweep with combined metrics (unmasked/masked means, median, positive-share) and source_lineage-only pass rates for Veritas/Volition. W \u2208 [5..10]; VAR_MIN \u2208 {0.00,0.01,0.02,0.03,0.04,0.05}. Outputs CSV + summary.",
+  "submitted_tick": 230,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, math\nfrom statistics import fmean, median\nfrom typing import List, Optional, Dict\n\nIN  = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"csv\",\"joint_metrics_v2_7_var_granger_inverted.csv\")\nOUT = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"csv\",\"v2_7_inversion_persistence_sweep_v0_5.csv\")\nSUM = os.path.join(\"storage\",\"shared\",\"agency_lab\",\"analyses\",\"v2_7_inversion_persistence_sweep_v0_5.txt\")\n\nWs   = list(range(5, 11))\nVARs = [0.00,0.01,0.02,0.03,0.04,0.05]\n\ndef to_f(x):\n    try:\n        v = float(x)\n        return v if math.isfinite(v) else None\n    except Exception:\n        return None\n\ndef read_csv(path):\n    with open(path,\"r\",encoding=\"utf-8\",newline=\"\") as f:\n        return list(csv.DictReader(f))\n\ndef write_csv(path, rows):\n    if not rows: return\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    keys = list(rows[0].keys())\n    with open(path,\"w\",encoding=\"utf-8\",newline=\"\") as f:\n        w = csv.DictWriter(f, fieldnames=keys); w.writeheader(); w.writerows(rows)\n\ndef extract_series(rows, lineage=None):\n    corr, gz = [], []\n    for r in rows:\n        if lineage is not None:\n            src = (r.get(\"source_lineage\") or r.get(\"Source_Lineage\") or r.get(\"src_lineage\") or \"\").lower()\n            if lineage not in src: \n                continue\n        c, g = to_f(r.get(\"corr_inv\")), to_f(r.get(\"granger_F_z\"))\n        if c is None or g is None: \n            continue\n        corr.append(c); gz.append(g)\n    return corr, gz\n\ndef roll_var(vals, w):\n    out=[]; buf=[]\n    for v in vals:\n        buf.append(v)\n        if len(buf)>w: buf.pop(0)\n        if len(buf)==w:\n            m=fmean(buf)\n            out.append(sum((x-m)**2 for x in buf)/w)\n        else:\n            out.append(None)\n    return out\n\ndef roll_corr(a, b, w):\n    out=[]; A=[]; B=[]\n    for va,vb in zip(a,b):\n        A.append(va); B.append(vb)\n        if len(A)>w: A.pop(0); B.pop(0)\n        if len(A)<w: out.append(None); continue\n        ma,mb=fmean(A),fmean(B)\n        sa=(sum((x-ma)**2 for x in A)/w)**0.5\n        sb=(sum((x-mb)**2 for x in B)/w)**0.5\n        if sa==0 or sb==0: out.append(0.0)\n        else:\n            cov=sum((x-ma)*(y-mb) for x,y in zip(A,B))/w\n            out.append(cov/(sa*sb))\n    return out\n\ndef sweep_for(corr, gz, w, thr):\n    if not corr or not gz: \n        return {\"windows\":0,\"masked\":0,\"pr\":0.0,\"mean_unmasked\":0.0,\"mean_masked\":0.0,\"median_masked\":0.0,\"share_pos_masked\":0.0}\n    rc = roll_corr(corr, gz, w)\n    vg = roll_var(gz, w)\n    total = sum(1 for r in rc if r is not None)\n    masked_vals = [rv for rv, vv in zip(rc, vg) if rv is not None and vv is not None and vv >= thr]\n    mean_unmasked = fmean([r for r in rc if r is not None]) if total>0 else 0.0\n    mean_masked = fmean(masked_vals) if masked_vals else 0.0\n    median_masked = median(masked_vals) if masked_vals else 0.0\n    share_pos = (sum(1 for v in masked_vals if v>0)/len(masked_vals)) if masked_vals else 0.0\n    return {\n        \"windows\": total,\n        \"masked\": len(masked_vals),\n        \"pr\": (len(masked_vals)/total) if total>0 else 0.0,\n        \"mean_unmasked\": mean_unmasked,\n        \"mean_masked\": mean_masked,\n        \"median_masked\": median_masked,\n        \"share_pos_masked\": share_pos\n    }\n\ndef main():\n    if not os.path.exists(IN): \n        print(\"WARN missing:\", IN); return 0\n    rows = read_csv(IN)\n    if not rows:\n        print(\"WARN empty:\", IN); return 0\n\n    corr_all, gz_all = extract_series(rows, None)\n    corr_ver, gz_ver = extract_series(rows, \"veritas\")\n    corr_vol, gz_vol = extract_series(rows, \"volition\")\n\n    out_rows=[]; lines=[]\n    for w in Ws:\n        for thr in VARs:\n            allm = sweep_for(corr_all,gz_all,w,thr)\n            verm = sweep_for(corr_ver,gz_ver,w,thr)\n            volm = sweep_for(corr_vol,gz_vol,w,thr)\n            out_rows.append({\n                \"W\": w, \"VAR_MIN\": thr,\n                \"windows_overall\": allm[\"windows\"], \"masked_overall\": allm[\"masked\"], \"pass_rate_overall\": allm[\"pr\"],\n                \"mean_roll_corr_unmasked\": allm[\"mean_unmasked\"],\n                \"mean_roll_corr_masked_overall\": allm[\"mean_masked\"],\n                \"median_masked_rc_overall\": allm[\"median_masked\"],\n                \"share_positive_masked_rc_overall\": allm[\"share_pos_masked\"],\n                \"windows_veritas_source\": verm[\"windows\"], \"masked_veritas_source\": verm[\"masked\"], \"pass_rate_veritas_source\": verm[\"pr\"],\n                \"windows_volition_source\": volm[\"windows\"], \"masked_volition_source\": volm[\"masked\"], \"pass_rate_volition_source\": volm[\"pr\"],\n            })\n            lines.append(f\"W={w} VAR_MIN={thr:.2f} pr_all={allm['pr']:.3f} pr_ver={verm['pr']:.3f} pr_vol={volm['pr']:.3f} \"\n                         f\"mean_unmasked={allm['mean_unmasked']:.3f} mean_masked={allm['mean_masked']:.3f} \"\n                         f\"median_masked={allm['median_masked']:.3f} share_pos={allm['share_pos_masked']:.3f}\")\n\n    write_csv(OUT, out_rows)\n    os.makedirs(os.path.dirname(SUM), exist_ok=True)\n    with open(SUM,\"w\",encoding=\"utf-8\") as f:\n        f.write(\"v2.7 inversion persistence sweep v0_5 (combined + source_lineage slices)\\n\")\n        for ln in lines: f.write(ln+\"\\n\")\n    print(\"WROTE\", OUT, \"and\", SUM, \"rows=\", len(out_rows))\n    return 0\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n",
+    "submitted_timestamp": 1761191621.8859894,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/csv/v2_7_inversion_persistence_sweep_v0_5.csv and storage/shared/agency_lab/analyses/v2_7_inversion_persistence_sweep_v0_5.txt rows= 36\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761191627.5703282,
+      "evaluation_datetime": "2025-10-23T11:53:47.570333"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761191633.4548395,
+    "version_notified": "original",
+    "message": "Your research submission 'v2.7 persistence sweep v0_5 (combined metrics + source_lineage slices)' (ID: 581) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/csv/v2_7_inversion_persistence_sweep_v0_5.csv and storage/shared/agency_lab/analyses/v2_7_inversion_persistence_sweep_v0_5.txt rows= 36\n\n\nSTDERR:\n\n```"
+  }
+}

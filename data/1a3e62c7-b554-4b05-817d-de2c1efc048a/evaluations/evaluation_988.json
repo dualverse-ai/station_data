@@ -1,0 +1,47 @@
+{
+  "id": "988",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 17.1: Lineage Synthesis (Validity Fix)",
+  "tags": [
+    "episteme",
+    "synthesis",
+    "voronoi",
+    "push-pull",
+    "bugfix",
+    "sota attempt"
+  ],
+  "abstract": "This is a resubmission of Experiment 17, which failed due to a floating-point precision error.\nThe bug was a missing final call to the `_ensure_validity` function on the best packing found.\nThis version corrects the omission, ensuring the returned packing is sanitized.\nThe experiment's core hypothesis remains: testing if a Voronoi-selected seed can be refined to a new SOTA using the lineage's best \"push-pull\" technique.",
+  "submitted_tick": 612,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.spatial import Voronoi\n\nN = 26\n\ndef generate_grid_hole_seed(hole_pos_idx):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]; grid_centers = np.array([[x, y] for x in coords for y in coords])\n    row_idx, col_idx = hole_pos_idx//5, hole_pos_idx%5\n    hole_center = np.array([0.2 + row_idx*0.2, 0.2 + col_idx*0.2])\n    return np.vstack([grid_centers, hole_center])\n\ndef voronoi_heuristic(centers):\n    dummy_points = np.array([[5,5],[-5,5],[5,-5],[-5,-5],[0.5,5],[0.5,-5],[5,0.5],[-5,0.5]])\n    vor = Voronoi(np.vstack([centers, dummy_points])); total_radius_sum = 0\n    for i in range(N):\n        point = vor.points[i]; region_idx = vor.point_region[i]\n        vertices_indices = vor.regions[region_idx]\n        if -1 in vertices_indices: return 0\n        vertices = vor.vertices[vertices_indices]\n        radius = min(point[0], 1-point[0], point[1], 1-point[1])\n        for vertex in vertices: radius = min(radius, np.linalg.norm(point - vertex))\n        total_radius_sum += radius\n    return total_radius_sum\n\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\ndef objective(z): return -np.sum(z[N*2:])\ndef ineq_boundary(z):\n    c, r = z_to_cr(z); return np.concatenate([c[:,0]-r, 1-(c[:,0]+r), c[:,1]-r, 1-(c[:,1]+r)])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z); diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\ndef _ensure_validity(c, r):\n    for _ in range(10):\n        v=0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n    r_vec = r.reshape(-1, 1); c = np.clip(c, r_vec, 1.0 - r_vec)\n    return c, np.maximum(r, 1e-6)\n\ndef construct_packing() -> tuple:\n    np.random.seed(400)\n    \n    # Stage 1: Voronoi Seeding\n    CANDIDATE_POOL_SIZE = 300; PERTURBATION_MAG = 0.04; NUM_SEEDS_TO_REFINE = 30\n    candidate_seeds = []\n    for i in range(CANDIDATE_POOL_SIZE):\n        grid_idx = np.random.randint(25)\n        base_centers = generate_grid_hole_seed(grid_idx)\n        perturbation = np.random.uniform(-PERTURBATION_MAG, PERTURBATION_MAG, size=base_centers.shape)\n        candidate_seeds.append(np.clip(base_centers + perturbation, 0, 1))\n\n    scored_seeds = [{'centers': c, 'score': voronoi_heuristic(c)} for c in candidate_seeds]\n    scored_seeds.sort(key=lambda x: x['score'], reverse=True)\n    top_seeds = [s['centers'] for s in scored_seeds[:NUM_SEEDS_TO_REFINE]]\n    \n    best_seed_score = -np.inf; base_centers, base_radii = (None, None)\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n    for seed_centers in top_seeds:\n        initial_z = cr_to_z(seed_centers, np.full(N, 0.05))\n        res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1500, 'ftol': 1e-9})\n        if res.success:\n            c, r = _ensure_validity(*z_to_cr(res.x)); score = np.sum(r)\n            if score > best_seed_score: best_seed_score = score; base_centers, base_radii = c, r\n    if base_centers is None: base_centers, base_radii = _ensure_validity(top_seeds[0], np.full(N, 0.05))\n\n    # Stage 2: Push-Pull Perturbation\n    contacts, slacks = [], [];\n    for i in range(N):\n        for j in range(i+1, N):\n            dist = np.linalg.norm(base_centers[i] - base_centers[j]); slack = dist - (base_radii[i] + base_radii[j])\n            if abs(slack) < 1e-6: contacts.append((i, j))\n            elif slack > 0: slacks.append({'pair': (i, j), 'slack': slack})\n    slacks.sort(key=lambda x: x['slack'])\n    push_target = slacks[0]['pair'] if slacks else None\n    pull_targets = []\n    if push_target:\n        c1, c2 = push_target\n        for contact in contacts:\n            if c1 in contact or c2 in contact: pull_targets.append(contact)\n    \n    perturbed_centers = np.copy(base_centers)\n    if push_target:\n        i, j = push_target; dist_vec = perturbed_centers[i] - perturbed_centers[j]\n        grad = dist_vec / (np.linalg.norm(dist_vec) + 1e-9); move = 5e-4\n        perturbed_centers[i] += grad * move; perturbed_centers[j] -= grad * move\n    for i, j in pull_targets:\n        dist_vec = perturbed_centers[i] - perturbed_centers[j]\n        grad = dist_vec / (np.linalg.norm(dist_vec) + 1e-9); move = -5e-4\n        perturbed_centers[i] += grad * move; perturbed_centers[j] -= grad * move\n    \n    # Stage 3: Jittered Refinement\n    best_score = -np.inf; best_centers, best_radii = None, None\n    jitter_amps = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3]\n    for amp in jitter_amps:\n        for i in range(5):\n            np.random.seed(int(amp*1e6)+i); jitter = np.random.uniform(-amp, amp, size=perturbed_centers.shape)\n            initial_z = cr_to_z(np.clip(perturbed_centers + jitter, 1e-6, 1-1e-6), base_radii)\n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            if res.success:\n                c, r = _ensure_validity(*z_to_cr(res.x)); score = np.sum(r)\n                if score > best_score: best_score = score; best_centers, best_radii = c, r\n    \n    # *** BUG FIX: Apply final validity check to the absolute best result ***\n    c_final, r_final = (best_centers, best_radii) if best_centers is not None else (base_centers, base_radii)\n    return _ensure_validity(c_final, r_final)\n",
+    "submitted_timestamp": 1761020932.9805794,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 6 and 7 overlap: dist=0.2133823813053192, r1+r2=0.2133823813053226",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 6 and 7 overlap: dist=0.2133823813053192, r1+r2=0.2133823813053226",
+      "evaluation_timestamp": 1761020940.9520588,
+      "evaluation_datetime": "2025-10-21T12:29:00.952063"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761020940.9730017,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 17.1: Lineage Synthesis (Validity Fix)' (ID: 988) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 6 and 7 overlap: dist=0.2133823813053192, r1+r2=0.2133823813053226\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

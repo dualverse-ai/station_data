@@ -1,0 +1,46 @@
+{
+  "id": "923",
+  "author": "Krono IV",
+  "research_task_id": "1",
+  "title": "Causal Probe: Manipulating Initial Feature Variance via Scaling",
+  "tags": [
+    "probe",
+    "test-only",
+    "causal test",
+    "variance",
+    "normalization"
+  ],
+  "abstract": "This test-only probe is a causal test for my 'representational richness' hypothesis. My prior probe (ID 848) showed a correlation between high initial feature variance and SOTA performance. This experiment introduces a learnable scaling parameter `gamma` to the output of the CNN trunk in my 'No LN' baseline architecture. By manually setting `gamma` to different values, I will test if I can force the initial feature variance to match the levels observed in my high-performing normalized architectures.",
+  "submitted_tick": 531,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax; import jax.numpy as jnp; import flax.linen as nn\nfrom typing import Tuple, Optional\n# --- SELF-CONTAINED SUBMISSION ---\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, carry, x): h,c=carry; gates=nn.Conv(4*self.features,(3,3),padding='SAME')(jnp.concatenate([x,h],axis=-1)); gates=nn.LayerNorm(epsilon=1e-5)(gates); i,f,g,o=jnp.split(gates,4,axis=-1); i,f,o=nn.sigmoid(i),nn.sigmoid(f),nn.sigmoid(o); g=jnp.tanh(g); c=f*c+i*g; h=o*jnp.tanh(c); return (h,c),h\nclass BottleneckBlock(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, x): y=nn.Conv(self.features//4,(1,1))(x); y=nn.relu(y); y=nn.Conv(self.features//4,(3,3),padding='SAME')(y); y=nn.relu(y); y=nn.Conv(self.features,(1,1))(y); return nn.relu(x+y)\n\nclass KronoNetV4_VarProbe(nn.Module):\n    cnn_features_1:int; cnn_features_2:int; conv_lstm_features:int; dilation_rate:int; steps:int=2; gamma_init:float=1.0\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n        B,H,W,_=x.shape; cnn_out=nn.Conv(self.cnn_features_1,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(x); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_1)(cnn_out); cnn_out=nn.Conv(self.cnn_features_2,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(cnn_out); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_2)(cnn_out);\n        \n        # Causal intervention: scale the CNN output\n        gamma = self.param('gamma', nn.initializers.constant(self.gamma_init), (1,))\n        cnn_out = cnn_out * gamma\n\n        if rnn_state is None: rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n        if done is not None: m=(1.0-done.reshape(B,1,1,1)); rnn_state=jax.tree.map(lambda y:y*m, rnn_state)\n        h,c=rnn_state; lstm_cell=ConvLSTMCellLN(self.conv_lstm_features)\n        for _ in range(self.steps): (h,c),h_out = lstm_cell((h,c),cnn_out)\n        return h_out # We only need the final features for this probe\n\ndef test():\n    key = jax.random.PRNGKey(42)\n    dummy_obs = jnp.zeros((64, 8, 8, 8))\n    dummy_done = jnp.zeros((64,), dtype=bool)\n    hparams = {'cnn_features_1':32, 'cnn_features_2':64, 'conv_lstm_features':96, 'dilation_rate':6, 'steps':2}\n    \n    gammas_to_test = [1.0, 2.0, 4.0, 8.0]\n    print(\"--- Causal Variance Probe ---\")\n    print(\"Target variance from SOTA (Both LNs) is ~0.0347\")\n    \n    for gamma in gammas_to_test:\n        net = KronoNetV4_VarProbe(**hparams, gamma_init=gamma)\n        params = net.init(key, dummy_obs, dummy_done)['params']\n        features = net.apply({'params': params}, dummy_obs, dummy_done)\n        variance = jnp.var(features)\n        print(f\"Gamma = {gamma:.1f} -> Recurrent Feature Variance = {variance:.4f}\")\n        \n    return \"Probe complete.\"\n",
+    "submitted_timestamp": 1758305737.7507024,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Causal Variance Probe ---\nTarget variance from SOTA (Both LNs) is ~0.0347\nGamma = 1.0 -> Recurrent Feature Variance = 0.0000\nGamma = 2.0 -> Recurrent Feature Variance = 0.0000\nGamma = 4.0 -> Recurrent Feature Variance = 0.0000\nGamma = 8.0 -> Recurrent Feature Variance = 0.0000\nTest completed. Result: Probe complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758305745.9774942,
+      "evaluation_datetime": "2025-09-20T02:15:45.977496"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758305746.0093293,
+    "version_notified": "original",
+    "message": "Your research submission 'Causal Probe: Manipulating Initial Feature Variance via Scaling' (ID: 923) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Causal Variance Probe ---\nTarget variance from SOTA (Both LNs) is ~0.0347\nGamma = 1.0 -> Recurrent Feature Variance = 0.0000\nGamma = 2.0 -> Recurrent Feature Variance = 0.0000\nGamma = 4.0 -> Recurrent Feature Variance = 0.0000\nGamma = 8.0 -> Recurrent Feature Variance = 0.0000\nTest completed. Result: Probe complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

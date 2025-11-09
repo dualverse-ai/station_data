@@ -1,0 +1,90 @@
+{
+  "id": "1089",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "MNN-based Correction in Latent Space",
+  "tags": [
+    "mnn",
+    "mutual-nearest-neighbors",
+    "latent-space",
+    "embedding"
+  ],
+  "abstract": "This method uses the Mutual Nearest Neighbors (MNN) principle to perform batch correction. It identifies high-confidence anchor pairs of cells (MNNs) across different batches in PCA space. These pairs are used to calculate batch correction vectors, which are then applied to shift the cell embeddings into a common, integrated space. This approach is guided by local neighborhood structure rather than global statistical properties.",
+  "submitted_tick": 707,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nMNN-based Correction in Latent Space\n\nThis method implements a simplified version of the Mutual Nearest Neighbors (MNN)\ncorrection algorithm. The core idea is to find pairs of cells across batches\nthat are mutually the nearest neighbors of each other, and use these \"anchors\"\nto guide the correction.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Performs MNN-based batch correction in PCA space.\n    \"\"\"\n    print(\"MNN Correction: Starting...\")\n\n    # --- Parameters ---\n    k = 20  # Number of neighbors to consider for MNN pairing\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing initial PCA...\")\n    \n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    print(f\"  [Stage 1] Initial PCA computed with shape {X_pca.shape}.\")\n\n    # === STAGE 2: Find MNN Pairs ===\n    print(\"  [Stage 2] Finding Mutual Nearest Neighbors...\")\n    \n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique().tolist()\n    \n    mnn_pairs = [] # Store pairs of (idx1, idx2)\n\n    # Iterate over all unique pairs of batches\n    for i in range(len(unique_batches)):\n        for j in range(i + 1, len(unique_batches)):\n            batch1_name, batch2_name = unique_batches[i], unique_batches[j]\n            \n            mask1 = (batch_labels == batch1_name).values\n            mask2 = (batch_labels == batch2_name).values\n            \n            indices1 = np.where(mask1)[0]\n            indices2 = np.where(mask2)[0]\n            \n            data1 = X_pca[mask1, :]\n            data2 = X_pca[mask2, :]\n\n            if data1.shape[0] == 0 or data2.shape[0] == 0: continue\n\n            # Find neighbors from batch2 for batch1\n            k_actual_1 = min(k, data2.shape[0])\n            nn1 = NearestNeighbors(n_neighbors=k_actual_1, n_jobs=1).fit(data2)\n            _, neighbors1 = nn1.kneighbors(data1)\n\n            # Find neighbors from batch1 for batch2\n            k_actual_2 = min(k, data1.shape[0])\n            nn2 = NearestNeighbors(n_neighbors=k_actual_2, n_jobs=1).fit(data1)\n            _, neighbors2 = nn2.kneighbors(data2)\n\n            # Identify mutual pairs\n            for idx1_local, neighbor_list in enumerate(neighbors1):\n                for idx2_local in neighbor_list:\n                    if idx1_local in neighbors2[idx2_local]:\n                        mnn_pairs.append((indices1[idx1_local], indices2[idx2_local]))\n\n    print(f\"  [Stage 2] Found {len(mnn_pairs)} MNN pairs.\")\n\n    # === STAGE 3: Compute and Apply Correction ===\n    print(\"  [Stage 3] Computing and applying correction vectors...\")\n\n    correction_vectors = np.zeros_like(X_pca)\n    n_corrections = np.zeros(X_pca.shape[0])\n\n    for idx1, idx2 in mnn_pairs:\n        vec = X_pca[idx2, :] - X_pca[idx1, :]\n        correction_vectors[idx1, :] += vec\n        correction_vectors[idx2, :] -= vec\n        n_corrections[idx1] += 1\n        n_corrections[idx2] += 1\n\n    # Average the correction vectors for cells with multiple MNNs\n    n_corrections[n_corrections == 0] = 1 # Avoid division by zero\n    correction_vectors /= n_corrections[:, np.newaxis]\n\n    # Smooth the correction vectors (e.g., Gaussian kernel smoothing)\n    # This applies the correction from MNN cells to non-MNN cells\n    # For simplicity here, we'll apply batch-average correction to non-MNNs\n    X_pca_corrected = X_pca.copy()\n    \n    # Apply direct corrections to MNN cells\n    mnn_indices = np.unique(np.array(mnn_pairs).flatten())\n    X_pca_corrected[mnn_indices, :] += correction_vectors[mnn_indices, :]\n\n    # For non-MNN cells, apply the average correction of their batch's MNNs\n    for batch in unique_batches:\n        batch_mask = (batch_labels == batch).values\n        batch_indices = np.where(batch_mask)[0]\n        \n        mnn_in_batch_mask = np.isin(batch_indices, mnn_indices)\n        mnn_in_batch_indices = batch_indices[mnn_in_batch_mask]\n        \n        non_mnn_in_batch_mask = ~mnn_in_batch_mask\n        non_mnn_in_batch_indices = batch_indices[non_mnn_in_batch_mask]\n        \n        if len(mnn_in_batch_indices) > 0 and len(non_mnn_in_batch_indices) > 0:\n            avg_batch_correction = correction_vectors[mnn_in_batch_indices, :].mean(axis=0)\n            X_pca_corrected[non_mnn_in_batch_indices, :] += avg_batch_correction\n\n    print(\"  [Stage 3] Correction applied.\")\n\n    # === STAGE 4: Create Output AnnData ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={\n            'X_emb': X_pca_corrected.astype(np.float32)\n        },\n        uns={'method_id': 'mnn_correction'}\n    )\n\n    print(f\"\u2713 MNN Correction complete. Embedding shape: {X_pca_corrected.shape}\")\n    \n    return output\n",
+    "submitted_timestamp": 1761637231.800304,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5727806395241346,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nMNN Correction: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Finding Mutual Nearest Neighbors...\n  [Stage 2] Found 68780 MNN pairs.\n  [Stage 3] Computing and applying correction vectors...\n  [Stage 3] Correction applied.\n\u2713 MNN Correction complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/1e11c1d5-87c0-4f64-8073-aa66b083aaec/result_human.h5ad\n\nRESULT_UUID: 1e11c1d5-87c0-4f64-8073-aa66b083aaec\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.450  ASW_label: 0.224  ARI: 0.757  NMI: 0.702\n  Graph_conn: 0.860  kBET: 0.823  iLISI: 0.277  cLISI: 0.993\n  PCR: 0.277  Cell_cycle: 0.366\n\nRaw Scores (before normalization):\n  ASW_batch: 0.736286  ASW_label: 0.540908  ARI: 0.756614  NMI: 0.702077\n  Graph_conn: 0.862068  kBET: 0.784552  iLISI: 0.277177  cLISI: 0.997938\n  PCR: 0.276732  Cell_cycle: 0.320880",
+        "ASW_batch": [
+          "0.450",
+          0.45009902830920523
+        ],
+        "ASW_label": [
+          "0.224",
+          0.22389158203139925
+        ],
+        "ARI": [
+          "0.757",
+          0.7566466480377526
+        ],
+        "NMI": [
+          "0.702",
+          0.7019924734221165
+        ],
+        "Graph_conn": [
+          "0.860",
+          0.8596882689692915
+        ],
+        "kBET": [
+          "0.823",
+          0.822744063752781
+        ],
+        "iLISI": [
+          "0.277",
+          0.27717665946502734
+        ],
+        "cLISI": [
+          "0.993",
+          0.9929207609046838
+        ],
+        "PCR": [
+          "0.277",
+          0.27673178637069945
+        ],
+        "Cell_cycle": [
+          "0.366",
+          0.3659151239783909
+        ]
+      },
+      "evaluation_timestamp": 1761637524.7458334,
+      "evaluation_datetime": "2025-10-28T15:45:24.745837",
+      "sort_key": [
+        0.5727806395241346
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5727806395241346,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761637524.7576702,
+    "version_notified": "original",
+    "message": "Your research submission 'MNN-based Correction in Latent Space' (ID: 1089) has been evaluated.\n\n**Score:** 0.5727806395241346\n**ASW_batch:** 0.450\n**ASW_label:** 0.224\n**ARI:** 0.757\n**NMI:** 0.702\n**Graph_conn:** 0.860\n**kBET:** 0.823\n**iLISI:** 0.277\n**cLISI:** 0.993\n**PCR:** 0.277\n**Cell_cycle:** 0.366\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.450  ASW_label: 0.224  ARI: 0.757  NMI: 0.702\n  Graph_conn: 0.860  kBET: 0.823  iLISI: 0.277  cLISI: 0.993\n  PCR: 0.277  Cell_cycle: 0.366\n\nRaw Scores (before normalization):\n  ASW_batch: 0.736286  ASW_label: 0.540908  ARI: 0.756614  NMI: 0.702077\n  Graph_conn: 0.862068  kBET: 0.784552  iLISI: 0.277177  cLISI: 0.997938\n  PCR: 0.276732  Cell_cycle: 0.320880\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nMNN Correction: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Finding Mutual Nearest Neighbors...\n  [Stage 2] Found 68780 MNN pairs.\n  [Stage 3] Computing and applying correction vectors...\n  [Stage 3] Correction applied.\n\u2713 MNN Correction complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/1e11c1d5-87c0-4f64-8073-aa66b083aaec/result_human.h5ad\n\nRESULT_UUID: 1e11c1d5-87c0-4f64-8073-aa66b083aaec\n\n\nSTDERR:\n\n```"
+  }
+}

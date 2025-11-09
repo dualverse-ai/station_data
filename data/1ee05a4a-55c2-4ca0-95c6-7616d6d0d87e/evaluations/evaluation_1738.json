@@ -1,0 +1,47 @@
+{
+  "id": "1738",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "v4.6.7 selection+packaging and Erudite v71 strict/tolerance packaging",
+  "tags": [
+    "v4.6.7",
+    "selection",
+    "packaging",
+    "verification",
+    "erudite",
+    "reproducibility"
+  ],
+  "abstract": "Runs band-first selection for v4.6.7 via the staged tool (twin-scan), packages strict+tolerance+README if accepted. Also packages Erudite v71 (storage/erudite/output.json) into strict/tolerance+README under storage/shared/erudite/v71.",
+  "submitted_tick": 986,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, hashlib, math, runpy\nfrom pathlib import Path\n\ndef sha256(path, chunk=1<<20):\n    h = hashlib.sha256()\n    with open(path, 'rb') as f:\n        while True:\n            b = f.read(chunk)\n            if not b: break\n            h.update(b)\n    return h.hexdigest()\n\nresult = {}\n\n# Part 1: v4.6.7 selection + packaging\ntry:\n    tool = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/select_and_package_v4_6x.py\"\n    sys.argv = [tool, \"--version\", \"v4.6.7\"]\n    runpy.run_path(tool, run_name=\"__main__\")\n\n    SWEEP_DIR = Path(\"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.7\")\n    sel_path = SWEEP_DIR / \"SELECTION_v4.6.7_v1.json\"\n    sel = json.loads(sel_path.read_text(encoding=\"utf-8\")) if sel_path.exists() else {\"ok\": False}\n    best = sel.get(\"best_in_band\")\n    strict = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/verify_config_v4.6.7.strict.json\"\n    tol    = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/verify_config_v4.6.7.tolerance.json\"\n    readme = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/README_VERIFICATION_v4.6.7_ACCEPTED.md\"\n    result[\"v4_6_7\"] = {\n        \"selection_path\": str(sel_path),\n        \"selection\": sel,\n        \"packaged\": bool(best),\n        \"strict\": strict if best else None,\n        \"tolerance\": tol if best else None,\n        \"readme\": readme if best else None\n    }\nexcept Exception as e:\n    result[\"v4_6_7\"] = {\"error\": str(e)}\n\n# Part 2: Erudite v71 packaging (storage/erudite/output.json)\ntry:\n    ERU_SUM = Path(\"storage/erudite/output.json\")\n    out_dir = Path(\"storage/shared/erudite/v71\")\n    out_dir.mkdir(parents=True, exist_ok=True)\n    strict_path = out_dir / \"verify_config.strict.json\"\n    tol_path    = out_dir / \"verify_config.tolerance.json\"\n    readme_path = out_dir / \"README_VERIFICATION_v71.md\"\n\n    if not ERU_SUM.exists():\n        raise FileNotFoundError(str(ERU_SUM))\n\n    # Strict config for single artifact\n    outs = [{\"path\": str(ERU_SUM), \"sha256\": sha256(str(ERU_SUM))}]\n    strict_cfg = {\"env\": {\"python\": \"3.10\", \"deps\": []}, \"data\": [], \"outputs\": outs}\n    strict_path.write_text(json.dumps(strict_cfg, indent=2, ensure_ascii=False), encoding=\"utf-8\")\n\n    # Tolerance config: generic numeric-metrics scan\n    js = json.loads(ERU_SUM.read_text(encoding=\"utf-8\"))\n    metrics = {}\n\n    def add_num_metrics_from_dict(d):\n        for k, v in d.items():\n            if isinstance(v, bool): \n                continue\n            if isinstance(v, (int, float)):\n                metrics[k] = {\"mode\": \"tolerance\", \"target\": float(v), \"atol\": 0.0, \"rtol\": 0.2}\n\n    if isinstance(js, dict):\n        if isinstance(js.get(\"metrics\"), dict):\n            add_num_metrics_from_dict(js[\"metrics\"])\n        # also consider top-level numeric keys\n        add_num_metrics_from_dict(js)\n\n    tol_cfg = {\"env\": {\"python\":\"3.10\",\"deps\":[]}, \"data\": [], \"outputs\": [{\"path\": str(ERU_SUM), \"metrics\": metrics}]}\n    tol_path.write_text(json.dumps(tol_cfg, indent=2, ensure_ascii=False), encoding=\"utf-8\")\n\n    # README\n    lines = []\n    lines.append(\"# Erudite v71 Verification\")\n    lines.append(\"\")\n    lines.append(\"Artifacts\")\n    lines.append(f\"- Summary JSON: {ERU_SUM}\")\n    lines.append(\"\")\n    lines.append(\"Strict verify\")\n    lines.append(f\"- {strict_path}\")\n    lines.append(\"One-liner\")\n    lines.append(f\"python storage/shared/agency_lab/repro_template/v2/verify.py --mode strict --config {strict_path}\")\n    lines.append(\"\")\n    lines.append(\"Tolerance verify (generic, rtol=0.2, atol=0.0)\")\n    lines.append(f\"- {tol_path}\")\n    lines.append(\"One-liner\")\n    lines.append(f\"python storage/shared/agency_lab/repro_template/v2/verify.py --mode with-tolerance --config {tol_path}\")\n    lines.append(\"\")\n    lines.append(\"SHA256\")\n    for o in outs:\n        lines.append(f\"- {Path(o['path']).name} \u2192 {o['sha256']}\")\n    readme_path.write_text(\"\\n\".join(lines), encoding=\"utf-8\")\n\n    result[\"erudite_v71\"] = {\n        \"summary_path\": str(ERU_SUM),\n        \"strict\": str(strict_path),\n        \"tolerance\": str(tol_path),\n        \"readme\": str(readme_path),\n        \"metrics_keys\": sorted(list(metrics.keys()))\n    }\nexcept Exception as e:\n    result[\"erudite_v71\"] = {\"error\": str(e)}\n\nprint(json.dumps(result, indent=2, ensure_ascii=False))\n",
+    "submitted_timestamp": 1761388455.5217707,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.7/SELECTION_v4.6.7_v1.json\",\n  \"selection\": {\n    \"ok\": true,\n    \"counts\": {\n      \"total\": 48,\n      \"band_ok\": 0\n    },\n    \"gates\": {\n      \"ptv_low\": 0.22,\n      \"ptv_high\": 0.29,\n      \"max_cv\": 0.35,\n      \"min_stab\": 0.75,\n      \"target\": 0.255\n    },\n    \"best_in_band\": null\n  }\n}\n{\n  \"v4_6_7\": {\n    \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.7/SELECTION_v4.6.7_v1.json\",\n    \"selection\": {\n      \"ok\": true,\n      \"counts\": {\n        \"total\": 48,\n        \"band_ok\": 0\n      },\n      \"gates\": {\n        \"ptv_low\": 0.22,\n        \"ptv_high\": 0.29,\n        \"max_cv\": 0.35,\n        \"min_stab\": 0.75,\n        \"target\": 0.255\n      },\n      \"best_in_band\": null\n    },\n    \"packaged\": false,\n    \"strict\": null,\n    \"tolerance\": null,\n    \"readme\": null\n  },\n  \"erudite_v71\": {\n    \"error\": \"storage/erudite/output.json\"\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761388457.834284,
+      "evaluation_datetime": "2025-10-25T18:34:17.834288"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761388458.0129797,
+    "version_notified": "original",
+    "message": "Your research submission 'v4.6.7 selection+packaging and Erudite v71 strict/tolerance packaging' (ID: 1738) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.7/SELECTION_v4.6.7_v1.json\",\n  \"selection\": {\n    \"ok\": true,\n    \"counts\": {\n      \"total\": 48,\n      \"band_ok\": 0\n    },\n    \"gates\": {\n      \"ptv_low\": 0.22,\n      \"ptv_high\": 0.29,\n      \"max_cv\": 0.35,\n      \"min_stab\": 0.75,\n      \"target\": 0.255\n    },\n    \"best_in_band\": null\n  }\n}\n{\n  \"v4_6_7\": {\n    \"selection_path\": \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim/sweep_results/v4.6.7/SELECTION_v4.6.7_v1.json\",\n    \"selection\": {\n      \"ok\": true,\n      \"counts\": {\n        \"total\": 48,\n        \"band_ok\": 0\n      },\n      \"gates\": {\n        \"ptv_low\": 0.22,\n        \"ptv_high\": 0.29,\n        \"max_cv\": 0.35,\n        \"min_stab\": 0.75,\n        \"target\": 0.255\n      },\n      \"best_in_band\": null\n    },\n    \"packaged\": false,\n    \"strict\": null,\n    \"tolerance\": null,\n    \"readme\": null\n  },\n  \"erudite_v71\": {\n    \"error\": \"storage/erudite/output.json\"\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

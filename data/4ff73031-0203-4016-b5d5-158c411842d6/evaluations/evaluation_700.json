@@ -1,0 +1,47 @@
+{
+  "id": "700",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Probe (test\u2011only): Value\u2011head vs backbone grad norms \u2014 MSE vs Huber on CNN baseline and 4\u2011step LN\u2011ConvLSTM SOTA",
+  "tags": [
+    "analysis",
+    "probes",
+    "gradients",
+    "value loss",
+    "huber",
+    "mse"
+  ],
+  "abstract": "Test\u2011only probe measuring gradient norms for value loss (MSE vs Huber) on two architectures: DefaultResidualCNN (baseline) and 4\u2011step LN\u2011ConvLSTM(64)+Attn\u2295GAP (SOTA). Reports ||g_total||, ||g_value_out|| (final value layer), ||g_rest||, and ratios.",
+  "submitted_tick": 410,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, jax, jax.numpy as jnp, numpy as np, optax\nsys.path.append('storage/zephyr')\nfrom typing import Any, Dict, Tuple\n\n# System defaults (CNN baseline)\nfrom defaults import default_create_network as sys_create_cnn\n\n# SOTA PG network\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\n\nBASE_SEED = 42\n\ndef _l2_tree_norm(tree):\n    leaves = jax.tree_util.tree_leaves(tree)\n    return float(jnp.sqrt(sum(jnp.sum(jnp.square(x)) for x in leaves if x is not None)))\n\ndef _partition_grads_value_out(grads):\n    # Heuristic: parameters whose last dimension is 1 (Dense/Conv to scalar value)\n    def is_value_out(arr):\n        return arr.ndim >= 1 and arr.shape[-1] == 1\n    value_leaves = []\n    rest_leaves = []\n    def walker(x):\n        if x is None:\n            return\n        if isinstance(x, jnp.ndarray):\n            (value_leaves if is_value_out(x) else rest_leaves).append(x)\n    jax.tree_util.tree_map(walker, grads)\n    g_val = float(jnp.sqrt(sum(jnp.sum(x*x) for x in value_leaves))) if value_leaves else 0.0\n    g_rest = float(jnp.sqrt(sum(jnp.sum(x*x) for x in rest_leaves))) if rest_leaves else 0.0\n    return g_val, g_rest\n\ndef _synth_batch(B=32, T=16):\n    key = jax.random.PRNGKey(BASE_SEED)\n    obs = jax.random.normal(key, (B*T, 8, 8, 8))\n    dones = jnp.zeros((B*T,), dtype=bool)\n    # Returns target using random values; only magnitudes for grad comparison matter here\n    ret = jax.random.normal(jax.random.PRNGKey(BASE_SEED+1), (B, T))\n    return obs, dones, ret\n\ndef _grad_stats_cnn(loss_kind: str) -> Tuple[float,float,float]:\n    # Create DefaultResidualCNN with canonical features 32/64\n    hparams = {'cnn_features_1': 32, 'cnn_features_2': 64}\n    net = sys_create_cnn(hparams)\n    obs, dones, returns = _synth_batch()\n    params = net.init(jax.random.PRNGKey(BASE_SEED+2), obs, dones)\n\n    def value_loss_mse(p):\n        _, values, _ = net.apply(p, obs, dones)\n        B = returns.shape[0]; T = returns.shape[1]\n        vals = values.reshape(B, T)\n        return 0.5 * jnp.mean((vals - jax.lax.stop_gradient(returns))**2)\n\n    def value_loss_huber(p):\n        _, values, _ = net.apply(p, obs, dones)\n        B = returns.shape[0]; T = returns.shape[1]\n        vals = values.reshape(B, T)\n        resid = vals - jax.lax.stop_gradient(returns)\n        return jnp.mean(optax.huber_loss(resid, delta=1.0))\n\n    loss_fn = value_loss_mse if loss_kind == 'MSE' else value_loss_huber\n    grads = jax.grad(loss_fn)(params)\n    g_total = _l2_tree_norm(grads)\n    g_val, g_rest = _partition_grads_value_out(grads)\n    return g_total, g_val, g_rest\n\ndef _grad_stats_sota(loss_kind: str) -> Tuple[float,float,float]:\n    # 4\u2011step LN\u2011ConvLSTM(64) + Attn\u2295GAP\n    net = PG_Stepped_AttnGap(\n        cnn_features_1=32, cnn_features_2=64,\n        convlstm_features=64, dilation=6, bottleneck_ratio=0.28,\n        head_hidden=64, steps=4\n    )\n    B, T = 16, 8\n    obs = jax.random.normal(jax.random.PRNGKey(BASE_SEED+3), (B*T, 8, 8, 8))\n    dones = jnp.zeros((B*T,), dtype=bool)\n    returns = jax.random.normal(jax.random.PRNGKey(BASE_SEED+4), (B, T))\n    params = net.init(jax.random.PRNGKey(BASE_SEED+5), obs, dones, None)\n\n    def value_loss_mse(p):\n        _, values, _ = net.apply(p, obs, dones, None)\n        vals = values.reshape(B, T)\n        return 0.5 * jnp.mean((vals - jax.lax.stop_gradient(returns))**2)\n\n    def value_loss_huber(p):\n        _, values, _ = net.apply(p, obs, dones, None)\n        vals = values.reshape(B, T)\n        resid = vals - jax.lax.stop_gradient(returns)\n        return jnp.mean(optax.huber_loss(resid, delta=1.0))\n\n    loss_fn = value_loss_mse if loss_kind == 'MSE' else value_loss_huber\n    grads = jax.grad(loss_fn)(params)\n    g_total = _l2_tree_norm(grads)\n    g_val, g_rest = _partition_grads_value_out(grads)\n    return g_total, g_val, g_rest\n\ndef test():\n    print(\"Probe: Grad norms for value loss (MSE vs Huber)\")\n    print(\"Arch,Loss,||g_total||,||g_value_out||,||g_rest||,ratio(g_val/g_rest)\")\n    for arch in ['CNN','SOTA']:\n        for loss in ['MSE','Huber']:\n            if arch == 'CNN':\n                gtot, gval, grest = _grad_stats_cnn(loss)\n            else:\n                gtot, gval, grest = _grad_stats_sota(loss)\n            ratio = (gval / (grest + 1e-12))\n            print(f\"{arch},{loss},{gtot:.3e},{gval:.3e},{grest:.3e},{ratio:.3f}\")\n    return \"Done\"\n",
+    "submitted_timestamp": 1758142076.0614786,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nProbe: Grad norms for value loss (MSE vs Huber)\nArch,Loss,||g_total||,||g_value_out||,||g_rest||,ratio(g_val/g_rest)\nCNN,MSE,4.898e+00,9.449e-01,4.806e+00,0.197\nCNN,Huber,3.497e+00,6.788e-01,3.430e+00,0.198\nSOTA,MSE,1.733e-01,1.243e-02,1.728e-01,0.072\nSOTA,Huber,1.458e-01,1.324e-02,1.452e-01,0.091\nTest completed. Result: Done\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758142100.893486,
+      "evaluation_datetime": "2025-09-18T04:48:20.893489"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758142100.9352775,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe (test\u2011only): Value\u2011head vs backbone grad norms \u2014 MSE vs Huber on CNN baseline and 4\u2011step LN\u2011ConvLSTM SOTA' (ID: 700) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nProbe: Grad norms for value loss (MSE vs Huber)\nArch,Loss,||g_total||,||g_value_out||,||g_rest||,ratio(g_val/g_rest)\nCNN,MSE,4.898e+00,9.449e-01,4.806e+00,0.197\nCNN,Huber,3.497e+00,6.788e-01,3.430e+00,0.198\nSOTA,MSE,1.733e-01,1.243e-02,1.728e-01,0.072\nSOTA,Huber,1.458e-01,1.324e-02,1.452e-01,0.091\nTest completed. Result: Done\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

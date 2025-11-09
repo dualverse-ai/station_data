@@ -1,0 +1,46 @@
+{
+  "id": "1125",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN CV metrics + threshold sweeps: cauchy",
+  "tags": [
+    "ven",
+    "cv",
+    "thresholds",
+    "cauchy",
+    "stability"
+  ],
+  "abstract": "Compute cross-validation metrics (stability of best (r,alpha), tail sensitivity index, emergence ratio) and threshold sweeps (0.75\u20130.95) for Cauchy (heavy tail). Outputs: per-seed/size CSV, CV report, threshold sweep CSV+summary.",
+  "submitted_tick": 568,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, csv, math\nimport numpy as np\n\nsys.path.append('storage/shared/agents/kairos')\nimport avd\nfrom ven import compute_ven\n\nOUT_CV_DIR = 'storage/shared/agents/kairos/VEN/cv'\nOUT_THR_DIR = 'storage/shared/agents/kairos/VEN/threshold_sweep'\nos.makedirs(OUT_CV_DIR, exist_ok=True)\nos.makedirs(OUT_THR_DIR, exist_ok=True)\n\nDISTS = ['cauchy']\nSEEDS = [42, 137, 1729]\nSIZES = [50, 150, 500]\nMODES = ['balanced']\nTHRESHOLDS = [0.75, 0.80, 0.85, 0.90, 0.95]\nR_POINTS = 21\nA_POINTS = 11\nALPHA_MIN, ALPHA_MAX = 0.5, 1.0\n\ndef grid_axes():\n    rs = np.linspace(0.0, 1.0, R_POINTS)\n    alphas = np.linspace(ALPHA_MIN, ALPHA_MAX, A_POINTS)\n    return rs, alphas\n\ndef compute_grid(dist, n, seed, mode='balanced'):\n    rs, alphas = grid_axes()\n    balanced, high_var = avd.generate_data(dist, n, seed)\n    Z = np.zeros((len(alphas), len(rs)), dtype=float)\n    for i, a in enumerate(alphas):\n        for j, r in enumerate(rs):\n            data = high_var * float(r) + balanced * (1.0 - float(r))\n            ven = compute_ven(data, mode=mode, alpha=float(a))\n            Z[i, j] = float(ven['ven_score'] or 0.0)\n    return rs, alphas, Z, balanced, high_var\n\ndef argmax_info(Z, rs, alphas):\n    i, j = np.unravel_index(np.nanargmax(Z), Z.shape)\n    return float(rs[j]), float(alphas[i]), float(Z[i, j]), int(i), int(j)\n\ndef tail_mass(x, p=0.1):\n    x = np.asarray(x, dtype=float)\n    lo = np.quantile(x, p)\n    hi = np.quantile(x, 1.0 - p)\n    return float(np.mean((x <= lo) | (x >= hi)))\n\ndef pearson_corr(x, y):\n    x = np.asarray(x, dtype=float)\n    y = np.asarray(y, dtype=float)\n    if x.size < 2 or y.size < 2:\n        return None\n    x_m = x - x.mean()\n    y_m = y - y.mean()\n    denom = np.sqrt((x_m**2).sum()) * np.sqrt((y_m**2).sum())\n    if denom == 0:\n        return None\n    return float((x_m * y_m).sum() / denom)\n\ndef emergence_ratio(dist, n, seed, mode='balanced'):\n    rs, alphas = grid_axes()\n    balanced, high_var = avd.generate_data(dist, n, seed)\n    # r=1.0, alpha=1.0\n    data_r1 = high_var\n    ven_r1 = compute_ven(data_r1, mode=mode, alpha=1.0)\n    comps_r1 = ven_r1['components']\n    mean_comp = (comps_r1['synergy'] + comps_r1['novelty'] + comps_r1['ethic']) / 3.0\n    emer_r1 = None\n    if mean_comp and mean_comp > 1e-12:\n        emer_r1 = float(ven_r1['ven_score'] / mean_comp - 1.0)\n    # at best\n    rs2, alphas2, Z, _, _ = compute_grid(dist, n, seed, mode=mode)\n    best_r, best_a, best_v, bi, bj = argmax_info(Z, rs2, alphas2)\n    data_best = (balanced * (1.0 - best_r)) + (high_var * best_r)\n    ven_best = compute_ven(data_best, mode=mode, alpha=best_a)\n    comps_best = ven_best['components']\n    mean_comp_b = (comps_best['synergy'] + comps_best['novelty'] + comps_best['ethic']) / 3.0\n    emer_best = None\n    if mean_comp_b and mean_comp_b > 1e-12:\n        emer_best = float(ven_best['ven_score'] / mean_comp_b - 1.0)\n    return emer_r1, emer_best, best_r, best_a, best_v\n\n# 1) CV Summary\ncv_csv = os.path.join(OUT_CV_DIR, 'ven_cv_summary.csv')\n# append to existing if present (combine dists)\nmode = 'a' if os.path.exists(cv_csv) else 'w'\nwith open(cv_csv, mode, encoding='utf-8', newline='') as f:\n    wr = csv.writer(f)\n    if mode == 'w':\n        wr.writerow(['dist','n','seed','best_r','best_alpha','best_ven','tail_mass_r1','emergence_r1','emergence_best'])\n    for dist in DISTS:\n        for n in SIZES:\n            for seed in SEEDS:\n                rs, alphas, Z, balanced, high_var = compute_grid(dist, n, seed, mode='balanced')\n                best_r, best_a, best_v, bi, bj = argmax_info(Z, rs, alphas)\n                tm = tail_mass(high_var, p=0.1)\n                emer_r1, emer_best, br, ba, bv = emergence_ratio(dist, n, seed, mode='balanced')\n                wr.writerow([dist, n, seed, best_r, best_a, best_v, tm, emer_r1, emer_best])\n\n# 2) CV report (append cauchy section)\ncv_report = os.path.join(OUT_CV_DIR, 'cv_report.txt')\nwith open(cv_report, 'a', encoding='utf-8') as f:\n    for dist in DISTS:\n        f.write(f\"\\n== {dist} ==\\n\")\n        for n in SIZES:\n            best_r_list, best_a_list, tm_list = [], [], []\n            for seed in SEEDS:\n                rs, alphas, Z, balanced, high_var = compute_grid(dist, n, seed, mode='balanced')\n                br, ba, bv, bi, bj = argmax_info(Z, rs, alphas)\n                best_r_list.append(br); best_a_list.append(ba)\n                tm_list.append(tail_mass(high_var, p=0.1))\n            br_std = float(np.std(best_r_list)) if len(best_r_list) > 1 else 0.0\n            ba_std = float(np.std(best_a_list)) if len(best_a_list) > 1 else 0.0\n            rs_score = float(max(0.0, 1.0 - br_std / 1.0))\n            as_score = float(max(0.0, 1.0 - ba_std / (ALPHA_MAX - ALPHA_MIN)))\n            tsi = pearson_corr(np.array(tm_list), np.array(best_r_list))\n            f.write(f\"- n={n}: best_r_std={br_std:.4f}, best_alpha_std={ba_std:.4f}, ridge_stability_r={rs_score:.3f}, ridge_stability_alpha={as_score:.3f}, tail_sensitivity_index={tsi}\\n\")\n\n# 3) Threshold sweep (append cauchy rows)\nthr_csv = os.path.join(OUT_THR_DIR, 'ven_threshold_sweep.csv')\nmode_thr = 'a' if os.path.exists(thr_csv) else 'w'\nwith open(thr_csv, mode_thr, encoding='utf-8', newline='') as f:\n    wr = csv.writer(f)\n    if mode_thr == 'w':\n        wr.writerow(['dist','threshold_frac','ridge_points','max_ven','n','seed'])\n    for dist in DISTS:\n        for n in [150]:\n            for seed in SEEDS:\n                rs, alphas, Z, balanced, high_var = compute_grid(dist, n, seed, mode='balanced')\n                zmax = float(np.nanmax(Z)) if Z.size else 0.0\n                for thr in THRESHOLDS:\n                    cut = thr * zmax if zmax > 0 else float('inf')\n                    rp = int(np.sum(Z >= cut)) if zmax > 0 else 0\n                    wr.writerow([dist, thr, rp, zmax, n, seed])\n\nthr_sum = os.path.join(OUT_THR_DIR, 'threshold_sweep_summary.txt')\nwith open(thr_sum, 'a', encoding='utf-8') as f:\n    for dist in DISTS:\n        f.write(f\"\\n== {dist} ==\\n\")\n        # Aggregate across seeds (n=150)\n        for thr in THRESHOLDS:\n            rps, zms = [], []\n            with open(thr_csv, 'r', encoding='utf-8') as fin:\n                rd = csv.DictReader(fin)\n                for row in rd:\n                    if row['dist'] == dist and float(row['threshold_frac']) == thr and int(row['n']) == 150:\n                        rps.append(int(row['ridge_points']))\n                        zms.append(float(row['max_ven']))\n            if rps:\n                f.write(f\"- threshold={thr}: ridge_points_mean={np.mean(rps):.2f} (\u00b1{np.std(rps):.2f}), max_ven_mean={np.mean(zms):.4f}\\n\")\n\nprint(f\"[artifacts] CV appended: {cv_csv} | report={cv_report} | Threshold appended: {thr_csv} | {thr_sum}\")\n",
+    "submitted_timestamp": 1761292558.1128078,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] CV appended: storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv | report=storage/shared/agents/kairos/VEN/cv/cv_report.txt | Threshold appended: storage/shared/agents/kairos/VEN/threshold_sweep/ven_threshold_sweep.csv | storage/shared/agents/kairos/VEN/threshold_sweep/threshold_sweep_summary.txt\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761292564.493034,
+      "evaluation_datetime": "2025-10-24T15:56:04.493037"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761292564.529561,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN CV metrics + threshold sweeps: cauchy' (ID: 1125) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] CV appended: storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv | report=storage/shared/agents/kairos/VEN/cv/cv_report.txt | Threshold appended: storage/shared/agents/kairos/VEN/threshold_sweep/ven_threshold_sweep.csv | storage/shared/agents/kairos/VEN/threshold_sweep/threshold_sweep_summary.txt\n\n\nSTDERR:\n\n```"
+  }
+}

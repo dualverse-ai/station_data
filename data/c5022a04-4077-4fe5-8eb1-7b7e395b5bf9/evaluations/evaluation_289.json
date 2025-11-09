@@ -1,0 +1,45 @@
+{
+  "id": "289",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "Generator Arc 3, Step 1: Physics-Based Seed Champion",
+  "tags": [
+    "physics simulation",
+    "seed generation",
+    "generator",
+    "global optimization"
+  ],
+  "abstract": "This experiment proposes a new method for generating a superior initial seed for the SOTA pipeline. It runs 100 independent, short physics simulations where circle centers are treated as repelling particles. It then evaluates all 100 resulting layouts using the fast exact_lp solver and saves only the single best configuration ('champion') to 'storage/cognito/physics_seed_artifact.npz'. This aims to find a higher quality starting point than the previous generators.",
+  "submitted_tick": 143,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport os\nimport time\n\n# --- Utility functions ---\ndef _pair_indices(n: int): return np.triu_indices(n, 1)\ndef _boundary_margins(C: np.ndarray) -> np.ndarray: return np.minimum.reduce([C[:,0], 1-C[:,0], C[:,1], 1-C[:,1]])\n\ndef exact_lp(C: np.ndarray):\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    I, J = _pair_indices(n)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n    m = len(I)\n    A_ub = np.zeros((m, n)); A_ub[np.arange(m), I] = 1; A_ub[np.arange(m), J] = 1; b_ub = D\n    c = -np.ones(n); bounds = [(0, float(max(0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return (res.x, -res.fun) if res.success else (np.zeros(n), 0)\n\n# --- Physics Simulation ---\ndef run_physics_sim(initial_centers, steps=200, dt=0.01, repulsion_strength=0.0005):\n    centers = np.copy(initial_centers)\n    n = centers.shape[0]\n    velocity = np.zeros_like(centers)\n    \n    for _ in range(steps):\n        # Inter-particle repulsion\n        diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]\n        dist_sq = np.sum(diff**2, axis=-1)\n        dist_sq[np.arange(n), np.arange(n)] = np.inf # Avoid self-repulsion\n        inv_dist_sq = 1.0 / np.maximum(dist_sq, 1e-8)\n        force_vec = diff * inv_dist_sq[:, :, np.newaxis]\n        total_force = np.sum(force_vec, axis=1) * repulsion_strength\n        \n        # Wall repulsion\n        total_force[:, 0] -= repulsion_strength / np.maximum(centers[:, 0]**2, 1e-6)\n        total_force[:, 0] += repulsion_strength / np.maximum((1 - centers[:, 0])**2, 1e-6)\n        total_force[:, 1] -= repulsion_strength / np.maximum(centers[:, 1]**2, 1e-6)\n        total_force[:, 1] += repulsion_strength / np.maximum((1 - centers[:, 1])**2, 1e-6)\n        \n        # Update velocity and position (Euler integration)\n        velocity += total_force * dt\n        velocity *= 0.95 # Damping\n        centers += velocity * dt\n        centers = np.clip(centers, 0.01, 0.99) # Keep particles inside\n        \n    return centers\n\n# --- Main Artifact Generator ---\ndef construct_packing() -> tuple:\n    n = 32\n    num_simulations = 100\n    best_score = -1\n    best_centers = None\n    best_radii = None\n    \n    rng = np.random.default_rng(seed=137)\n\n    print(f\"Running {num_simulations} physics simulations to find the best seed...\")\n    for i in range(num_simulations):\n        # Generate a new random starting point for each simulation\n        initial_centers = rng.uniform(0.1, 0.9, size=(n, 2))\n        final_centers = run_physics_sim(initial_centers)\n        \n        # Evaluate the resulting layout with the LP solver\n        radii, score = exact_lp(final_centers)\n        \n        if score > best_score:\n            best_score = score\n            best_centers = final_centers\n            best_radii = radii\n            print(f\"New best seed found in sim {i}: Score = {score:.6f}\")\n\n    # Save the champion artifact\n    print(f\"\\nChampion seed found with score: {best_score:.6f}\")\n    SAVE_PATH = 'storage/cognito/physics_seed_artifact.npz'\n    os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)\n    np.savez(SAVE_PATH, centers=best_centers, radii=best_radii)\n    \n    # Return a trivial packing\n    return np.array([[0.1 + i*0.01, 0.1] for i in range(n)]), np.full(n, 0.001)\n",
+    "submitted_timestamp": 1760825406.4778578,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.032,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nRunning 100 physics simulations to find the best seed...\nNew best seed found in sim 0: Score = 1.801291\nNew best seed found in sim 22: Score = 1.843740\n\nChampion seed found with score: 1.843740\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.032000",
+      "evaluation_timestamp": 1760825413.08214,
+      "evaluation_datetime": "2025-10-19T06:10:13.082142"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.032,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760825413.1156101,
+    "version_notified": "original",
+    "message": "Your research submission 'Generator Arc 3, Step 1: Physics-Based Seed Champion' (ID: 289) has been evaluated.\n\n**Score:** 0.032\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.032000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nRunning 100 physics simulations to find the best seed...\nNew best seed found in sim 0: Score = 1.801291\nNew best seed found in sim 22: Score = 1.843740\n\nChampion seed found with score: 1.843740\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

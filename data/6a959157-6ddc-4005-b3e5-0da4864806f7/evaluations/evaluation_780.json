@@ -1,0 +1,49 @@
+{
+  "id": "780",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Diagnostics (test mode): Reciprocity probe on recent Heart results (kd sweep, shuffle, no-cap)",
+  "tags": [
+    "diagnostics",
+    "reciprocity",
+    "label-free",
+    "daqb",
+    "graph-analysis"
+  ],
+  "abstract": "Run a label-free reciprocity probe on four recent result files (kd=18, kd=22, f_cross shuffle, no-cap) to quantify relationships among reciprocity, cross-batch fraction, and a density proxy. Uses test() to avoid evaluation; prints summary statistics and Spearman correlations.",
+  "submitted_tick": 495,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os\nimport anndata as ad\nimport numpy as np\nfrom scipy import sparse as sp\nfrom scipy.stats import spearmanr\n\n# Result files from recent runs (UUIDs from evaluator logs)\nFILES = [\n    (\"kd18\", \"storage/shared/tmp/51b1adc0-0840-4b7c-b2e5-2f0fd44210a8/result_human.h5ad\"),\n    (\"kd22\", \"storage/shared/tmp/62587143-ef26-4c48-b7b5-631ce1f4a826/result_human.h5ad\"),\n    (\"shuffle\", \"storage/shared/tmp/d9fa666b-cbb7-450c-b1ff-234d00e8107e/result_human.h5ad\"),\n    (\"no_cap\", \"storage/shared/tmp/57252b81-4c48-4eed-bc87-44bbc2238aeb/result_human.h5ad\"),\n]\n\ndef _csr_reciprocity(A: sp.csr_matrix):\n    A = A.tocsr().astype(np.int8)\n    AT = A.T.tocsr()\n    M = A.minimum(AT)\n    outdeg = np.asarray(A.sum(axis=1)).ravel()\n    mutual = np.asarray(M.sum(axis=1)).ravel()\n    recip = np.zeros_like(outdeg, dtype=np.float32)\n    mask = outdeg > 0\n    recip[mask] = (mutual[mask] / outdeg[mask]).astype(np.float32)\n    return recip, outdeg\n\ndef _median_neighbor_distance(D: sp.csr_matrix):\n    D = D.tocsr().astype(np.float32)\n    med = np.zeros(D.shape[0], dtype=np.float32)\n    indptr, data = D.indptr, D.data\n    for i in range(D.shape[0]):\n        s, e = indptr[i], indptr[i+1]\n        if e > s:\n            med[i] = np.median(data[s:e]).astype(np.float32)\n    return med\n\ndef _cross_batch_fraction(A: sp.csr_matrix, batches):\n    A = A.tocsr()\n    n = A.shape[0]\n    frac = np.zeros(n, dtype=np.float32)\n    indptr, indices = A.indptr, A.indices\n    for i in range(n):\n        s, e = indptr[i], indptr[i+1]\n        if e <= s:\n            frac[i] = 0.0\n            continue\n        nb = indices[s:e]\n        frac[i] = np.sum(batches[nb] != batches[i]) / float(e - s)\n    return frac\n\ndef analyze(path: str, label: str):\n    if not os.path.exists(path):\n        print(f\"[reciprocity_probe] MISSING {label}: {path}\")\n        return\n    adata = ad.read_h5ad(path)\n    A = adata.obsp.get('connectivities', None)\n    D = adata.obsp.get('distances', None)\n    if A is None or D is None or 'batch' not in adata.obs:\n        print(f\"[reciprocity_probe] INCOMPLETE {label}: graph or batch missing\"); return\n    batches = adata.obs['batch'].astype('category').cat.codes.to_numpy()\n    recip, outdeg = _csr_reciprocity(A)\n    dens_med = _median_neighbor_distance(D)  # smaller = denser\n    dens_inv = (dens_med.max() - dens_med) / (dens_med.max() - dens_med.min() + 1e-8)\n    cbf = _cross_batch_fraction(A, batches)\n\n    r_recip_cbf, _ = spearmanr(recip, cbf)\n    r_recip_dens, _ = spearmanr(recip, dens_inv)\n    r_cbf_dens, _  = spearmanr(cbf, dens_inv)\n\n    print(f\"[reciprocity_probe] {label}\")\n    print(f\"  n={A.shape[0]}, mean_outdeg={outdeg.mean():.2f}\")\n    print(f\"  mean_recip={recip.mean():.4f}, mean_cbf={cbf.mean():.4f}, mean_density_inv={dens_inv.mean():.4f}\")\n    print(f\"  spearman(recip, cross_batch_frac) = {r_recip_cbf:.3f}\")\n    print(f\"  spearman(recip, density_inv)      = {r_recip_dens:.3f}\")\n    print(f\"  spearman(cross_batch_frac, density_inv) = {r_cbf_dens:.3f}\")\n\ndef test(adata):\n    print(\"[Diagnostics] Reciprocity probe on recent result files\")\n    for label, path in FILES:\n        analyze(path, label)\n    return \"reciprocity_probe_completed\"\n",
+    "submitted_timestamp": 1761553217.8280537,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[Diagnostics] Reciprocity probe on recent result files\n[reciprocity_probe] MISSING kd18: storage/shared/tmp/51b1adc0-0840-4b7c-b2e5-2f0fd44210a8/result_human.h5ad\n[reciprocity_probe] MISSING kd22: storage/shared/tmp/62587143-ef26-4c48-b7b5-631ce1f4a826/result_human.h5ad\n[reciprocity_probe] MISSING shuffle: storage/shared/tmp/d9fa666b-cbb7-450c-b1ff-234d00e8107e/result_human.h5ad\n[reciprocity_probe] MISSING no_cap: storage/shared/tmp/57252b81-4c48-4eed-bc87-44bbc2238aeb/result_human.h5ad\nTest result: reciprocity_probe_completed\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761553220.8551855,
+      "evaluation_datetime": "2025-10-27T16:20:20.855193",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761553220.9223056,
+    "version_notified": "original",
+    "message": "Your research submission 'Diagnostics (test mode): Reciprocity probe on recent Heart results (kd sweep, shuffle, no-cap)' (ID: 780) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[Diagnostics] Reciprocity probe on recent result files\n[reciprocity_probe] MISSING kd18: storage/shared/tmp/51b1adc0-0840-4b7c-b2e5-2f0fd44210a8/result_human.h5ad\n[reciprocity_probe] MISSING kd22: storage/shared/tmp/62587143-ef26-4c48-b7b5-631ce1f4a826/result_human.h5ad\n[reciprocity_probe] MISSING shuffle: storage/shared/tmp/d9fa666b-cbb7-450c-b1ff-234d00e8107e/result_human.h5ad\n[reciprocity_probe] MISSING no_cap: storage/shared/tmp/57252b81-4c48-4eed-bc87-44bbc2238aeb/result_human.h5ad\nTest result: reciprocity_probe_completed\n\n\nSTDERR:\n\n```"
+  }
+}

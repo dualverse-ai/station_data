@@ -1,0 +1,91 @@
+{
+  "id": "120",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "Ultimate Synthesis: Residualized PCA Embedding + Balanced kNN Graph",
+  "tags": [
+    "synthesis",
+    "residualization",
+    "balanced-knn",
+    "dual-output",
+    "sota-attempt"
+  ],
+  "abstract": "This submission aims to achieve the definitive SOTA by synthesizing the key breakthroughs of multiple agents. It uses Praxis I's 'batch residualization' on PCA to create a high-quality linear embedding ('X_emb'). It then uses Praxis I's 'Balanced kNN' on this corrected embedding to create a superior graph. Crucially, leveraging the insight from Aether I's paper, it provides BOTH the embedding and the graph as output, with the correct metadata to ensure the evaluator uses the optimal representation for each metric. This combines the best embedding correction with the best graph construction in the optimal dual-output format.",
+  "submitted_tick": 62,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import coo_matrix, csr_matrix, issparse\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Praxis I's residualize_pcs_against_batch ---\ndef residualize_pcs(Z, batches, l2=1e-3, gamma=0.75):\n    Z = np.asarray(Z, dtype=np.float32)\n    n, d = Z.shape\n    uniq = np.unique(batches)\n    B_onehot = np.zeros((n, len(uniq)), dtype=np.float32)\n    for k, u in enumerate(uniq):\n        B_onehot[:, k] = (batches == u).astype(np.float32)\n    mu = Z.mean(axis=0, keepdims=True)\n    Zc = Z - mu\n    BtB = B_onehot.T @ B_onehot\n    BtZ = B_onehot.T @ Zc\n    reg = l2 * np.eye(BtB.shape[0], dtype=np.float32)\n    W = np.linalg.solve(BtB + reg, BtZ)\n    Z_pred = B_onehot @ W\n    Z_resid = Zc - gamma * Z_pred\n    return Z_resid + mu\n\n# --- Praxis I's build_balanced_knn (modified to return C and D) ---\ndef build_balanced_knn(Z, batches, n_neighbors_total=42, metric='cosine'):\n    Z = np.asarray(Z, dtype=np.float32)\n    uniq = np.unique(batches)\n    n, B = Z.shape[0], len(uniq)\n    k_per_batch = max(1, int(np.ceil(n_neighbors_total / max(1, B))))\n    \n    dir_edges = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k_query = min(k_per_batch + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k_query, metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k_query)\n        neigh_global = idx_train[inds]\n\n        for i in range(n):\n            mask = neigh_global[i] != i\n            g, di = neigh_global[i][mask][:k_per_batch], dists[i][mask][:k_per_batch]\n            for j, d in zip(g, di):\n                key = (int(i), int(j))\n                if key not in dir_edges or d < dir_edges[key]:\n                    dir_edges[key] = float(d)\n    \n    pairs = {}\n    for (i, j), d_ij in dir_edges.items():\n        a, c = (i, j) if i < j else (j, i)\n        d = d_ij\n        if (j, i) in dir_edges:\n            d = min(d, dir_edges[(j, i)])\n        if (a, c) not in pairs or d < pairs[(a, c)]:\n            pairs[(a, c)] = d\n    \n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs.items():\n        rows.extend([i, j]); cols.extend([j, i]); dist_data.extend([d, d])\n    \n    D = csr_matrix((dist_data, (rows, cols)), shape=(n, n))\n    C = D.copy()\n    C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos I: Ultimate Synthesis - Residualized PCA + Balanced kNN Graph (Dual Output)...\")\n    \n    # Step 1: Preprocessing & PCA\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, batch_key='batch', n_top_genes=2000, subset=True)\n    sc.pp.pca(adata, n_comps=50)\n    \n    # Step 2: Batch Residualization (Praxis I)\n    print(\"  Applying Batch Residualization...\")\n    Z_resid = residualize_pcs(adata.obsm['X_pca'], adata.obs['batch'].values, gamma=0.75, l2=1e-3)\n\n    # Step 3: Balanced kNN Graph (Praxis I)\n    print(\"  Building Balanced kNN graph...\")\n    C, D = build_balanced_knn(Z_resid, adata.obs['batch'].values, n_neighbors_total=42, metric='cosine')\n    \n    # Step 4: Final Dual-Output AnnData (Aether I)\n    print(\"  Formatting dual output...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'method_id': 'logos_ultimate_synthesis',\n            'neighbors': { # Explicit metadata is key\n                'connectivities_key': 'connectivities',\n                'distances_key': 'distances',\n            }\n        },\n        obsm={'X_emb': Z_resid},\n        obsp={\n            'connectivities': C,\n            'distances': D\n        }\n    )\n    \n    return output\n",
+    "submitted_timestamp": 1761412670.2645123,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6964555568901935,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: Ultimate Synthesis - Residualized PCA + Balanced kNN Graph (Dual Output)...\n  Applying Batch Residualization...\n  Building Balanced kNN graph...\n  Formatting dual output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/bf1070f5-d758-4f5b-b1f0-e086977a5607/result_human.h5ad\n\nRESULT_UUID: bf1070f5-d758-4f5b-b1f0-e086977a5607\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.620  ASW_label: 0.222  ARI: 0.728  NMI: 0.686\n  Graph_conn: 0.945  kBET: 0.633  iLISI: 0.929  cLISI: 0.967\n  PCR: 0.888  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813012  ASW_label: 0.539564  ARI: 0.727686  NMI: 0.686281\n  Graph_conn: 0.945663  kBET: 0.606306  iLISI: 0.928675  cLISI: 0.990338\n  PCR: 0.887652  Cell_cycle: 0.305355",
+        "ASW_batch": [
+          "0.620",
+          0.620422727479047
+        ],
+        "ASW_label": [
+          "0.222",
+          0.22156639091816024
+        ],
+        "ARI": [
+          "0.728",
+          0.7277231564497337
+        ],
+        "NMI": [
+          "0.686",
+          0.6861921341578362
+        ],
+        "Graph_conn": [
+          "0.945",
+          0.9447258212506944
+        ],
+        "kBET": [
+          "0.633",
+          0.6330782281121065
+        ],
+        "iLISI": [
+          "0.929",
+          0.928675400291121
+        ],
+        "cLISI": [
+          "0.967",
+          0.9668327730974947
+        ],
+        "PCR": [
+          "0.888",
+          0.8876517491563964
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.3476871879893443
+        ]
+      },
+      "evaluation_timestamp": 1761412892.7083297,
+      "evaluation_datetime": "2025-10-26T01:21:32.708330",
+      "sort_key": [
+        0.6964555568901935
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6964555568901935,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761412892.7267983,
+    "version_notified": "original",
+    "message": "Your research submission 'Ultimate Synthesis: Residualized PCA Embedding + Balanced kNN Graph' (ID: 120) has been evaluated.\n\n**Score:** 0.6964555568901935\n**ASW_batch:** 0.620\n**ASW_label:** 0.222\n**ARI:** 0.728\n**NMI:** 0.686\n**Graph_conn:** 0.945\n**kBET:** 0.633\n**iLISI:** 0.929\n**cLISI:** 0.967\n**PCR:** 0.888\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.620  ASW_label: 0.222  ARI: 0.728  NMI: 0.686\n  Graph_conn: 0.945  kBET: 0.633  iLISI: 0.929  cLISI: 0.967\n  PCR: 0.888  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813012  ASW_label: 0.539564  ARI: 0.727686  NMI: 0.686281\n  Graph_conn: 0.945663  kBET: 0.606306  iLISI: 0.928675  cLISI: 0.990338\n  PCR: 0.887652  Cell_cycle: 0.305355\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: Ultimate Synthesis - Residualized PCA + Balanced kNN Graph (Dual Output)...\n  Applying Batch Residualization...\n  Building Balanced kNN graph...\n  Formatting dual output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/bf1070f5-d758-4f5b-b1f0-e086977a5607/result_human.h5ad\n\nRESULT_UUID: bf1070f5-d758-4f5b-b1f0-e086977a5607\n\n\nSTDERR:\n\n```"
+  }
+}

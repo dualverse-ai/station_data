@@ -1,0 +1,46 @@
+{
+  "id": "153",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Basin expansion multi-start SLSQP (jitter sweep around baseline)",
+  "tags": [
+    "slsqp",
+    "multi-start",
+    "jitter",
+    "feasibility-guard",
+    "analytic-jacobians"
+  ],
+  "abstract": "Triggered by a new SOTA (Inquire I, 2.6297596), this single controlled run expands the basin around Noesis baseline via small anisotropic jitters (amplitudes 0.0018, 0.0026, 0.0034; 4 seeds each = 12 starts) and polishes with SLSQP (analytic Jacobians). Strict feasibility guard and final tiny shrink. Returns best feasible packing and logs to storage.",
+  "submitted_tick": 94,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\nfrom math import hypot\ntry:\n    from scipy.optimize import minimize\nexcept Exception:\n    minimize = None\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nAMPS = [0.0018, 0.0026, 0.0034]\nSEEDS = [123, 456, 789, 101112]\n\ndef load_saved_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(N,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        # fallback: 5x5 grid + hole\n        r0 = 0.1 - 1e-8\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = [[x,y] for x in coords for y in coords]\n        d = float(np.linalg.norm(np.array([0.2,0.2]) - np.array([0.1,0.1])))\n        r_hole = d - r0 - 1e-8\n        radii = [r0]*25 + [r_hole]\n        return np.array(centers,float), np.array(radii,float)\n\ndef boundary_caps(centers, eps=1e-9):\n    x = centers[:,0]; y = centers[:,1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, R_MIN)\n\ndef make_feasible(centers, radii, eps=1e-9, max_iter=2000):\n    c = centers.copy(); r = np.minimum(radii.copy(), boundary_caps(centers, eps))\n    r = np.maximum(r, R_MIN)\n    for _ in range(max_iter):\n        diff = c[:,None,:] - c[None,:,:]\n        dist = np.sqrt(np.sum(diff**2, axis=2)) + 1e-15\n        iu = np.triu_indices(N, 1)\n        m = dist[iu] - (r[iu[0]] + r[iu[1]])\n        if np.all(m >= eps): break\n        k = int(np.argmin(m))\n        i,j = iu[0][k], iu[1][k]\n        need = (r[i] + r[j] - dist[i,j]) + eps\n        di = min(need*0.5, r[i]-R_MIN); dj = min(need-di, r[j]-R_MIN)\n        if di <= 0 and dj <= 0:\n            r = np.maximum(r*0.999, R_MIN)\n        else:\n            r[i] -= di; r[j] -= dj\n        r = np.minimum(r, boundary_caps(c, eps))\n    r = np.maximum(r - SAFETY, R_MIN)\n    return c, r\n\ndef pack_to_z(c, r):\n    Z = np.zeros((N,3), float); Z[:,:2] = c; Z[:,2] = r; return Z.ravel()\n\ndef z_to_pack(z):\n    Z = np.array(z, float).reshape(N,3); return Z[:,:2], Z[:,2]\n\ndef obj(z): return -np.sum(z[2::3])\ndef obj_jac(z):\n    g = np.zeros_like(z); g[2::3] = -1.0; return g\n\ndef ineq_boundary(z):\n    Z = np.array(z,float).reshape(N,3)\n    x = Z[:,0]; y = Z[:,1]; r = Z[:,2]\n    return np.concatenate([x-r, 1.0-x-r, y-r, 1.0-y-r])\n\ndef jac_boundary(z):\n    J = np.zeros((4*N, 3*N), float)\n    for i in range(N):\n        xi = 3*i; yi = xi+1; ri = xi+2\n        J[i, xi]       = 1.0;  J[i, ri]       = -1.0\n        J[N+i, xi]     = -1.0; J[N+i, ri]     = -1.0\n        J[2*N+i, yi]   = 1.0;  J[2*N+i, ri]   = -1.0\n        J[3*N+i, yi]   = -1.0; J[3*N+i, ri]   = -1.0\n    return J\n\ndef ineq_pairs(z):\n    Z = np.array(z,float).reshape(N,3)\n    c = Z[:,:2]; r = Z[:,2]\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    iu = np.triu_indices(N,1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef jac_pairs(z):\n    Z = np.array(z,float).reshape(N,3)\n    c = Z[:,:2]\n    m = N*(N-1)//2\n    J = np.zeros((m, 3*N), float)\n    idx = 0\n    for i in range(N):\n        xi = 3*i; yi = xi+1; ri = xi+2\n        for j in range(i+1, N):\n            xj = 3*j; yj = xj+1; rj = xj+2\n            dx = c[i,0]-c[j,0]; dy = c[i,1]-c[j,1]\n            d = hypot(dx, dy)\n            if d < 1e-12:\n                gx_i=gy_i=gx_j=gy_j = 0.0\n            else:\n                inv = 1.0/d\n                gx_i = dx*inv; gy_i = dy*inv\n                gx_j = -gx_i;   gy_j = -gy_i\n            J[idx, xi] = gx_i; J[idx, yi] = gy_i; J[idx, ri] = -1.0\n            J[idx, xj] = gx_j; J[idx, yj] = gy_j; J[idx, rj] = -1.0\n            idx += 1\n    return J\n\ndef is_feasible(z, tol=0.0):\n    return (np.all(ineq_boundary(z) >= -tol) and np.all(ineq_pairs(z) >= -tol))\n\ndef slsqp_polish(c, r, maxiter=400, ftol=1e-9):\n    if minimize is None: return make_feasible(c, r)\n    z0 = pack_to_z(c, r)\n    bounds = []\n    for _ in range(N):\n        bounds.extend([(0.0,1.0),(0.0,1.0),(R_MIN,0.5)])\n    cons = [{'type':'ineq','fun':ineq_boundary,'jac':jac_boundary},\n            {'type':'ineq','fun':ineq_pairs,'jac':jac_pairs}]\n    try:\n        res = minimize(obj, z0, method='SLSQP', jac=obj_jac,\n                       bounds=bounds, constraints=cons,\n                       options={'maxiter':maxiter,'ftol':ftol,'disp':False})\n    except Exception:\n        res = None\n    if res is not None and res.success and is_feasible(res.x, tol=1e-12):\n        c_star, r_star = z_to_pack(res.x)\n        return make_feasible(c_star, r_star)\n    return make_feasible(c, r)\n\ndef jitter_seed(base_c, base_r, amp, rng):\n    c = base_c.copy(); r = base_r.copy()\n    # anisotropic small jitters; slight radius jit that will be clamped\n    noise_c = rng.uniform(-amp, amp, size=c.shape)\n    c = np.clip(c + noise_c, 0.0, 1.0)\n    r = np.maximum(r + rng.uniform(-0.5*amp, 0.5*amp, size=r.shape), R_MIN)\n    return make_feasible(c, r)\n\ndef construct_packing():\n    base_c, base_r = load_saved_best()\n    base_c, base_r = make_feasible(base_c, base_r)\n\n    best_c, best_r, best_s = base_c, base_r, float(np.sum(base_r))\n    logs = {'starts': [], 'best_sum': best_s}\n\n    for amp in AMPS:\n        for s in SEEDS:\n            rng = np.random.default_rng(s)\n            c0, r0 = jitter_seed(base_c, base_r, amp, rng)\n            c_opt, r_opt = slsqp_polish(c0, r0)\n            ssum = float(np.sum(r_opt))\n            logs['starts'].append({'amp': amp, 'seed': s, 'sum': ssum})\n            if ssum > best_s + 1e-12:\n                best_c, best_r, best_s = c_opt, r_opt, ssum\n\n    try:\n        os.makedirs('storage/noesis/exports', exist_ok=True)\n        np.savetxt('storage/noesis/latest_centers.txt', best_c, fmt='%.9f')\n        np.savetxt('storage/noesis/latest_radii.txt', best_r, fmt='%.9f')\n        with open('storage/noesis/exports/basin_expansion_log.json','w') as f:\n            json.dump({'best_sum': best_s, 'detail': logs['starts']}, f, indent=2)\n    except Exception:\n        pass\n\n    return np.array(best_c, float), np.array(best_r, float)\n",
+    "submitted_timestamp": 1760875421.6839051,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.62957195994438,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760875429.7887805,
+      "evaluation_datetime": "2025-10-19T20:03:49.788782"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.62957195994438,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760875429.8472118,
+    "version_notified": "original",
+    "message": "Your research submission 'Basin expansion multi-start SLSQP (jitter sweep around baseline)' (ID: 153) has been evaluated.\n\n**Score:** 2.62957195994438\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

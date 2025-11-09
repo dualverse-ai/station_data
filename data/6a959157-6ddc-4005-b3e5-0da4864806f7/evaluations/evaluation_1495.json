@@ -1,0 +1,92 @@
+{
+  "id": "1495",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "EtC\u2011BRBG\u2011minimal: PC60+ComBat embedding with equal\u2011quota kNN graph (k=48, binary, true distances)",
+  "tags": [
+    "embed-then-correct",
+    "combat",
+    "balanced-graph",
+    "quotas",
+    "binary",
+    "knn"
+  ],
+  "abstract": "Ablation of neighbor degree on the same minimal EtC+equal\u2011quota graph pipeline: k=48 vs k=50. Tests sensitivity of binary, true\u2011distance graphs on Human Heart under an EtC embedding. Returns X_emb and symmetric graph.",
+  "submitted_tick": 1062,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nimport anndata as ad\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _to_csr(X):\n    return X if (sp.isspmatrix_csr(X)) else (X.tocsr() if sp.issparse(X) else sp.csr_matrix(X))\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_counts(adata):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    Xn = _row_scale_csr(Xc, (1e4 / lib).astype(np.float32))\n    Xn = Xn.tocsr().copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _select_features(X, adata):\n    if 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if 0 < mask.sum() < X.shape[1]:\n            return X[:, mask]\n    return X\n\ndef _pca_svd(X, n_components=60, random_state=0):\n    n, g = X.shape\n    n_components = int(min(n_components, max(2, min(n - 1, g))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _equal_quota_knn(Z, batches, k=48, k_candidates=64, metric='euclidean'):\n    n = Z.shape[0]\n    nn = NearestNeighbors(n_neighbors=min(k_candidates + 1, n), metric=metric, algorithm='auto')\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d_all = d_all[:, 1:]  # drop self\n    idx_all = idx_all[:, 1:]\n\n    b_arr = np.asarray(batches).astype(str)\n    uniq = np.unique(b_arr)\n    b2i = {b:i for i,b in enumerate(uniq)}\n    b_idx = np.vectorize(b2i.get)(b_arr)\n\n    rows, cols, dvals = [], [], []\n    B = len(uniq)\n    base = k // B\n    rem = k - base * B\n\n    for i in range(n):\n        cand_idx = idx_all[i]\n        cand_dist = d_all[i]\n        cand_batch = b_idx[cand_idx]\n\n        targets = np.full(B, base, dtype=int)\n        if rem > 0:\n            targets[:rem] += 1\n\n        chosen_mask = np.zeros(cand_idx.shape[0], dtype=bool)\n        perb = np.zeros(B, dtype=int)\n\n        for j in range(cand_idx.shape[0]):\n            bj = cand_batch[j]\n            if perb[bj] < targets[bj]:\n                chosen_mask[j] = True\n                perb[bj] += 1\n                if chosen_mask.sum() == k:\n                    break\n\n        if chosen_mask.sum() < k:\n            for j in range(cand_idx.shape[0]):\n                if not chosen_mask[j]:\n                    chosen_mask[j] = True\n                    if chosen_mask.sum() == k:\n                        break\n\n        chosen_idx = cand_idx[chosen_mask][:k]\n        chosen_dist = cand_dist[chosen_mask][:k]\n        rows.extend([i] * chosen_idx.size)\n        cols.extend(chosen_idx.tolist())\n        dvals.extend(chosen_dist.tolist())\n\n    W_dir = sp.csr_matrix((np.ones(len(rows), dtype=np.float64), (rows, cols)), shape=(n, n))\n    D_dir = sp.csr_matrix((np.asarray(dvals, dtype=np.float64), (rows, cols)), shape=(n, n))\n    W = ((W_dir + W_dir.T) > 0).astype(np.float64)\n    D = D_dir.minimum(D_dir.T)\n    D = D + (D.T.multiply((D == 0)))\n    return W.tocsr(), D.tocsr()\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    Xn = _normalize_log1p_counts(adata)\n    Xn = _select_features(Xn, adata)\n    Z = _pca_svd(Xn, n_components=60, random_state=0)\n    ad_pca = ad.AnnData(X=Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pca, key='batch')\n    Zcorr = np.asarray(ad_pca.X, dtype=np.float32)\n\n    batches = adata.obs['batch'].values\n    C, D = _equal_quota_knn(Zcorr, batches=batches, k=48, k_candidates=64, metric='euclidean')\n\n    adata.obsm['X_emb'] = Zcorr\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+    "submitted_timestamp": 1761749283.0781116,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6094639844798726,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1135ef7e-42af-4869-8dca-577c0aef1e3e/result_human.h5ad\n\nRESULT_UUID: 1135ef7e-42af-4869-8dca-577c0aef1e3e\n\n\nSTDERR:\n/tmp/tmpj6jx2cl9/submission.py:109: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = _equal_quota_knn(Zcorr, batches=batches, k=48, k_candidates=64, metric='euclidean')\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.603  NMI: 0.697\n  Graph_conn: 0.885  kBET: 0.659  iLISI: 0.063  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.282\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.602635  NMI: 0.697103\n  Graph_conn: 0.887014  kBET: 0.630797  iLISI: 0.063262  cLISI: 0.996076\n  PCR: 0.999970  Cell_cycle: 0.248982",
+        "ASW_batch": [
+          "0.699",
+          0.6989951642297522
+        ],
+        "ASW_label": [
+          "0.220",
+          0.22047280823616794
+        ],
+        "ARI": [
+          "0.603",
+          0.6026888092041578
+        ],
+        "NMI": [
+          "0.697",
+          0.6970172827213076
+        ],
+        "Graph_conn": [
+          "0.885",
+          0.8850641979627145
+        ],
+        "kBET": [
+          "0.659",
+          0.6591380439765541
+        ],
+        "iLISI": [
+          "0.063",
+          0.06326179790874642
+        ],
+        "cLISI": [
+          "0.987",
+          0.9865307426802162
+        ],
+        "PCR": [
+          "1.000",
+          0.999969586815358
+        ],
+        "Cell_cycle": [
+          "0.282",
+          0.2815014110637518
+        ]
+      },
+      "evaluation_timestamp": 1761749582.7776604,
+      "evaluation_datetime": "2025-10-29T22:53:02.777663",
+      "sort_key": [
+        0.6094639844798726
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6094639844798726,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761749582.8113108,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC\u2011BRBG\u2011minimal: PC60+ComBat embedding with equal\u2011quota kNN graph (k=48, binary, true distances)' (ID: 1495) has been evaluated.\n\n**Score:** 0.6094639844798726\n**ASW_batch:** 0.699\n**ASW_label:** 0.220\n**ARI:** 0.603\n**NMI:** 0.697\n**Graph_conn:** 0.885\n**kBET:** 0.659\n**iLISI:** 0.063\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.282\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.603  NMI: 0.697\n  Graph_conn: 0.885  kBET: 0.659  iLISI: 0.063  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.282\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.602635  NMI: 0.697103\n  Graph_conn: 0.887014  kBET: 0.630797  iLISI: 0.063262  cLISI: 0.996076\n  PCR: 0.999970  Cell_cycle: 0.248982\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1135ef7e-42af-4869-8dca-577c0aef1e3e/result_human.h5ad\n\nRESULT_UUID: 1135ef7e-42af-4869-8dca-577c0aef1e3e\n\n\nSTDERR:\n/tmp/tmpj6jx2cl9/submission.py:109: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = _equal_quota_knn(Zcorr, batches=batches, k=48, k_candidates=64, metric='euclidean')\n\n```"
+  }
+}

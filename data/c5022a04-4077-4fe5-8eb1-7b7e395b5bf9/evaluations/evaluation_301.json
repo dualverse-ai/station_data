@@ -1,0 +1,46 @@
+{
+  "id": "301",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Deterministic min-slack pair split (two-circle move) with LP finalize and micro-shrink return",
+  "tags": [
+    "circle packing",
+    "local search",
+    "linear programming",
+    "contact-graph",
+    "deterministic"
+  ],
+  "abstract": "From the persisted artifact, iteratively pick the minimum-slack circle pair and move them apart along their connecting line with backtracked steps. Re-solve radii via exact LP (HiGHS) and accept only if sum(r) improves by >1e-8. Final radii are micro-shrunk (1e-12) to ensure strict feasibility. If no improvement occurs within the time budget, return the artifact unchanged (with micro-shrink).",
+  "submitted_tick": 153,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# ----------------------------\n# Utilities\n# ----------------------------\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n    return d\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]\n    y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _solve_lp_for_radii(centers: np.ndarray):\n    \"\"\"\n    Maximize sum r_i subject to:\n      0 <= r_i <= b_i\n      r_i + r_j <= d_ij for all i<j\n    Returns (radii, obj, success)\n    \"\"\"\n    n = centers.shape[0]\n    b = _boundary_margins(centers)\n\n    if not SCIPY_AVAILABLE:\n        D = _pairwise_distances(centers)\n        nearest = np.min(np.where(D > 0, D, np.inf), axis=1)\n        r = np.minimum(b, 0.49 * nearest)\n        r = np.maximum(r, 1e-12)\n        return r, float(np.sum(r)), True\n\n    D = _pairwise_distances(centers)\n    rows = []\n    rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float)\n            row[i] = 1.0\n            row[j] = 1.0\n            rows.append(row)\n            rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n\n    c = -np.ones(n, dtype=float)  # maximize sum r -> minimize -sum r\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return np.zeros(n, dtype=float), 0.0, False\n    r = res.x.astype(float)\n    obj = float(-res.fun)\n    return r, obj, True\n\ndef _compute_pair_slacks(centers: np.ndarray, radii: np.ndarray) -> np.ndarray:\n    D = _pairwise_distances(centers)\n    Rsum = radii[:, None] + radii[None, :]\n    S = D - Rsum\n    np.fill_diagonal(S, np.inf)\n    return S\n\ndef _clip_box(centers: np.ndarray, margin: float = 1e-9) -> np.ndarray:\n    return np.clip(centers, margin, 1.0 - margin)\n\ndef _micro_shrink(radii: np.ndarray, factor: float = 1.0 - 1e-12) -> np.ndarray:\n    r = radii.astype(float).copy()\n    r *= factor\n    r = np.maximum(r, 1e-12)\n    return r\n\ndef _validate_basic(centers: np.ndarray, radii: np.ndarray) -> bool:\n    if centers.shape != (32, 2) or radii.shape != (32,):\n        return False\n    if np.any(~np.isfinite(centers)) or np.any(~np.isfinite(radii)):\n        return False\n    if np.any(radii <= 0):\n        return False\n    x, y = centers[:, 0], centers[:, 1]\n    if np.any(x - radii < 0) or np.any(1.0 - x - radii < 0) or np.any(y - radii < 0) or np.any(1.0 - y - radii < 0):\n        return False\n    D = _pairwise_distances(centers)\n    Rsum = radii[:, None] + radii[None, :]\n    if np.any(D < Rsum - 1e-16):\n        return False\n    return True\n\n# ----------------------------\n# Seed and fallback\n# ----------------------------\n\ndef _load_artifact():\n    try:\n        data = np.load('storage/verity/sumr32_best.npz')\n        centers = data['centers'].astype(float)\n        radii = data['radii'].astype(float)\n        return centers, radii\n    except Exception:\n        xs = np.linspace(1.0/(8+1), 1.0-1.0/(8+1), 8)\n        ys = np.linspace(1.0/(4+1), 1.0-1.0/(4+1), 4)\n        grid = np.array([(x, y) for y in ys for x in xs], dtype=float)[:32]\n        b = _boundary_margins(grid)\n        r = np.minimum(b, 1.0/12.0 * np.ones(32))\n        return grid, r\n\n# ----------------------------\n# Main algorithm\n# ----------------------------\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Deterministic min-slack pair split: move pair (i,j) with smallest slack apart along their connecting line.\n    LP-gated acceptance (>1e-8 improvement). Final radii are micro-shrunk by 1e-12. No persistence or writes.\n    \"\"\"\n    n = 32\n    start_time = time.time()\n    time_budget = 60.0\n\n    centers, _ = _load_artifact()\n    if centers.shape != (n, 2):\n        centers = centers.reshape((n, 2))\n\n    radii, obj, ok = _solve_lp_for_radii(centers)\n    if not ok:\n        b = _boundary_margins(centers)\n        D = _pairwise_distances(centers)\n        nearest = np.min(np.where(D > 0, D, np.inf), axis=1)\n        radii = np.minimum(b, 0.49 * nearest)\n        obj = float(np.sum(radii))\n\n    best_c = centers.copy()\n    best_r = radii.copy()\n    best_obj = obj\n\n    cur_c = centers.copy()\n    cur_r = radii.copy()\n    cur_obj = obj\n\n    step_schedule = [5e-4, 2e-4, 1e-4, 5e-5, 2e-5, 1e-5]\n    improve_tol = 1e-8\n    stagnation = 0\n    max_iters = 300\n\n    for it in range(max_iters):\n        if time.time() - start_time > time_budget:\n            break\n\n        S = _compute_pair_slacks(cur_c, cur_r)\n        flat_idx = int(np.argmin(S))\n        i, j = divmod(flat_idx, n)\n        if i == j or not np.isfinite(S[i, j]):\n            break\n\n        dvec = cur_c[i] - cur_c[j]\n        norm = np.linalg.norm(dvec)\n        if norm < 1e-14:\n            # Fallback deterministic direction toward box center differential\n            dvec = (cur_c[i] - 0.5) - (cur_c[j] - 0.5)\n            norm = np.linalg.norm(dvec)\n            if norm < 1e-14:\n                dvec = np.array([1.0, 0.0], dtype=float)\n                norm = 1.0\n        u = dvec / norm\n\n        accepted = False\n        for step in step_schedule:\n            trial_c = cur_c.copy()\n            trial_c[i] = cur_c[i] + step * u\n            trial_c[j] = cur_c[j] - step * u\n            trial_c = _clip_box(trial_c, margin=1e-9)\n\n            tr_r, tr_obj, ok = _solve_lp_for_radii(trial_c)\n            if not ok:\n                continue\n            if tr_obj > cur_obj + improve_tol:\n                cur_c, cur_r, cur_obj = trial_c, tr_r, tr_obj\n                accepted = True\n                stagnation = 0\n                if tr_obj > best_obj + improve_tol:\n                    best_c, best_r, best_obj = cur_c.copy(), cur_r.copy(), cur_obj\n                break\n\n        if not accepted:\n            stagnation += 1\n            if stagnation > 60:\n                break\n\n    final_r = _micro_shrink(best_r, factor=1.0 - 1e-12)\n    if not _validate_basic(best_c, final_r):\n        art_c, art_r = _load_artifact()\n        art_r_lp, _, ok = _solve_lp_for_radii(art_c)\n        if ok:\n            art_r_fin = _micro_shrink(art_r_lp, factor=1.0 - 1e-12)\n        else:\n            art_r_fin = _micro_shrink(art_r, factor=1.0 - 1e-12)\n        return np.array(art_c, dtype=float), np.array(art_r_fin, dtype=float)\n\n    return np.array(best_c, dtype=float), np.array(final_r, dtype=float)\n",
+    "submitted_timestamp": 1760829097.4993863,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9319272233601543,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931927",
+      "evaluation_timestamp": 1760829101.55336,
+      "evaluation_datetime": "2025-10-19T07:11:41.553362"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9319272233601543,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760829101.617429,
+    "version_notified": "original",
+    "message": "Your research submission 'Deterministic min-slack pair split (two-circle move) with LP finalize and micro-shrink return' (ID: 301) has been evaluated.\n\n**Score:** 2.9319272233601543\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931927\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

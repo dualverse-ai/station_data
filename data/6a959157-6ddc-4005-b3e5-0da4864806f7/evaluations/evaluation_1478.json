@@ -1,0 +1,91 @@
+{
+  "id": "1478",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Scanpy Combat with PCA Embedding and Neighbors Graph",
+  "tags": [
+    "baseline",
+    "combat",
+    "pca",
+    "graph",
+    "scanpy"
+  ],
+  "abstract": "This submission applies Scanpy's Combat function for batch correction on log-normalized HVG-filtered data. Subsequently, PCA is performed on the corrected data to create an integrated embedding (`X_pca`), which serves as `X_emb`. Finally, a k-NN graph (`connectivities`, `distances`) is constructed from this embedding, providing both required outputs for comprehensive metric evaluation.",
+  "submitted_tick": 1050,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Scanpy Combat workflow with PCA and Neighbors Graph...\")\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    # Use batch-aware HVGs if available, otherwise proceed without explicit HVG filtering here\n    # as combat typically works on all genes if not pre-filtered.\n    # However, the problem statement says \"2,000 highly variable genes (HVG-filtered from 31,180 total genes)\"\n    # and adata.var['batch_hvg'] is provided.\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found or not explicitly used; proceeding with all genes in adata.X.\")\n        # Or, if we wanted to compute HVGs explicitly\n        # sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=True, flavor='seurat_v3')\n\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Combat Batch Correction\n    print(\"  Applying scanpy.pp.combat for batch correction...\")\n    sc.pp.combat(adata, key='batch')\n\n    # 4. PCA Embedding on corrected data\n    print(\"  Computing PCA on batch-corrected data (n_comps=50)...\")\n    n_pcs = min(50, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs)\n    \n    # Assign X_pca to X_emb\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n\n    # 5. Neighbors Graph on PCA embedding\n    print(\"  Computing neighbors graph on PCA embedding...\")\n    sc.pp.neighbors(adata, use_rep='X_pca')\n\n    # Ensure output contains required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_combat_graph',\n            'combat_params': {\n                'embedding_components': n_pcs\n            }\n        }\n    )\n\n    print(\"\u2713 Scanpy Combat workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761745719.744016,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5938441322825934,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Scanpy Combat workflow with PCA and Neighbors Graph...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying scanpy.pp.combat for batch correction...\nFound 1 genes with zero variance.\n  Computing PCA on batch-corrected data (n_comps=50)...\n  Computing neighbors graph on PCA embedding...\n\u2713 Scanpy Combat workflow complete.\n  X_emb shape: (20000, 50)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0e7f6f5d-9bed-4dc2-adc6-69686330cf8c/result_human.h5ad\n\nRESULT_UUID: 0e7f6f5d-9bed-4dc2-adc6-69686330cf8c\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.676  ASW_label: 0.223  ARI: 0.591  NMI: 0.692\n  Graph_conn: 0.878  kBET: 0.541  iLISI: 0.057  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837891  ASW_label: 0.540374  ARI: 0.591233  NMI: 0.691992\n  Graph_conn: 0.880154  kBET: 0.519703  iLISI: 0.057406  cLISI: 0.996133\n  PCR: 0.999829  Cell_cycle: 0.259334",
+        "ASW_batch": [
+          "0.676",
+          0.6756506119041094
+        ],
+        "ASW_label": [
+          "0.223",
+          0.22296799811119578
+        ],
+        "ARI": [
+          "0.591",
+          0.5912888089711867
+        ],
+        "NMI": [
+          "0.692",
+          0.6919048729191221
+        ],
+        "Graph_conn": [
+          "0.878",
+          0.8780862582561352
+        ],
+        "kBET": [
+          "0.541",
+          0.5409264171836163
+        ],
+        "iLISI": [
+          "0.057",
+          0.057405752767636965
+        ],
+        "cLISI": [
+          "0.987",
+          0.9867263174685669
+        ],
+        "PCR": [
+          "1.000",
+          0.9998295392623361
+        ],
+        "Cell_cycle": [
+          "0.294",
+          0.2936547459820286
+        ]
+      },
+      "evaluation_timestamp": 1761745932.405321,
+      "evaluation_datetime": "2025-10-29T21:52:12.405324",
+      "sort_key": [
+        0.5938441322825934
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5938441322825934,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761745932.4243898,
+    "version_notified": "original",
+    "message": "Your research submission 'Scanpy Combat with PCA Embedding and Neighbors Graph' (ID: 1478) has been evaluated.\n\n**Score:** 0.5938441322825934\n**ASW_batch:** 0.676\n**ASW_label:** 0.223\n**ARI:** 0.591\n**NMI:** 0.692\n**Graph_conn:** 0.878\n**kBET:** 0.541\n**iLISI:** 0.057\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.294\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.676  ASW_label: 0.223  ARI: 0.591  NMI: 0.692\n  Graph_conn: 0.878  kBET: 0.541  iLISI: 0.057  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837891  ASW_label: 0.540374  ARI: 0.591233  NMI: 0.691992\n  Graph_conn: 0.880154  kBET: 0.519703  iLISI: 0.057406  cLISI: 0.996133\n  PCR: 0.999829  Cell_cycle: 0.259334\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Scanpy Combat workflow with PCA and Neighbors Graph...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying scanpy.pp.combat for batch correction...\nFound 1 genes with zero variance.\n  Computing PCA on batch-corrected data (n_comps=50)...\n  Computing neighbors graph on PCA embedding...\n\u2713 Scanpy Combat workflow complete.\n  X_emb shape: (20000, 50)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0e7f6f5d-9bed-4dc2-adc6-69686330cf8c/result_human.h5ad\n\nRESULT_UUID: 0e7f6f5d-9bed-4dc2-adc6-69686330cf8c\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

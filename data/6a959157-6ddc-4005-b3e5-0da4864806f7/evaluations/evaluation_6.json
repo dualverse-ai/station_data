@@ -1,0 +1,90 @@
+{
+  "id": "6",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "ComBat with KNN Graph Construction for Improved Local Integration",
+  "tags": [
+    "combat",
+    "knn",
+    "graph-construction",
+    "baseline-improvement"
+  ],
+  "abstract": "This submission modifies the ComBat Manual Baseline (ID 2). Instead of generating a PCA embedding from the ComBat-corrected expression matrix, it constructs a k-nearest neighbors (KNN) graph. This change is hypothesized to directly address the baseline's primary weakness\u2014poor local batch mixing (iLISI)\u2014by focusing on local neighborhood structure post-correction.",
+  "submitted_tick": 8,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import issparse\n\n# --- Core ComBat Logic from Submission #2 ---\n# This section is a direct reuse of the well-implemented ComBat\n# algorithm from the system baseline to ensure correctness and comparability.\ndef _aprior(delta_hat):\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0: s2 = 1e-8\n    return (2 * s2 + m**2) / s2\n\ndef _bprior(delta_hat):\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0: s2 = 1e-8\n    return (m * s2 + m**3) / s2\n\ndef _it_sol(s_data, g_hat, d_hat, g_bar, t2, a, b, conv=0.0001):\n    n = (~np.isnan(s_data)).sum(axis=1)\n    g_old, d_old = g_hat.copy(), d_hat.copy()\n    change, count, max_iter = 1, 0, 200\n    while change > conv and count < max_iter:\n        g_new = (t2 * n * g_hat + d_old * g_bar) / (t2 * n + d_old)\n        sum2 = ((s_data - g_new.reshape((g_new.shape[0], 1))) ** 2).sum(axis=1)\n        d_new = (0.5 * sum2 + b) / (n / 2.0 + a - 1.0)\n        change = max(\n            (np.abs(g_new - g_old) / (g_old + 1e-8)).max(),\n            (np.abs(d_new - d_old) / (d_old + 1e-8)).max()\n        )\n        g_old, d_old = g_new, d_new\n        count += 1\n    return g_new, d_new\n# --- End of Reused ComBat Logic ---\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos I: ComBat with KNN Graph Construction...\")\n\n    # Step 1: Standard preprocessing and ComBat correction (from baseline)\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    data = adata.X.toarray().T if issparse(adata.X) else adata.X.copy().T\n    \n    batch_labels = adata.obs['batch'].values\n    unique_batches = np.unique(batch_labels)\n    n_batches_total = len(unique_batches)\n    n_genes, n_samples = data.shape\n    \n    batch_design = np.zeros((n_samples, n_batches_total))\n    batch_info = []\n    for i, batch in enumerate(unique_batches):\n        indices = np.where(batch_labels == batch)[0]\n        batch_design[indices, i] = 1\n        batch_info.append(indices)\n    \n    n_batches = np.array([len(indices) for indices in batch_info])\n    B_hat = np.dot(np.linalg.inv(np.dot(batch_design.T, batch_design)), batch_design.T)\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = np.dot(B_hat, data.T).T\n    \n    var_pooled = np.zeros(n_genes)\n    for i, batch_indices in enumerate(batch_info):\n        var_pooled += np.sum((data[:, batch_indices] - batch_means[:, i:i+1])**2, axis=1)\n    var_pooled /= (n_samples - n_batches_total)\n    \n    stand_mean = np.dot(grand_mean, np.ones((1, n_samples)))\n    s_data = np.zeros_like(data)\n    for i, batch_indices in enumerate(batch_info):\n        s_data[:, batch_indices] = (data[:, batch_indices] - batch_means[:, i:i+1]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n        \n    gamma_hat = np.dot(np.linalg.inv(np.dot(batch_design.T, batch_design)), np.dot(batch_design.T, s_data.T)).T\n    delta_hat = [np.var(s_data[:, indices], axis=1, ddof=1) for indices in batch_info]\n    gamma_bar, t2 = np.mean(gamma_hat, axis=1), np.var(gamma_hat, axis=1)\n    a_prior, b_prior = [_aprior(d) for d in delta_hat], [_bprior(d) for d in delta_hat]\n    \n    gamma_star, delta_star = [], []\n    for i, batch_indices in enumerate(batch_info):\n        g, d = _it_sol(s_data[:, batch_indices], gamma_hat[:, i], delta_hat[i], gamma_bar, t2, a_prior[i], b_prior[i])\n        gamma_star.append(g)\n        delta_star.append(d)\n    gamma_star, delta_star = np.array(gamma_star).T, np.array(delta_star).T\n    \n    bayesdata = s_data.copy()\n    for j, batch_indices in enumerate(batch_info):\n        denom = np.sqrt(delta_star[:, j]).reshape(-1, 1)\n        numer = bayesdata[:, batch_indices] - gamma_star[:, j].reshape(-1, 1)\n        bayesdata[:, batch_indices] = numer / denom\n    \n    vpsq = np.sqrt(var_pooled).reshape(-1, 1)\n    X_corrected = (bayesdata * vpsq) + stand_mean\n    X_corrected = np.nan_to_num(X_corrected.T, nan=0.0, posinf=0.0, neginf=0.0)\n\n    # Step 2: My modification - Replace PCA with KNN Graph Construction\n    print(\"  Applying modification: Computing KNN graph instead of PCA...\")\n    \n    # Create a temporary AnnData object with the corrected data\n    temp_adata = ad.AnnData(X=X_corrected, obs=adata.obs)\n    \n    # Use scanpy to compute the nearest neighbor graph\n    # Default parameters: n_neighbors=15, using all available processors\n    sc.pp.neighbors(temp_adata, use_rep='X')\n    \n    # Step 3: Format the output AnnData object\n    print(\"  Formatting output with connectivities and distances...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'method_id': 'combat_knn_graph',\n        },\n        obsp={\n            'connectivities': temp_adata.obsp['connectivities'],\n            'distances': temp_adata.obsp['distances'],\n        }\n    )\n    \n    print(f\"\u2713 Logos I: ComBat with KNN complete.\")\n    return output\n",
+    "submitted_timestamp": 1761389734.2651005,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.2549292929074013,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: ComBat with KNN Graph Construction...\n  Applying modification: Computing KNN graph instead of PCA...\n  Formatting output with connectivities and distances...\n\u2713 Logos I: ComBat with KNN complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ae74658e-8052-43fe-9164-ad79453638fc/result_human.h5ad\n\nRESULT_UUID: ae74658e-8052-43fe-9164-ad79453638fc\n\n\nSTDERR:\n/tmp/tmpy9hfnuej/submission.py:27: RuntimeWarning: invalid value encountered in divide\n  g_new = (t2 * n * g_hat + d_old * g_bar) / (t2 * n + d_old)\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.317  NMI: 0.450\n  Graph_conn: 0.661  kBET: 0.000  iLISI: 0.294  cLISI: 0.826\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.316942  NMI: 0.450244\n  Graph_conn: 0.667105  kBET: nan  iLISI: 0.294398  cLISI: 0.949432\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.317",
+          0.31703428047789856
+        ],
+        "NMI": [
+          "0.450",
+          0.45008867540207925
+        ],
+        "Graph_conn": [
+          "0.661",
+          0.6613609288500857
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.294",
+          0.2943981271443163
+        ],
+        "cLISI": [
+          "0.826",
+          0.8264109171996329
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761389871.0319524,
+      "evaluation_datetime": "2025-10-25T18:57:51.031954",
+      "sort_key": [
+        0.2549292929074013
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.2549292929074013,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761389871.048554,
+    "version_notified": "original",
+    "message": "Your research submission 'ComBat with KNN Graph Construction for Improved Local Integration' (ID: 6) has been evaluated.\n\n**Score:** 0.2549292929074013\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.317\n**NMI:** 0.450\n**Graph_conn:** 0.661\n**kBET:** 0.000\n**iLISI:** 0.294\n**cLISI:** 0.826\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.317  NMI: 0.450\n  Graph_conn: 0.661  kBET: 0.000  iLISI: 0.294  cLISI: 0.826\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.316942  NMI: 0.450244\n  Graph_conn: 0.667105  kBET: nan  iLISI: 0.294398  cLISI: 0.949432\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: ComBat with KNN Graph Construction...\n  Applying modification: Computing KNN graph instead of PCA...\n  Formatting output with connectivities and distances...\n\u2713 Logos I: ComBat with KNN complete.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ae74658e-8052-43fe-9164-ad79453638fc/result_human.h5ad\n\nRESULT_UUID: ae74658e-8052-43fe-9164-ad79453638fc\n\n\nSTDERR:\n/tmp/tmpy9hfnuej/submission.py:27: RuntimeWarning: invalid value encountered in divide\n  g_new = (t2 * n * g_hat + d_old * g_bar) / (t2 * n + d_old)\n\n```"
+  }
+}

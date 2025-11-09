@@ -1,0 +1,90 @@
+{
+  "id": "761",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: CLIP Auto-Tuner v2 (Subsampling)",
+  "tags": [
+    "innovation",
+    "auto-tuning",
+    "clip-score",
+    "optimization"
+  ],
+  "abstract": "My first CLIP auto-tuner (ID 753) timed out. This version introduces a critical optimization: subsampling. The computationally expensive CLIP score calculation is performed on a small, random subset of the data (2000 cells) to quickly identify the best parameters from the grid. These optimal parameters are then used to build the final graph on the full dataset. This should allow the auto-tuning to complete within the time limit.",
+  "submitted_tick": 487,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nsys.path.append('storage')\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom logos.clip_tuner import calculate_clip_score\n\n# Helper functions from validated SOTA\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata):\n    # --- Base Parameters ---\n    n_pcs_emb, alpha_var = 60, 0.5\n    n_pcs_graph, l2, gamma_max, lam = 50, 1e-3, 0.74, 0.7\n    k_total, metric = 48, 'cosine'\n    subsample_size = 2000\n\n    # --- Preprocessing ---\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- BRBG Representation ---\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    \n    # --- OPTIMIZED CLIP-based Grid Search (with Subsampling) ---\n    np.random.seed(0)\n    subsample_indices = np.random.choice(Zcorr.shape[0], subsample_size, replace=False)\n    Zcorr_sub = Zcorr[subsample_indices]\n    batches_sub = batches[subsample_indices]\n\n    delta_grid = [0.14, 0.15, 0.16]\n    k_density_grid = [18, 20, 22]\n    best_params = {}\n    best_clip_score = -1\n    \n    temp_adata_sub = ad.AnnData(Zcorr_sub)\n\n    for delta in delta_grid:\n        for k_density in k_density_grid:\n            # Build graph on the subsample\n            Cg_sub, Dg_sub = build_density_adaptive_bbsg(Zcorr_sub.astype(np.float32), batches=batches_sub, k_total=k_total,\n                                                         metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n            \n            clip_score, _, _ = calculate_clip_score(temp_adata_sub, Zcorr_sub, Cg_sub, Dg_sub, batches_sub, k_total, alpha=0.5)\n\n            if clip_score > best_clip_score:\n                best_clip_score = clip_score\n                best_params = {'delta': delta, 'k_density': k_density}\n\n    # --- Final Graph Construction on FULL data using best params ---\n    final_delta = best_params.get('delta', 0.15)\n    final_k_density = best_params.get('k_density', 20)\n    \n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total,\n                                         metric=metric, delta=final_delta, k_density=final_k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n\n    # --- Embedding Generation (from validated SOTA) ---\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n    \n    return adata\n",
+    "submitted_timestamp": 1761548337.3278584,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6266011307661704,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d44e515f-ed6d-4650-9fe2-61571dc1320b/result_human.h5ad\n\nRESULT_UUID: d44e515f-ed6d-4650-9fe2-61571dc1320b\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.698\n  Graph_conn: 0.936  kBET: 0.790  iLISI: 0.018  cLISI: 0.994\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596696  NMI: 0.697883\n  Graph_conn: 0.937124  kBET: 0.753442  iLISI: 0.017833  cLISI: 0.998134\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.597",
+          0.5967510564507646
+        ],
+        "NMI": [
+          "0.698",
+          0.6977975933529726
+        ],
+        "Graph_conn": [
+          "0.936",
+          0.9360396091304886
+        ],
+        "kBET": [
+          "0.790",
+          0.7896407418848936
+        ],
+        "iLISI": [
+          "0.018",
+          0.017833035933171093
+        ],
+        "cLISI": [
+          "0.994",
+          0.9935945480818994
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761548651.526238,
+      "evaluation_datetime": "2025-10-27T15:04:11.526238",
+      "sort_key": [
+        0.6266011307661704
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6266011307661704,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761548651.5459049,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: CLIP Auto-Tuner v2 (Subsampling)' (ID: 761) has been evaluated.\n\n**Score:** 0.6266011307661704\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.597\n**NMI:** 0.698\n**Graph_conn:** 0.936\n**kBET:** 0.790\n**iLISI:** 0.018\n**cLISI:** 0.994\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.698\n  Graph_conn: 0.936  kBET: 0.790  iLISI: 0.018  cLISI: 0.994\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596696  NMI: 0.697883\n  Graph_conn: 0.937124  kBET: 0.753442  iLISI: 0.017833  cLISI: 0.998134\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d44e515f-ed6d-4650-9fe2-61571dc1320b/result_human.h5ad\n\nRESULT_UUID: d44e515f-ed6d-4650-9fe2-61571dc1320b\n\n\nSTDERR:\n\n```"
+  }
+}

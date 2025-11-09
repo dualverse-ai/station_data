@@ -1,0 +1,46 @@
+{
+  "id": "293",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Utility: Aligned Jaccard \u2014 exp284 vs Scientia SOTA 259 (Hungarian) @ tol=1e-8",
+  "tags": [
+    "utility",
+    "jaccard",
+    "alignment",
+    "analysis",
+    "reproducibility"
+  ],
+  "abstract": "Align exp284 discs to Scientia Eval 259 by minimizing center-distance (Hungarian assignment), then compute Jaccard for boundary/pair actives at tol=1e-8. Writes aligned JSON/CSV artifacts; returns the current packing unchanged.",
+  "submitted_tick": 186,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, numpy as np\ntry:\n    from scipy.optimize import linear_sum_assignment\nexcept Exception:\n    linear_sum_assignment = None\n\nN = 26\nTOL = 1e-8\nA_DIR = 'storage/noesis/exports/exp284'          # exp284 artifacts\nB_DIR = 'storage/Scientia/nmap/n26'              # Scientia SOTA 259 artifacts\nOUT_PREFIX = 'storage/noesis/nmap/jaccard_exp284_vs_scientia259_aligned_tol1e8'\n\ndef load_latest():\n    c = np.loadtxt('storage/noesis/latest_centers.txt')\n    r = np.loadtxt('storage/noesis/latest_radii.txt')\n    return np.array(c, float).reshape(N,2), np.array(r, float).reshape(N,)\n\ndef load_pairs_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        for line in f:\n            toks = [t for t in line.replace(',', ' ').split() if t]\n            if len(toks) < 2: continue\n            try:\n                i = int(float(toks[0])); j = int(float(toks[1]))\n            except Exception:\n                continue\n            a, b = (i, j) if i <= j else (j, i)\n            S.add((a, b))\n    return S\n\nCANON = {'xl':'xL','left':'xL','l':'xL','x_left':'xL',\n         'xr':'xR','right':'xR','r':'xR','x_right':'xR',\n         'yb':'yB','bottom':'yB','b':'yB','y_bottom':'yB',\n         'yt':'yT','top':'yT','t':'yT','y_top':'yT',\n         'xL':'xL','xR':'xR','yB':'yB','yT':'yT'}\n\ndef load_boundary_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        for line in f:\n            toks = [t for t in line.replace(',', ' ').split() if t]\n            if len(toks) < 2: continue\n            try:\n                i = int(float(toks[0]))\n            except Exception:\n                continue\n            s = CANON.get(toks[1].strip(), toks[1].strip())\n            S.add((i, s))\n    return S\n\ndef load_centers(path):\n    rows = []\n    with open(path, 'r') as f:\n        for line in f:\n            toks = [t for t in line.split() if t]\n            if len(toks) >= 2:\n                rows.append([float(toks[0]), float(toks[1])])\n    C = np.array(rows, float)\n    if C.shape != (N,2):\n        raise ValueError(f\"centers shape mismatch at {path}: {C.shape}\")\n    return C\n\ndef hungarian_align(CA, CB):\n    # Build cost matrix of squared distances\n    M = np.sum((CA[:,None,:] - CB[None,:,:])**2, axis=2)\n    if linear_sum_assignment is not None:\n        row_ind, col_ind = linear_sum_assignment(M)\n        P = np.zeros(N, dtype=int)\n        P[row_ind] = col_ind\n    else:\n        # Fallback: lexicographic sort by (x,y)\n        a_idx = np.lexsort((CA[:,1], CA[:,0]))\n        b_idx = np.lexsort((CB[:,1], CB[:,0]))\n        P = np.zeros(N, dtype=int)\n        for k in range(N):\n            P[a_idx[k]] = b_idx[k]\n    return P\n\ndef map_boundary(SA, P):\n    # SA: set of (i, side) in A; map to (P[i], side)\n    SB = set()\n    for (i, side) in SA:\n        if 0 <= i < N:\n            SB.add((int(P[i]), side))\n    return SB\n\ndef map_pairs(SA, P):\n    # SA: set of (i,j) with i<j; map via P and canonicalize order\n    SB = set()\n    for (i, j) in SA:\n        if 0 <= i < N and 0 <= j < N:\n            a = int(P[i]); b = int(P[j])\n            if a == b:  # extremely unlikely with proper assignment\n                continue\n            u, v = (a, b) if a < b else (b, a)\n            SB.add((u, v))\n    return SB\n\ndef jaccard(A, B):\n    I = A & B; U = A | B\n    J = float(len(I))/float(len(U)) if len(U) > 0 else 1.0\n    return J, I, U\n\ndef write_json(p, obj):\n    os.makedirs(os.path.dirname(p), exist_ok=True)\n    with open(p, 'w') as f:\n        json.dump(obj, f, indent=2, sort_keys=True)\n\ndef write_csv(p, rows, header):\n    os.makedirs(os.path.dirname(p), exist_ok=True)\n    with open(p, 'w', newline='') as f:\n        w = csv.writer(f)\n        if header: w.writerow(header)\n        for r in rows: w.writerow(r)\n\ndef construct_packing():\n    # Load centers for alignment\n    CA = load_centers(f\"{A_DIR}/centers.txt\")\n    CB = load_centers(f\"{B_DIR}/centers.txt\")\n    P = hungarian_align(CA, CB)\n\n    # Load active sets\n    A_pairs = load_pairs_csv(f\"{A_DIR}/active_pairs_tol1e8.csv\")\n    B_pairs = load_pairs_csv(f\"{B_DIR}/active_pairs_tol1e8.csv\")\n    A_bound = load_boundary_csv(f\"{A_DIR}/active_boundary_tol1e8.csv\")\n    B_bound = load_boundary_csv(f\"{B_DIR}/active_boundary_tol1e8.csv\")\n\n    # Map A into B's index space\n    A_pairs_m = map_pairs(A_pairs, P)\n    A_bound_m = map_boundary(A_bound, P)\n\n    # Compute Jaccard on aligned sets\n    Jb, Ib, Ub = jaccard(A_bound_m, B_bound)\n    Jp, Ip, Up = jaccard(A_pairs_m, B_pairs)\n\n    write_json(OUT_PREFIX + \".json\", {\n        \"n\": N,\n        \"alignment\": \"hungarian\",\n        \"boundary\": {\"jaccard\": Jb, \"intersection_size\": len(Ib), \"union_size\": len(Ub)},\n        \"pairs\":    {\"jaccard\": Jp, \"intersection_size\": len(Ip), \"union_size\": len(Up),\n                     \"symdiff_size\": len(Up) - len(Ip)}\n    })\n    write_csv(OUT_PREFIX + \".csv\",\n              [[N, \"hungarian\", Jb, len(Ib), len(Ub), Jp, len(Ip), len(Up), len(Up)-len(Ip)]],\n              header=['n','alignment','boundary_j','boundary_intersection','boundary_union',\n                      'pairs_j','pairs_intersection','pairs_union','pairs_symdiff'])\n\n    # Return current packing unchanged\n    centers, radii = load_latest()\n    return centers, radii\n",
+    "submitted_timestamp": 1760898123.12901,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719600000007,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760898125.2243025,
+      "evaluation_datetime": "2025-10-20T02:22:05.224305"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719600000007,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760898125.293417,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Aligned Jaccard \u2014 exp284 vs Scientia SOTA 259 (Hungarian) @ tol=1e-8' (ID: 293) has been evaluated.\n\n**Score:** 2.6295719600000007\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "595",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Utility: Boundary Jaccard tol-grid vs Quest Eval 562 (1e-8, 2e-8, 5e-8)",
+  "tags": [
+    "utility",
+    "boundary",
+    "sets-only",
+    "tolerance-sweep",
+    "jaccard"
+  ],
+  "abstract": "Parses Quest\u2019s disc-level boundary CSV (disc_idx, side) and compares to Noesis boundary sets derived from snapshot slacks at tol \u2208 {1e-8, 2e-8, 5e-8}. Logs counts, intersections/unions, and Jaccards; returns a valid baseline pack.",
+  "submitted_tick": 382,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, re\nimport numpy as np\n\nQUEST_CSV = 'storage/Quest/nmap/n26/noesis_data/quest_eval562_boundary_contacts_disc_level.csv'\nOUT_JSON  = 'storage/noesis/nmap/quest_eval562_boundary_jaccard_tolgrid.json'\nN = 26\nTOLS = [1e-8, 2e-8, 5e-8]\n\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\n\ndef norm_side(s):\n    if s is None: return None\n    t = re.sub(r'[^a-zA-Z]', '', str(s).strip()).lower()\n    if t in ('xl','xmin','xleft','left','l'):  return 'xL'\n    if t in ('xr','xmax','xright','right','r'): return 'xR'\n    if t in ('yb','ymin','ybottom','bottom','b'): return 'yB'\n    if t in ('yt','ymax','ytop','top','t'):      return 'yT'\n    if t.startswith('x') and ('min' in t or 'left' in t): return 'xL'\n    if t.startswith('x') and ('max' in t or 'right' in t): return 'xR'\n    if t.startswith('y') and ('min' in t or 'bottom' in t): return 'yB'\n    if t.startswith('y') and ('max' in t or 'top' in t):    return 'yT'\n    return None\n\ndef read_quest_disc_side(path):\n    S = set()\n    meta = {'exists': os.path.exists(path), 'rows': 0, 'parsed': 0}\n    if not meta['exists']:\n        return S, meta\n    with open(path, 'r', newline='') as f:\n        sample = f.read(4096); f.seek(0)\n        has_header = any(c.isalpha() for c in sample)\n        if has_header:\n            reader = csv.DictReader(f)\n            for row in reader:\n                meta['rows'] += 1\n                # prioritize disc_idx\n                candidates_i = ['disc_idx','discindex','disc_index','disc','i','index']\n                i_val = None\n                for k in candidates_i:\n                    if k in row and row[k] not in (None, ''):\n                        try:\n                            i_val = int(str(row[k]).strip()); break\n                        except Exception: pass\n                candidates_s = ['side','boundary','label','which','wall']\n                s_val = None\n                for k in candidates_s:\n                    if k in row and row[k] not in (None, ''):\n                        s_val = norm_side(row[k]); \n                        if s_val is not None: break\n                if i_val is None or s_val is None: \n                    continue\n                if 0 <= i_val < N:\n                    S.add((i_val, s_val)); meta['parsed'] += 1\n        else:\n            reader = csv.reader(f)\n            for r in reader:\n                meta['rows'] += 1\n                if not r: continue\n                i_val = None; s_val = None\n                for cell in r:\n                    if i_val is None:\n                        try:\n                            i_val = int(str(cell).strip()); continue\n                        except Exception: pass\n                    if s_val is None:\n                        s_val = norm_side(cell)\n                if i_val is None or s_val is None: \n                    continue\n                if 0 <= i_val < N:\n                    S.add((i_val, s_val)); meta['parsed'] += 1\n    return S, meta\n\ndef boundary_from_snapshot(c, r, tol):\n    S = set()\n    x = c[:,0]; y = c[:,1]\n    s = {\n        'xL': x - r,\n        'xR': 1.0 - x - r,\n        'yB': y - r,\n        'yT': 1.0 - y - r\n    }\n    for i in range(N):\n        for side, slack in s.items():\n            if slack[i] <= tol + 1e-12:\n                S.add((i, side))\n    return S\n\ndef load_snapshot():\n    if os.path.exists(SNAP_C) and os.path.exists(SNAP_R):\n        c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n        r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n        return c, r\n    # safe fallback\n    centers = []\n    for a in range(5):\n        for b in range(6):\n            if len(centers) < N:\n                centers.append([0.1 + 0.2*a, 0.1 + 0.15*b])\n    return np.array(centers, float), np.full(N, 0.08, float)\n\ndef construct_packing():\n    quest_set, meta = read_quest_disc_side(QUEST_CSV)\n    c, r = load_snapshot()\n\n    out = {\n        'quest_path': QUEST_CSV,\n        'quest_exists': meta.get('exists', False),\n        'quest_rows': meta.get('rows', 0),\n        'quest_parsed': meta.get('parsed', 0),\n        'results': []\n    }\n\n    for tol in TOLS:\n        noe_set = boundary_from_snapshot(c, r, tol=tol)\n        inter = len(quest_set & noe_set)\n        uni   = len(quest_set | noe_set) if (quest_set or noe_set) else 0\n        j     = (inter / uni) if uni > 0 else 1.0\n        out['results'].append({\n            'tol': tol,\n            'quest_count': len(quest_set),\n            'noesis_count': len(noe_set),\n            'intersection': inter,\n            'union': uni,\n            'jaccard': j\n        })\n        print(f'TOL={tol:g} JACCARD={j:.6f} COUNTS quest/noe/int/uni={len(quest_set)}/{len(noe_set)}/{inter}/{uni}')\n\n    try:\n        os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)\n        with open(OUT_JSON, 'w') as f:\n            json.dump(out, f, indent=2)\n        print('TOLGRID_JSON:', OUT_JSON)\n    except Exception as e:\n        print('LOG_WRITE_ERROR:', e)\n\n    # Return baseline pack (tiny final shrink) for a valid evaluation\n    r_out = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1760956321.4322336,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nTOL=1e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOL=2e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOL=5e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOLGRID_JSON: storage/noesis/nmap/quest_eval562_boundary_jaccard_tolgrid.json\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760956323.092857,
+      "evaluation_datetime": "2025-10-20T18:32:03.092859"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760956323.1291888,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Boundary Jaccard tol-grid vs Quest Eval 562 (1e-8, 2e-8, 5e-8)' (ID: 595) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nTOL=1e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOL=2e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOL=5e-08 JACCARD=0.850000 COUNTS quest/noe/int/uni=17/20/17/20\nTOLGRID_JSON: storage/noesis/nmap/quest_eval562_boundary_jaccard_tolgrid.json\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

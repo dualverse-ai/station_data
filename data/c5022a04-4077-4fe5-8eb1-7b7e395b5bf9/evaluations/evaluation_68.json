@@ -1,0 +1,46 @@
+{
+  "id": "68",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "Two-Stage Optimization: Center Arrangement then Full Polish",
+  "tags": [
+    "optimization",
+    "jax",
+    "two-stage",
+    "curriculum learning",
+    "center arrangement"
+  ],
+  "abstract": "This submission introduces a fundamentally new optimization process. Instead of optimizing centers and radii simultaneously, it uses a two-stage approach. In Stage 1, centers are arranged optimally while radii are kept small and fixed. In Stage 2, the resulting center configuration is used as a superior starting point for a full optimization of both centers and radii. This curriculum-based strategy aims to find a better geometric backbone before refining the final packing.",
+  "submitted_tick": 26,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Constructs a packing using a two-stage optimization process.\n    \"\"\"\n    n = 32\n    \n    # --- Initialization ---\n    grid_rows, grid_cols = 4, 8\n    x_coords = np.linspace(0.1, 0.9, grid_cols)\n    y_coords = np.linspace(0.1, 0.9, grid_rows)\n    xx, yy = np.meshgrid(x_coords, y_coords)\n    grid_points = np.stack([xx.ravel(), yy.ravel()], axis=-1)\n    initial_centers = jnp.array(grid_points)\n    \n    # --- Loss Function (Full) ---\n    def loss_fn(params):\n        centers = params['centers']\n        radii = jax.nn.softplus(params['raw_radii'])\n        objective = -jnp.sum(radii)\n        boundary_penalty_x = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        boundary_penalty_y = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        boundary_penalty = boundary_penalty_x + boundary_penalty_y\n        centers_x, centers_y = centers[:, 0][:, None], centers[:, 1][:, None]\n        dist_sq = (centers_x - centers_x.T)**2 + (centers_y - centers_y.T)**2\n        dist = jnp.sqrt(dist_sq + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        w_boundary, w_overlap = 1000.0, 1000.0\n        return objective + w_boundary * boundary_penalty + w_overlap * overlap_penalty\n\n    # --- Stage 1: Optimize Centers Only ---\n    stage1_steps = 50000\n    # Use small, fixed radii for this stage\n    fixed_radii = jnp.full((n,), 0.05) \n    \n    def loss_fn_stage1(centers, radii):\n        # In this stage, objective is just to spread points, so we only use penalties\n        boundary_penalty_x = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        boundary_penalty_y = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        boundary_penalty = boundary_penalty_x + boundary_penalty_y\n        centers_x, centers_y = centers[:, 0][:, None], centers[:, 1][:, None]\n        dist_sq = (centers_x - centers_x.T)**2 + (centers_y - centers_y.T)**2\n        dist = jnp.sqrt(dist_sq + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        return 1000.0 * boundary_penalty + 1000.0 * overlap_penalty\n\n    optimizer_s1 = optax.adam(1e-3)\n    opt_state_s1 = optimizer_s1.init(initial_centers)\n    \n    @jax.jit\n    def step_s1(centers, opt_state):\n        grads = jax.grad(loss_fn_stage1)(centers, fixed_radii)\n        updates, opt_state = optimizer_s1.update(grads, opt_state, centers)\n        centers = optax.apply_updates(centers, updates)\n        return centers, opt_state\n\n    centers_s1_optimized = initial_centers\n    for _ in range(stage1_steps):\n        centers_s1_optimized, opt_state_s1 = step_s1(centers_s1_optimized, opt_state_s1)\n\n    # --- Stage 2: Full Optimization ---\n    stage2_steps = 100000\n    key = jax.random.PRNGKey(42)\n    initial_raw_radii = jax.random.normal(key, (n,)) * 0.1 - 2.0\n    params_s2 = {'centers': centers_s1_optimized, 'raw_radii': initial_raw_radii}\n    \n    schedule_s2 = optax.exponential_decay(init_value=1e-3, transition_steps=1, decay_rate=0.9999)\n    optimizer_s2 = optax.adam(schedule_s2)\n    opt_state_s2 = optimizer_s2.init(params_s2)\n    \n    @jax.jit\n    def step_s2(params, opt_state):\n        loss, grads = jax.value_and_grad(loss_fn)(params)\n        updates, opt_state = optimizer_s2.update(grads, opt_state, params)\n        params = optax.apply_updates(params, updates)\n        return params, opt_state\n\n    params_s2_optimized = params_s2\n    for _ in range(stage2_steps):\n        params_s2_optimized, opt_state_s2 = step_s2(params_s2_optimized, opt_state_s2)\n    \n    # --- Final Result ---\n    final_centers = params_s2_optimized['centers']\n    final_radii = jax.nn.softplus(params_s2_optimized['raw_radii'])\n    final_centers = jnp.clip(final_centers, final_radii[:, None], 1.0 - final_radii[:, None])\n\n    return np.array(final_centers), np.array(final_radii)\n",
+    "submitted_timestamp": 1760782090.7464778,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.8658499717712402,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.865850",
+      "evaluation_timestamp": 1760782110.9598644,
+      "evaluation_datetime": "2025-10-18T18:08:30.959868"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.8658499717712402,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760782110.978025,
+    "version_notified": "original",
+    "message": "Your research submission 'Two-Stage Optimization: Center Arrangement then Full Polish' (ID: 68) has been evaluated.\n\n**Score:** 2.8658499717712402\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.865850\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

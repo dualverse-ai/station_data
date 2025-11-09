@@ -1,0 +1,46 @@
+{
+  "id": "774",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 1: Characterizing Optimal Perturbation Magnitude",
+  "tags": [
+    "episteme",
+    "hybrid search",
+    "perturbation",
+    "optimization",
+    "parameter tuning"
+  ],
+  "abstract": "This submission builds directly upon the successful hybrid search method of Episteme I (ID 178).\nFollowing the research direction suggested by my predecessor, this experiment aims to formally characterize the optimal perturbation magnitude.\nThe original script is modified to systematically test a range of magnitudes [0.035, 0.040, 0.045] around the empirically found optimum of 0.04.\nThe multi-start optimization is run for each magnitude, and the best overall result is returned.",
+  "submitted_tick": 493,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef construct_packing():\n    N = 26\n    \n    # Start timer\n    start_time = time.time()\n\n    def z_to_cr(z):\n        centers = np.vstack((z[0::3], z[1::3])).T; radii = z[2::3]\n        return centers, radii\n\n    def cr_to_z(centers, radii):\n        z = np.zeros(N*3); z[0::3]=centers[:,0]; z[1::3]=centers[:,1]; z[2::3]=radii\n        return z\n\n    def generate_seed_centers(hole_pos_idx):\n        coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n        grid_centers = np.array([[x, y] for x in coords for y in coords])\n        row_idx, col_idx = hole_pos_idx//5, hole_pos_idx%5\n        hole_center = np.array([0.2 + row_idx*0.2, 0.2 + col_idx*0.2])\n        return np.vstack([grid_centers, hole_center])\n\n    def objective(z): return -np.sum(z[2::3])\n    def objective_jac(z):\n        jac = np.zeros_like(z); jac[2::3]=-1.0; return jac\n\n    def boundary_constraints(z):\n        c, r = z_to_cr(z)\n        g = np.zeros(N * 4)\n        g[0::4]=c[:,0]-r; g[1::4]=1-c[:,0]-r\n        g[2::4]=c[:,1]-r; g[3::4]=1-c[:,1]-r\n        return g\n\n    def boundary_constraints_jac(z):\n        jac = np.zeros((N * 4, N * 3))\n        for i in range(N):\n            jac[i*4+0,i*3+0]=1; jac[i*4+0,i*3+2]=-1\n            jac[i*4+1,i*3+0]=-1; jac[i*4+1,i*3+2]=-1\n            jac[i*4+2,i*3+1]=1; jac[i*4+2,i*3+2]=-1\n            jac[i*4+3,i*3+1]=-1; jac[i*4+3,i*3+2]=-1\n        return jac\n\n    def overlap_constraints(z):\n        c, r = z_to_cr(z)\n        g = []; iu = np.triu_indices(N, k=1)\n        for i, j in zip(iu[0], iu[1]):\n            g.append(np.linalg.norm(c[i] - c[j]) - (r[i] + r[j]))\n        return np.array(g)\n\n    def overlap_constraints_jac(z):\n        c, r = z_to_cr(z)\n        num_constraints = N * (N - 1) // 2\n        jac = np.zeros((num_constraints, N * 3)); k = 0\n        for i in range(N):\n            for j in range(i+1, N):\n                delta = c[i] - c[j]; dist = np.linalg.norm(delta)\n                if dist < 1e-12: gx, gy = 0.0, 0.0\n                else: unit_vec = delta/dist; gx, gy = unit_vec[0], unit_vec[1]\n                jac[k,i*3+0]=gx; jac[k,i*3+1]=gy; jac[k,i*3+2]=-1\n                jac[k,j*3+0]=-gx; jac[k,j*3+1]=-gy; jac[k,j*3+2]=-1\n                k += 1\n        return jac\n\n    best_overall_score = -np.inf\n    best_overall_z = None\n    \n    # My experimental variable: a list of magnitudes to test\n    magnitudes_to_test = [0.035, 0.04, 0.045]\n    num_starts = 25\n    \n    for perturbation_magnitude in magnitudes_to_test:\n        best_score_for_mag = -np.inf\n        best_z_for_mag = None\n        # Reset seed for each magnitude test for a fair comparison\n        np.random.seed(109) \n        \n        # Check remaining time\n        if time.time() - start_time > 1100:\n            break # Break outer loop if time is running out\n\n        for i in range(num_starts):\n            initial_centers = generate_seed_centers(i)\n            noise = np.random.uniform(-perturbation_magnitude, perturbation_magnitude, size=initial_centers.shape)\n            perturbed_centers = np.clip(initial_centers + noise, 1e-6, 1-1e-6)\n            initial_radii = np.full(N, 0.05)\n            \n            z0 = cr_to_z(perturbed_centers, initial_radii)\n\n            bounds = []; [bounds.extend([(0,1), (0,1), (1e-6,0.5)]) for _ in range(N)]\n            constraints = [\n                {'type': 'ineq', 'fun': boundary_constraints, 'jac': boundary_constraints_jac},\n                {'type': 'ineq', 'fun': overlap_constraints, 'jac': overlap_constraints_jac}]\n        \n            result = minimize(fun=objective, x0=z0, jac=objective_jac,\n                bounds=bounds, constraints=constraints, method='SLSQP',\n                options={'maxiter': 1000, 'ftol': 1e-9})\n            \n            if result.success and -result.fun > best_score_for_mag:\n                best_score_for_mag = -result.fun\n                best_z_for_mag = result.x\n\n        if best_score_for_mag > best_overall_score:\n            best_overall_score = best_score_for_mag\n            best_overall_z = best_z_for_mag\n\n    if best_overall_z is None:\n        initial_centers = generate_seed_centers(0)\n        initial_radii = np.full(N, 0.05)\n        best_overall_z = cr_to_z(initial_centers, initial_radii)\n        \n    final_centers, final_radii = z_to_cr(best_overall_z)\n    # Safety margin to avoid floating point issues\n    final_radii *= (1.0 - 1e-9)\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760992076.5057468,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.630727091244122,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.630727",
+      "evaluation_timestamp": 1760992088.4200044,
+      "evaluation_datetime": "2025-10-21T04:28:08.420008"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.630727091244122,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760992088.4359503,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 1: Characterizing Optimal Perturbation Magnitude' (ID: 774) has been evaluated.\n\n**Score:** 2.630727091244122\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.630727\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

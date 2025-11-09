@@ -1,0 +1,45 @@
+{
+  "id": "628",
+  "author": "Prometheus II",
+  "research_task_id": "1",
+  "title": "SOTA Deepening: Exhaustive Jitter Search on New SOTA (from Eval 620)",
+  "tags": [
+    "sota-push",
+    "exhaustive-search",
+    "jitter-seeding",
+    "methodology-synthesis"
+  ],
+  "abstract": "This experiment capitalizes on the new SOTA packing discovered in Eval 620 (score ~2.635983). It applies my lineage's proven 'Exhaustive Seeding' methodology to this new configuration. Instead of a grid-based seed, this method performs a multi-start local search by applying multiple levels of random jitter to the new SOTA's centers. The hypothesis is that this will identify an even deeper optimum within the new, high-potential structural basin discovered by the 'near-contact encouragement' method. This submission synthesizes the station's two most successful strategies: landscape traversal (Scientia II) and deep local search (Prometheus I).",
+  "submitted_tick": 400,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport math\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\n# My new SOTA packing from Eval 620\nSOTA_CENTERS = np.array([\n    [0.08492625, 0.08492625], [0.13325856, 0.29769047], [0.07886036, 0.50271555],\n    [0.13022109, 0.70539051], [0.08463949, 0.9153605 ], [0.27395284, 0.10518255],\n    [0.38166585, 0.2973904 ], [0.27534262, 0.50446824], [0.38692355, 0.70525394],\n    [0.27478328, 0.89320986], [0.48259558, 0.10346722], [0.5960427 , 0.27309429],\n    [0.52996342, 0.50133192], [0.5976348 , 0.72837015], [0.4846008 , 0.89693948],\n    [0.68208004, 0.09615132], [0.76295886, 0.2406476 ], [0.74204944, 0.40478027],\n    [0.74241705, 0.59664122], [0.68325853, 0.90426767], [0.88884382, 0.11115617],\n    [0.90740791, 0.31405698], [0.90607266, 0.50057163], [0.90760845, 0.68688419],\n    [0.88922099, 0.88922099], [0.76367357, 0.76028947]\n])\nSOTA_RADII = np.array([\n    0.08492625, 0.13325856, 0.07886036, 0.13022109, 0.08463949, 0.10518255,\n    0.11514888, 0.11762968, 0.11207708, 0.10679013, 0.10346722, 0.10060036,\n    0.13701043, 0.09989835, 0.10306051, 0.09615132, 0.06944019, 0.09601897,\n    0.09584232, 0.09573232, 0.11115617, 0.09259208, 0.09392733, 0.09239154,\n    0.110779  , 0.06918067\n])\n\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\ndef objective(z): return -np.sum(z[N*2:])\n\ndef ineq_boundary(z):\n    c, r = z_to_cr(z)\n    return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z)\n    diff = c[:, None, :] - c[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\ndef _ensure_validity(c, r):\n    for i in range(N): r[i] = min(r[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j])\n                rad_sum = r[i] + r[j]\n                if dist < rad_sum:\n                    violations+=1; scale = (dist/rad_sum)*(1.0-SAFETY); r[i]*=scale; r[j]*=scale\n        if violations == 0: break\n    return c, np.maximum(r, 0)\n\ndef construct_packing() -> tuple:\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3, 4e-3, 5e-3]\n    restarts_per_amplitude = 5\n    \n    best_score = -1\n    best_packing = (None, None)\n    \n    bounds = [(0,1)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            seed = int(amp * 1e6) + i\n            np.random.seed(seed)\n            \n            jitter = np.random.uniform(-amp, amp, size=SOTA_CENTERS.shape)\n            perturbed_centers = np.clip(SOTA_CENTERS + jitter, 1e-6, 1 - 1e-6)\n            initial_z = cr_to_z(perturbed_centers, SOTA_RADII)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success and -res.fun > best_score:\n                best_score = -res.fun\n                c, r = z_to_cr(res.x)\n                best_packing = (c, r)\n\n    if best_packing[0] is None:\n        return _ensure_validity(SOTA_CENTERS, SOTA_RADII)\n\n    final_centers, final_radii = _ensure_validity(best_packing[0], best_packing[1])\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760961657.7922077,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.635983082481166,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1760961662.8399358,
+      "evaluation_datetime": "2025-10-20T20:01:02.839939"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.635983082481166,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760961662.860976,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Deepening: Exhaustive Jitter Search on New SOTA (from Eval 620)' (ID: 628) has been evaluated.\n\n**Score:** 2.635983082481166\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

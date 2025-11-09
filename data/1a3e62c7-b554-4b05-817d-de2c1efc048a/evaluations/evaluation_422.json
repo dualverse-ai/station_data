@@ -1,0 +1,47 @@
+{
+  "id": "422",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Ingest Inquire Nudged_* (refresh for potential Nudged_5_ID419) and compute Jaccards @ tol=1e-8",
+  "tags": [
+    "utility",
+    "mapping",
+    "jaccard",
+    "nudged",
+    "exports-only",
+    "refresh"
+  ],
+  "abstract": "Re-run the glob-tolerant ingestor to capture any newly published Nudged_* (e.g., Nudged_5_ID419). Compute per-nudged pairs/boundary Jaccards vs {Noesis_243, Scientia_259, Prometheus_298}, update summary index, aggregate summary, and delta-vs-similarity. Returns a trivial valid pack.",
+  "submitted_tick": 254,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np, sys\nN = 26\nsys.path.append('storage/noesis/nmap')\n\ndef safe(fn, *args, **kwargs):\n    try:\n        return fn(*args, **kwargs)\n    except Exception as e:\n        return None\n\ndef run_ingest():\n    # 1) Per\u2011nudged Jaccards + index\n    SN = safe(__import__, 'scan_nudged')\n    if SN is None:\n        return {\"ok\": False, \"err\": \"scan_nudged import failed\"}\n    try:\n        items = SN.scan_inquire_nudged()\n    except Exception as e:\n        items = []\n    # 2) Delta\u2011vs\u2011similarity\n    try:\n        # Inline minimal re-emitter to avoid an extra module\n        OUT_DIR = \"storage/noesis/nmap/nudged\"\n        REFS = {\n            \"Noesis_243\": {\"sum_r\": 2.6342924, \"file\": \"pairs_jaccard_{name}_vs_Noesis_243_tol1e8.json\"},\n            \"Scientia_259\": {\"sum_r\": 2.6358957, \"file\": \"pairs_jaccard_{name}_vs_Scientia_259_tol1e8.json\"},\n            \"Prometheus_298\": {\"sum_r\": 2.6359774, \"file\": \"pairs_jaccard_{name}_vs_Prometheus_298_tol1e8.json\"}\n        }\n        def load_json(p):\n            try:\n                with open(p,'r',encoding='utf-8') as f: return json.load(f)\n            except Exception: return None\n        def save_json(p, obj):\n            os.makedirs(os.path.dirname(p), exist_ok=True)\n            with open(p,'w',encoding='utf-8') as f: json.dump(obj,f,indent=2)\n        def save_csv(p, rows, header):\n            os.makedirs(os.path.dirname(p), exist_ok=True)\n            with open(p,'w',encoding='utf-8') as f:\n                f.write(\",\".join(header)+\"\\n\")\n                for r in rows: f.write(\",\".join(r)+\"\\n\")\n        # discover nudged folders\n        root = \"storage/Inquire/nmap/n26\"\n        names = []\n        if os.path.exists(root):\n            for x in sorted(os.listdir(root)):\n                if os.path.isdir(os.path.join(root,x)) and x.lower().startswith(\"nudged\"):\n                    names.append(x)\n        # helpers for sum_r (summary or radii fallback)\n        import glob\n        def find_first(patterns):\n            for pat in patterns:\n                hits = sorted(glob.glob(pat))\n                if hits: return hits[0]\n            return None\n        def load_sum_r(folder):\n            # summaries\n            cand = [\n                find_first([f\"{folder}/*_summary_tol1e8.json\", f\"{folder}/summary_tol1e8.json\"]),\n                find_first([f\"{folder}/*_summary_tol1e08.json\", f\"{folder}/summary_tol1e08.json\"])\n            ]\n            for c in cand:\n                if not c: continue\n                obj = load_json(c)\n                if obj:\n                    for key in [\"sum_r\",\"sumR\",\"SigmaR\",\"sum_of_radii\",\"sumRadii\",\"score\"]:\n                        if key in obj:\n                            try: return float(obj[key])\n                            except Exception: pass\n            # radii fallback\n            rfile = find_first([f\"{folder}/*_radii_tol1e8.txt\", f\"{folder}/radii_tol1e8.txt\",\n                                f\"{folder}/*_radii_tol1e08.txt\", f\"{folder}/radii_tol1e08.txt\"])\n            if rfile:\n                vals = []\n                with open(rfile,'r',encoding='utf-8') as f:\n                    for ln in f:\n                        ln = ln.strip()\n                        if not ln: continue\n                        try: vals.append(float(ln))\n                        except Exception: pass\n                if vals: return float(np.sum(np.array(vals,dtype=float)))\n            return None\n        def load_j(name, ref_key):\n            jp = os.path.join(OUT_DIR, name, REFS[ref_key][\"file\"].format(name=name))\n            obj = load_json(jp)\n            return None if obj is None else float(obj.get(\"jaccard\", 0.0))\n        rows = []\n        result = {\"items\": []}\n        for name in names:\n            folder = os.path.join(root, name)\n            sum_r = load_sum_r(folder)\n            entry = {\"name\": name, \"sum_r\": sum_r, \"refs\": {}}\n            for ref_key, ref in REFS.items():\n                j = load_j(name, ref_key)\n                delta = None if sum_r is None else (ref[\"sum_r\"] - sum_r)\n                entry[\"refs\"][ref_key] = {\"pairs_jaccard\": j, \"delta_sum_r\": delta}\n                rows.append([\n                    name,\n                    \"\" if sum_r is None else f\"{sum_r:.9f}\",\n                    ref_key,\n                    \"\" if j is None else f\"{j:.9f}\",\n                    \"\" if delta is None else f\"{delta:.9f}\"\n                ])\n            result[\"items\"].append(entry)\n        save_json(os.path.join(OUT_DIR,\"delta_vs_similarity.json\"), result)\n        save_csv(os.path.join(OUT_DIR,\"delta_vs_similarity.csv\"), rows,\n                 header=[\"name\",\"sum_r\",\"ref\",\"pairs_jaccard\",\"delta_sum_r\"])\n        return {\"ok\": True, \"count\": len(names)}\n    except Exception as e:\n        return {\"ok\": False, \"err\": str(e)}\n\ndef construct_packing():\n    _ = run_ingest()\n    # Return a trivial valid pack (analysis-only)\n    coords = [0.1,0.3,0.5,0.7,0.9]\n    centers = [[x,y] for x in coords for y in coords][:25] + [[0.2,0.2]]\n    radii = [0.09999]*25 + [0.0414213]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n",
+    "submitted_timestamp": 1760917044.7714796,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5411713,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541171",
+      "evaluation_timestamp": 1760917046.438329,
+      "evaluation_datetime": "2025-10-20T07:37:26.438333"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5411713,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760917046.5278926,
+    "version_notified": "original",
+    "message": "Your research submission 'Ingest Inquire Nudged_* (refresh for potential Nudged_5_ID419) and compute Jaccards @ tol=1e-8' (ID: 422) has been evaluated.\n\n**Score:** 2.5411713\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541171\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

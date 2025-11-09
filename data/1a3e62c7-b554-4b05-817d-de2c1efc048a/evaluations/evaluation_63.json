@@ -1,0 +1,45 @@
+{
+  "id": "63",
+  "author": "Inquire I",
+  "research_task_id": "1",
+  "title": "Gradient-Based Optimization with SciPy.minimize (V11)",
+  "tags": [
+    "gradient descent",
+    "scipy.optimize",
+    "global optimization",
+    "penalty method"
+  ],
+  "abstract": "This submission shifts to a gradient-based optimization approach using `scipy.optimize.minimize` with the 'L-BFGS-B' method. It jointly optimizes circle centers and radii by minimizing an objective function that combines negative sum of radii (to maximize) with quadratic penalties for overlaps and boundary violations. Initial configurations are derived from a jittered baseline. Strict bounds are applied to ensure valid center and radius ranges. A final pass with `compute_max_radii` (100 iterations) ensures solution validity and tight packing after optimization, aiming to find higher quality packings more efficiently.",
+  "submitted_tick": 32,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\n# A small value used for all floating point comparisons, minimum radii,\n# and the required separation gap between circles and boundaries.\nEPS = 1e-8 \n\ndef objective_function(x, n_circles):\n    \"\"\"\n    Objective function for scipy.optimize.minimize.\n    x: flattened array of [c1_x, c1_y, r1, c2_x, c2_y, r2, ..., cN_x, cN_y, rN]\n    \"\"\"\n    # Reshape x into centers and radii\n    # Each circle has (x, y, r) => 3 values. Total 3*n_circles values in x.\n    centers = x.reshape(n_circles, 3)[:, :2] # (N, 2)\n    radii = x.reshape(n_circles, 3)[:, 2]     # (N,)\n\n    # --- Term 1: Maximize sum of radii (minimize negative sum) ---\n    sum_radii_term = -np.sum(radii)\n\n    # --- Term 2: Overlap penalty ---\n    overlap_penalty = 0.0\n    for i in range(n_circles):\n        for j in range(i + 1, n_circles):\n            dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n            dist = np.sqrt(dist_sq)\n            r_sum = radii[i] + radii[j]\n            if dist < r_sum:\n                # Quadratic penalty for overlap\n                overlap_penalty += (r_sum - dist)**2 \n    \n    # --- Term 3: Boundary violation penalty ---\n    boundary_penalty = 0.0\n    for i in range(n_circles):\n        x_c, y_c = centers[i]\n        r = radii[i]\n\n        # Check left, right, bottom, top boundaries\n        if x_c - r < 0:\n            boundary_penalty += (0 - (x_c - r))**2\n        if x_c + r > 1:\n            boundary_penalty += ((x_c + r) - 1)**2\n        if y_c - r < 0:\n            boundary_penalty += (0 - (y_c - r))**2\n        if y_c + r > 1:\n            boundary_penalty += ((y_c + r) - 1)**2\n            \n    # Combine terms (coefficients can be tuned)\n    # Penalties need to be sufficiently large\n    C_overlap = 1e6 # Large penalty for overlap\n    C_boundary = 1e6 # Large penalty for boundary violation\n\n    total_objective = sum_radii_term + C_overlap * overlap_penalty + C_boundary * boundary_penalty\n    return total_objective\n\n# Retaining the robust compute_max_radii function for final solution refinement\ndef compute_max_radii(centers, num_iterations=100):\n    n = centers.shape[0]\n    radii = np.ones(n) \n    \n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - EPS, y - EPS, 1 - x - EPS, 1 - y - EPS)\n        radii[i] = max(radii[i], EPS)\n        \n    for iteration in range(num_iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                dist = np.sqrt(dist_sq)\n                current_rad_sum = radii[i] + radii[j]\n                \n                if dist < current_rad_sum + EPS: \n                    target_sum_radii = max(2 * EPS, dist - EPS) \n                    \n                    if current_rad_sum > 2 * EPS and target_sum_radii < current_rad_sum:\n                        scale_factor = target_sum_radii / current_rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n                    elif current_rad_sum <= 2 * EPS: \n                        radii[i] = EPS\n                        radii[j] = EPS\n    \n    return np.maximum(radii, EPS) \n\ndef construct_packing() -> tuple:\n    n_circles = 26\n\n    # Initial centers (from baseline with jitter)\n    centers_initial = np.zeros((n_circles, 2))\n    centers_initial[0] = [0.5, 0.5]\n    for i in range(8):\n        angle = 2 * np.pi * i / 8\n        centers_initial[i + 1] = [0.5 + 0.25 * np.cos(angle), 0.5 + 0.25 * np.sin(angle)]\n    for i in range(16):\n        angle = 2 * np.pi * i / 16\n        centers_initial[i + 9] = [0.5 + 0.4 * np.cos(angle), 0.5 + 0.4 * np.sin(angle)]\n    centers_initial[25] = [0.5, 0.7]\n    centers_initial = np.clip(centers_initial, 0.05, 0.95)\n\n    # Add a small initial jitter\n    jitter_amount = 0.01 \n    centers_initial += (np.random.rand(n_circles, 2) * 2 - 1) * jitter_amount\n    centers_initial = np.clip(centers_initial, EPS, 1 - EPS) \n\n    # Initial radii (small, uniform)\n    radii_initial = np.full(n_circles, 0.05) \n\n    # Combine into initial guess for optimizer\n    x0 = np.hstack((centers_initial, radii_initial[:, np.newaxis])).flatten()\n\n    # Define bounds for each variable\n    bounds = []\n    for _ in range(n_circles):\n        bounds.append((EPS, 1 - EPS)) # x coordinate\n        bounds.append((EPS, 1 - EPS)) # y coordinate\n        bounds.append((EPS, 0.5))     # radius (max radius in unit square is 0.5)\n        \n    # Run the optimization\n    result = minimize(objective_function, x0, args=(n_circles,), method='L-BFGS-B', bounds=bounds, options={'maxiter': 1000, 'disp': False})\n\n    # Extract optimized centers and radii\n    optimized_x = result.x\n    optimized_centers = optimized_x.reshape(n_circles, 3)[:, :2]\n    optimized_radii = optimized_x.reshape(n_circles, 3)[:, 2]\n\n    # Final check and adjustment of radii with the robust function\n    final_radii = compute_max_radii(optimized_centers, num_iterations=100)\n    \n    return optimized_centers, final_radii\n",
+    "submitted_timestamp": 1760857878.8435962,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.5436676489306662,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.543668",
+      "evaluation_timestamp": 1760857905.5170598,
+      "evaluation_datetime": "2025-10-19T15:11:45.517061"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.5436676489306662,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760857905.5329318,
+    "version_notified": "original",
+    "message": "Your research submission 'Gradient-Based Optimization with SciPy.minimize (V11)' (ID: 63) has been evaluated.\n\n**Score:** 1.5436676489306662\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.543668\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

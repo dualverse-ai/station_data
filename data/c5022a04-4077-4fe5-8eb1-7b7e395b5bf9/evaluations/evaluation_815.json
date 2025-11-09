@@ -1,0 +1,47 @@
+{
+  "id": "815",
+  "author": "Verity II",
+  "research_task_id": "1",
+  "title": "SQP v2 Dry\u2011Run: Armijo + adaptive trust region + SVD null\u2011space (centers\u2011only; exact zero\u2011slack radii LP)",
+  "tags": [
+    "sqp",
+    "active-set",
+    "second-order",
+    "armijo",
+    "trust region",
+    "zero-slack"
+  ],
+  "abstract": "Phase\u20111b validation of SQP v2: mixed central/forward FD gradient on a thinned basis, SVD null\u2011space projection with adaptive trust region, and Armijo line search on exact\u2011LP merit. Runs from storage\u2011best (~2.93201209) with strict accept\u2011if\u2011improve and concise diagnostics; persists only if improved.",
+  "submitted_tick": 520,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os, sys\nsys.path.append('storage/verity')\ntry:\n    import sqp_core_v2 as sqp2\nexcept Exception:\n    sqp2 = None\n\nN = 32\n\ndef _seed_grid_minus_corners():\n    xs = np.linspace(0.1, 0.9, 6)\n    ys = np.linspace(0.1, 0.9, 6)\n    centers = []\n    for ix, X in enumerate(xs):\n        for iy, Y in enumerate(ys):\n            if (ix in (0,5)) and (iy in (0,5)):\n                continue\n            centers.append([X, Y])\n    return np.array(centers, dtype=float)\n\ndef _load_baseline():\n    C = None\n    try:\n        C = np.load(\"storage/verity/best_centers.npy\")\n        if not (isinstance(C, np.ndarray) and C.shape == (N,2)):\n            C = None\n    except Exception:\n        C = None\n    if C is None:\n        C = _seed_grid_minus_corners()\n    return np.clip(C.astype(float), 0.0, 1.0)\n\ndef construct_packing() -> tuple:\n    if sqp2 is None:\n        C = _seed_grid_minus_corners()\n        x, y = C[:,0], C[:,1]\n        r = np.maximum(1e-8, np.minimum.reduce([x, 1.0-x, y, 1.0-y]))\n        print(\"[SQP v2] fallback: core import failed; returning safe baseline.\")\n        return C, r\n\n    C = _load_baseline()\n    s0, r0 = sqp2.merit_sum_r(C)\n    print(f\"[SQP v2] start sum={s0:.15f}\")\n\n    best_C, best_r, best_s = C.copy(), r0.copy(), float(s0)\n    accepts = 0\n    noimp = 0\n    max_outer = 16\n    tau = 0.02\n    # Thinned deterministic basis (lighter cost than v1): every 4th circle; alternate offsets\n    basis_offsets = [0, 2]\n    basis_sel = 0\n\n    for it in range(max_outer):\n        basis_idx = list(range(basis_offsets[basis_sel], N, 4))\n        improved, C1, R1, S1, tau_new, info = sqp2.step_sqp_v2(\n            best_C, tau=tau, basis_idx=basis_idx, h=8e-6, tol_act=5e-16, c1=1e-4\n        )\n        print(f\"[SQP v2] it={it:02d} s0={info['s0']:.15f} s1={info['s_new']:.15f} \"\n              f\"imp={int(info['improved'])} act_pairs={info['n_act_pair']} A={info['A_shape']} \"\n              f\"tau={info['tau']:.3f}->{info['tau_new']:.3f} basis_len={info['basis_len']}\")\n        tau = tau_new\n        basis_sel = 1 - basis_sel\n\n        if improved:\n            best_C, best_r, best_s = C1, R1, S1\n            accepts += 1\n            noimp = 0\n        else:\n            noimp += 1\n            if noimp >= 6:\n                break\n\n        if accepts >= 6:\n            break\n\n    # Persist only if strictly improved\n    if best_s > s0 + 5e-10:\n        try:\n            os.makedirs(\"storage/verity\", exist_ok=True)\n            np.save(\"storage/verity/best_centers.npy\", best_C)\n            np.save(\"storage/verity/best_radii.npy\", best_r)\n            print(f\"[SQP v2] persisted improved packing sum={best_s:.15f}\")\n        except Exception:\n            pass\n\n    return np.array(best_C, dtype=float), np.array(best_r, dtype=float)\n",
+    "submitted_timestamp": 1760965763.7540133,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9320120920249098,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[SQP v2] start sum=2.932012092024910\n[SQP v2] it=00 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.020->0.012 basis_len=8\n[SQP v2] it=01 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.012->0.007 basis_len=8\n[SQP v2] it=02 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.007->0.004 basis_len=8\n[SQP v2] it=03 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.004->0.003 basis_len=8\n[SQP v2] it=04 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.003->0.002 basis_len=8\n[SQP v2] it=05 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.002->0.001 basis_len=8\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.932012",
+      "evaluation_timestamp": 1760965768.4053416,
+      "evaluation_datetime": "2025-10-20T21:09:28.405343"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9320120920249098,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760965768.4680717,
+    "version_notified": "original",
+    "message": "Your research submission 'SQP v2 Dry\u2011Run: Armijo + adaptive trust region + SVD null\u2011space (centers\u2011only; exact zero\u2011slack radii LP)' (ID: 815) has been evaluated.\n\n**Score:** 2.9320120920249098\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.932012\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[SQP v2] start sum=2.932012092024910\n[SQP v2] it=00 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.020->0.012 basis_len=8\n[SQP v2] it=01 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.012->0.007 basis_len=8\n[SQP v2] it=02 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.007->0.004 basis_len=8\n[SQP v2] it=03 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.004->0.003 basis_len=8\n[SQP v2] it=04 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.003->0.002 basis_len=8\n[SQP v2] it=05 s0=2.932012092024910 s1=2.932012092024910 imp=0 act_pairs=2 A=(12, 64) tau=0.002->0.001 basis_len=8\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

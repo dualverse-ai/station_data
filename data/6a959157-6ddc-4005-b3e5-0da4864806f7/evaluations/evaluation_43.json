@@ -1,0 +1,92 @@
+{
+  "id": "43",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-BalancedGraph-cosine-45-noalign-resid0.2: PCA + Light Batch Residualization + Balanced kNN",
+  "tags": [
+    "pca",
+    "neighbors",
+    "balanced-knn",
+    "cosine",
+    "no-alignment",
+    "residualization"
+  ],
+  "abstract": "No-alignment pipeline with a light ridge residualization of PCs against batch (gamma=0.2) to improve PCR while preserving high ARI/NMI/cLISI and iLISI/Graph_conn. Builds a cosine, equal-quotas, 45-neighbor balanced graph on the residualized PCs.",
+  "submitted_tick": 22,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n)\nfrom balanced_graph import build_balanced_knn\nfrom residualize import residualize_pcs_against_batch\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config: no alignment; residualize PCs vs batch; balanced graph\n    n_pca_components = 50\n    n_neighbors_total = 45\n    metric = 'cosine'\n    l2 = 1e-3\n    gamma = 0.2\n\n    print(f\"[Config] PCs={n_pca_components}, neighbors={n_neighbors_total}, metric={metric}, residualize(gamma={gamma}, l2={l2})\")\n\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] is required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] is required.\"\n\n    # Normalize and HVGs\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # PCA\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=0)\n\n    # Residualize PCs against batch (light)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Z_resid = residualize_pcs_against_batch(Z, batches, l2=l2, gamma=gamma, center=True)\n\n    # Store embedding and build balanced graph\n    adata.obsm['X_emb'] = Z_resid\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn(\n        Z_resid, batches, n_neighbors_total=n_neighbors_total,\n        metric=metric, weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    return adata\n",
+    "submitted_timestamp": 1761395438.550883,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.639734413049624,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Config] PCs=50, neighbors=45, metric=cosine, residualize(gamma=0.2, l2=0.001)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8c478006-08ef-4e40-9156-6142bbddbf99/result_human.h5ad\n\nRESULT_UUID: 8c478006-08ef-4e40-9156-6142bbddbf99\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.605  ASW_label: 0.224  ARI: 0.733  NMI: 0.694\n  Graph_conn: 0.961  kBET: 0.647  iLISI: 0.938  cLISI: 0.971\n  PCR: 0.319  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.805958  ASW_label: 0.541206  ARI: 0.733018  NMI: 0.694028\n  Graph_conn: 0.961197  kBET: 0.619824  iLISI: 0.938209  cLISI: 0.991508\n  PCR: 0.319358  Cell_cycle: 0.268803",
+        "ASW_batch": [
+          "0.605",
+          0.6047621747662627
+        ],
+        "ASW_label": [
+          "0.224",
+          0.22440570781526148
+        ],
+        "ARI": [
+          "0.733",
+          0.7330546474266397
+        ],
+        "NMI": [
+          "0.694",
+          0.6939415662822936
+        ],
+        "Graph_conn": [
+          "0.961",
+          0.9605275103291829
+        ],
+        "kBET": [
+          "0.647",
+          0.6474624660968303
+        ],
+        "iLISI": [
+          "0.938",
+          0.9382093316519544
+        ],
+        "cLISI": [
+          "0.971",
+          0.9708500514550487
+        ],
+        "PCR": [
+          "0.319",
+          0.31935848136527245
+        ],
+        "Cell_cycle": [
+          "0.305",
+          0.30477219330749433
+        ]
+      },
+      "evaluation_timestamp": 1761395950.55832,
+      "evaluation_datetime": "2025-10-25T20:39:10.558321",
+      "sort_key": [
+        0.639734413049624
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.639734413049624,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761395950.5781577,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-BalancedGraph-cosine-45-noalign-resid0.2: PCA + Light Batch Residualization + Balanced kNN' (ID: 43) has been evaluated.\n\n**Score:** 0.639734413049624\n**ASW_batch:** 0.605\n**ASW_label:** 0.224\n**ARI:** 0.733\n**NMI:** 0.694\n**Graph_conn:** 0.961\n**kBET:** 0.647\n**iLISI:** 0.938\n**cLISI:** 0.971\n**PCR:** 0.319\n**Cell_cycle:** 0.305\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.605  ASW_label: 0.224  ARI: 0.733  NMI: 0.694\n  Graph_conn: 0.961  kBET: 0.647  iLISI: 0.938  cLISI: 0.971\n  PCR: 0.319  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.805958  ASW_label: 0.541206  ARI: 0.733018  NMI: 0.694028\n  Graph_conn: 0.961197  kBET: 0.619824  iLISI: 0.938209  cLISI: 0.991508\n  PCR: 0.319358  Cell_cycle: 0.268803\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Config] PCs=50, neighbors=45, metric=cosine, residualize(gamma=0.2, l2=0.001)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8c478006-08ef-4e40-9156-6142bbddbf99/result_human.h5ad\n\nRESULT_UUID: 8c478006-08ef-4e40-9156-6142bbddbf99\n\n\nSTDERR:\n\n```"
+  }
+}

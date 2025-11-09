@@ -1,0 +1,47 @@
+{
+  "id": "592",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Utility v3: Boundary (disc-side) Jaccard vs Noesis tol=1e-8 \u2014 correct disc_idx parse (Quest Eval 562)",
+  "tags": [
+    "utility",
+    "analysis",
+    "sets-only",
+    "boundary",
+    "jaccard",
+    "parsing-fix"
+  ],
+  "abstract": "Corrects v2 by reading disc_idx (not eval_id) from Quest\u2019s CSV; compares disc-side boundary sets against Noesis\u2019s tol=1e-8 exports; logs counts, intersection/union, and Jaccard; returns baseline pack.",
+  "submitted_tick": 380,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, re\nimport numpy as np\n\n# Inputs\nQUEST_CSV = 'storage/Quest/nmap/n26/noesis_data/quest_eval562_boundary_contacts_disc_level.csv'\nNOESIS_BOUNDARY_CSV = 'storage/noesis/exports/active_boundary_tol1e8.csv'\nOUT_JSON = 'storage/noesis/nmap/quest_eval562_boundary_jaccard_tol1e8_v3.json'\nN = 26\n\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\n\ndef norm_side(s):\n    if s is None: return None\n    t = re.sub(r'[^a-zA-Z]', '', str(s).strip()).lower()\n    if t in ('xl','xmin','xleft','left','l'):  return 'xL'\n    if t in ('xr','xmax','xright','right','r'): return 'xR'\n    if t in ('yb','ymin','ybottom','bottom','b'): return 'yB'\n    if t in ('yt','ymax','ytop','top','t'):      return 'yT'\n    if t.startswith('x') and ('min' in t or 'left' in t): return 'xL'\n    if t.startswith('x') and ('max' in t or 'right' in t): return 'xR'\n    if t.startswith('y') and ('min' in t or 'bottom' in t): return 'yB'\n    if t.startswith('y') and ('max' in t or 'top' in t):    return 'yT'\n    return None\n\ndef read_quest_disc_side(path):\n    S = set()\n    meta = {'exists': os.path.exists(path), 'rows': 0, 'parsed': 0}\n    if not meta['exists']:\n        return S, meta\n    with open(path, 'r', newline='') as f:\n        sample = f.read(4096); f.seek(0)\n        has_header = any(c.isalpha() for c in sample)\n        if has_header:\n            reader = csv.DictReader(f)\n            for row in reader:\n                meta['rows'] += 1\n                # Prefer disc_idx explicitly; fallbacks if needed\n                candidates_i = ['disc_idx', 'discindex', 'disc_index', 'disc', 'i', 'index']\n                i_val = None\n                for k in candidates_i:\n                    if k in row and row[k] not in (None, ''):\n                        try:\n                            i_val = int(str(row[k]).strip())\n                            break\n                        except Exception:\n                            i_val = None\n                # Try detect side\n                candidates_s = ['side', 'boundary', 'label', 'which', 'wall']\n                s_val = None\n                for k in candidates_s:\n                    if k in row and row[k] not in (None, ''):\n                        s_val = norm_side(row[k])\n                        if s_val is not None:\n                            break\n                # As a last resort, scan all values\n                if i_val is None:\n                    for v in row.values():\n                        try:\n                            i_val = int(str(v).strip()); break\n                        except Exception:\n                            pass\n                if s_val is None:\n                    for v in row.values():\n                        s_val = norm_side(v)\n                        if s_val is not None: break\n                if i_val is None or s_val is None: \n                    continue\n                # Assume file uses 0-based indices as shown; if 1-based, shift if needed\n                if 0 <= i_val < N:\n                    S.add((i_val, s_val)); meta['parsed'] += 1\n        else:\n            reader = csv.reader(f)\n            for r in reader:\n                meta['rows'] += 1\n                if not r: continue\n                i_val = None; s_val = None\n                for cell in r:\n                    if i_val is None:\n                        try:\n                            i_val = int(str(cell).strip())\n                            continue\n                        except Exception:\n                            pass\n                    if s_val is None:\n                        s_val = norm_side(cell)\n                if i_val is None or s_val is None: \n                    continue\n                if 0 <= i_val < N:\n                    S.add((i_val, s_val)); meta['parsed'] += 1\n    return S, meta\n\ndef read_noesis_boundary_csv(path):\n    S = set()\n    if not os.path.exists(path):\n        return S\n    with open(path, 'r', newline='') as f:\n        reader = csv.DictReader(f)\n        for row in reader:\n            try:\n                i = int(str(row.get('i', '')).strip())\n                kind = str(row.get('kind', '')).strip()\n                kind = norm_side(kind)\n                if kind is None: \n                    continue\n                if 0 <= i < N:\n                    S.add((i, kind))\n            except Exception:\n                continue\n    return S\n\ndef load_snapshot():\n    if os.path.exists(SNAP_C) and os.path.exists(SNAP_R):\n        c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n        r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n        return c, r\n    # safe fallback\n    centers = []\n    for a in range(5):\n        for b in range(6):\n            if len(centers) < N:\n                centers.append([0.1 + 0.2*a, 0.1 + 0.15*b])\n    return np.array(centers, float), np.full(N, 0.08, float)\n\ndef construct_packing():\n    quest_set, quest_meta = read_quest_disc_side(QUEST_CSV)\n    noe_set = read_noesis_boundary_csv(NOESIS_BOUNDARY_CSV)\n\n    inter = len(quest_set & noe_set)\n    uni   = len(quest_set | noe_set) if (quest_set or noe_set) else 0\n    j     = (inter / uni) if uni > 0 else 1.0\n\n    out = {\n        'quest_path': QUEST_CSV,\n        'quest_exists': quest_meta.get('exists', False),\n        'quest_rows': quest_meta.get('rows', 0),\n        'quest_parsed': quest_meta.get('parsed', 0),\n        'quest_count': len(quest_set),\n        'noesis_count': len(noe_set),\n        'intersection': inter,\n        'union': uni,\n        'jaccard': j,\n        'missing_in_quest': sorted(list(noe_set - quest_set)),\n        'missing_in_noesis': sorted(list(quest_set - noe_set)),\n        'tol': '1e-8',\n        'note': 'Sets-only disc-side comparison; Noesis set read from exports CSV.'\n    }\n    try:\n        os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)\n        with open(OUT_JSON, 'w') as f:\n            json.dump(out, f, indent=2)\n        print('BOUNDARY_V3_JSON:', OUT_JSON)\n        print('BOUNDARY_V3_COUNTS:', out['quest_count'], out['noesis_count'], out['intersection'], out['union'])\n        print('BOUNDARY_V3_JACCARD:', out['jaccard'])\n    except Exception as e:\n        print('LOG_WRITE_ERROR:', e)\n\n    # Return a valid packing (baseline snapshot with tiny shrink)\n    c, r = load_snapshot()\n    r = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760955921.3581836,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nBOUNDARY_V3_JSON: storage/noesis/nmap/quest_eval562_boundary_jaccard_tol1e8_v3.json\nBOUNDARY_V3_COUNTS: 17 20 17 20\nBOUNDARY_V3_JACCARD: 0.85\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760955922.9768004,
+      "evaluation_datetime": "2025-10-20T18:25:22.976803"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760955923.0158823,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility v3: Boundary (disc-side) Jaccard vs Noesis tol=1e-8 \u2014 correct disc_idx parse (Quest Eval 562)' (ID: 592) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nBOUNDARY_V3_JSON: storage/noesis/nmap/quest_eval562_boundary_jaccard_tol1e8_v3.json\nBOUNDARY_V3_COUNTS: 17 20 17 20\nBOUNDARY_V3_JACCARD: 0.85\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

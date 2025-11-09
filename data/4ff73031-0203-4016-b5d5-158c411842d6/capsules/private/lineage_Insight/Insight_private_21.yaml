@@ -1,0 +1,140 @@
+capsule_id: Insight_private_21
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 452
+last_updated_at_tick: 452
+title: 'Insight I: SOTA (Zephyr II) with ConvLSTM Input Normalization (Follow-up)'
+tags:
+- stagnation
+- follow-up
+- architecture
+- normalization
+- convlstm
+- attention
+- policy gradient
+- sota
+abstract: 'This experiment integrates ''ConvLSTM Input Normalization'' (Insight I''s
+  promising idea from Stagnation Protocol I, ID 733: 73.5% on simple baseline) into
+  Zephyr II''s 94.3% SOTA architecture (Archive #24, ID 512). The SOTA model is a
+  4-step LayerNorm-ConvLSTM with Residual CNN (bottleneck, dilation=6) and Attention⊕GAP
+  readout, trained with Policy Gradient. This aims to investigate if input normalization
+  can further enhance performance or stabilize learning in an already high-performing,
+  complex recurrent architecture. This is a follow-up to Archive #28 and its mechanistic
+  addendum (ID 774).'
+word_count_total: 863
+messages:
+- message_id: Insight_private_21-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 452
+  title: 'Insight I: SOTA (Zephyr II) with ConvLSTM Input Normalization (Follow-up)'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Tuple, Dict, Any, Optional\nfrom ray import tune\nimport optax\n\n# ---\
+    \ Network components from Zephyr I/Nomos II for SOTA reconstruction ---\n# Residual\
+    \ Block (from Zephyr I baseline or similar)\nclass ResidualBlock(nn.Module):\n\
+    \    features: int\n    kernel_size: Tuple[int,int] = (3,3)\n    dilation: Tuple[int,int]\
+    \ = (1,1)\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features,\
+    \ self.kernel_size, padding='SAME',\n                    kernel_dilation=self.dilation,\n\
+    \                    kernel_init=nn.initializers.xavier_uniform())(x)\n      \
+    \  y = nn.relu(y)\n        y = nn.Conv(self.features, self.kernel_size, padding='SAME',\n\
+    \                    kernel_dilation=self.dilation,\n                    kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\n# Bottleneck Block (from Nomos II's SingleStepWideLSTM)\n\
+    class BottleneckBlock(nn.Module):\n    features: int\n    ratio: float = 0.28\
+    \ # Default from Zephyr II SOTA paper\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        mid = max(1, int(self.features * self.ratio))\n        y = nn.Conv(mid,\
+    \ (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(x); y =\
+    \ nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y);\
+    \ y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\n# ConvLSTM Cell with LayerNorm on gates (from\
+    \ Zephyr I baseline)\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n  \
+    \  kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self,\
+    \ carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size,\
+    \ padding='SAME',\n                        kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x,\
+    \ h], axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)  # per-pixel\
+    \ LN over channels\n        i, f, g, o = jnp.split(gates, 4, axis=-1)\n      \
+    \  i = nn.sigmoid(i); f = nn.sigmoid(f); o = nn.sigmoid(o); g = jnp.tanh(g)\n\
+    \        c = f * c + i * g\n        h = o * jnp.tanh(c)\n        return (h, c),\
+    \ h\n\n# Main SOTA Architecture with Input Normalization\nclass FourStepLNConvLSTM_AttnGAP_InputNorm(nn.Module):\n\
+    \    \"\"\"Zephyr II's 4-Step LN-ConvLSTM SOTA with added ConvLSTM Input Normalization.\"\
+    \"\"\n    cnn_features_1: int = 32\n    cnn_features_2: int = 64\n    conv_lstm_features:\
+    \ int = 64\n    dilation: int = 6\n    bottleneck_ratio: float = 0.28\n    # Attn_temp\
+    \ not explicitly mentioned for Zephyr II's SOTA in Archive 24, assume 1.0 or it's\
+    \ not a direct param\n    # Will use 1.0 as default, or parameterize if needed\
+    \ for sweeps.\n    attn_temp: float = 1.0 \n\n    @nn.compact\n    def __call__(self,\
+    \ x: jnp.ndarray, done: jnp.ndarray, rnn_state: Optional[Dict] = None) -> Tuple[jnp.ndarray,\
+    \ jnp.ndarray, Dict]:\n        x_spat = x[..., :7] # Separate spatial channels\n\
+    \        t = jnp.mean(x[..., 7:8], axis=(1,2)) # Global time feature\n       \
+    \ B, H, W, _ = x_spat.shape\n\n        # 1. Residual CNN Backbone with Dilation\
+    \ and Bottleneck Blocks\n        # Per Archive #24: \"Residual CNN with dilation,\
+    \ Bottleneck blocks (ratio r=0.28), channel widths (32->64).\"\n        cnn_out\
+    \ = nn.Conv(self.cnn_features_1, (3,3), padding='SAME',\n                    \
+    \      kernel_dilation=(self.dilation, self.dilation),\n                     \
+    \     kernel_init=nn.initializers.xavier_uniform())(x_spat); cnn_out = nn.relu(cnn_out)\n\
+    \        cnn_out = BottleneckBlock(self.cnn_features_1, ratio=self.bottleneck_ratio)(cnn_out)\n\
+    \        cnn_out = nn.Conv(self.cnn_features_2, (3,3), padding='SAME',\n     \
+    \                     kernel_dilation=(self.dilation, self.dilation),\n      \
+    \                    kernel_init=nn.initializers.xavier_uniform())(cnn_out); cnn_out\
+    \ = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2, ratio=self.bottleneck_ratio)(cnn_out)\n\
+    \n        # --- Insight I: ConvLSTM Input Normalization (New LayerNorm) ---\n\
+    \        cnn_out_normalized = nn.LayerNorm(name=\"convlstm_input_layernorm\",\
+    \ epsilon=1e-5)(cnn_out)\n\n        # 2. 4-Step LayerNorm ConvLSTM Core\n    \
+    \    # Init/reset state for ConvLSTM (B, H, W, features)\n        if rnn_state\
+    \ is None:\n            zeros = lambda: jnp.zeros((B, H, W, self.conv_lstm_features),\
+    \ dtype=x.dtype)\n            rnn_state = {'h': zeros(), 'c': zeros()}\n     \
+    \   if done is not None:\n            m = (1.0 - done.reshape(B,1,1,1).astype(x.dtype))\n\
+    \            rnn_state = {'h': rnn_state['h'] * m, 'c': rnn_state['c'] * m}\n\
+    \        \n        # Unroll ConvLSTM for 4 steps using lax.scan\n        conv_lstm_cell\
+    \ = ConvLSTMCellLN(self.conv_lstm_features)\n\n        # The scan function needs\
+    \ to be a closure over the cell and apply normalization inside\n        def scan_fn(carry,\
+    \ _):\n            current_h, current_c = carry\n            # Note: Here, the\
+    \ 'x' input to the ConvLSTM cell is 'cnn_out_normalized'\n            # which\
+    \ is constant over the unroll steps in standard PG setup (unroll length 20, but\
+    \ CNN only processes once)\n            # The recurrent state is passed, but the\
+    \ visual input remains the same.\n            (h_new, c_new), h_out_step = conv_lstm_cell((current_h,\
+    \ current_c), cnn_out_normalized)\n            return (h_new, c_new), h_out_step\
+    \ # h_out_step would be if we needed outputs at each step\n        \n        #\
+    \ Run the 4 steps, initial carry is rnn_state['h'], rnn_state['c']\n        #\
+    \ We only care about the final state after 4 steps for the readout\n        final_h,\
+    \ final_c = rnn_state['h'], rnn_state['c']\n        for _ in range(4): # 4 recurrent\
+    \ steps per environment step\n            (final_h, final_c), _ = conv_lstm_cell((final_h,\
+    \ final_c), cnn_out_normalized) # No output needed until end\n        \n     \
+    \   new_rnn_state = {'h': final_h, 'c': final_c}\n        h_for_readout = final_h\
+    \ # This is the final hidden state after 4 steps\n\n        # 3. Readout: Attention\
+    \ pooling concatenated with Global Average Pool (Attn⊕GAP)\n        # Attn pooling\n\
+    \        attn_logits = nn.Conv(1, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(h_for_readout)\n\
+    \        attn = nn.softmax(attn_logits.reshape((B, -1)) / self.attn_temp, axis=-1)\n\
+    \        h_flat = h_for_readout.reshape((B, H*W, self.conv_lstm_features))\n \
+    \       z_attn = jnp.einsum('bij,bi->bj', h_flat, attn)\n\n        # Global Average\
+    \ Pool\n        z_gap = jnp.mean(h_for_readout, axis=(1,2)) # Shape (B, conv_lstm_features)\n\
+    \n        # Concatenate Attn and GAP, then Late Time Injection\n        z = jnp.concatenate([z_attn,\
+    \ z_gap, t], axis=-1)\n        \n        # 4. Separate MLP Heads for Policy and\
+    \ Value\n        # Per Archive #24: \"Heads minimal\"\n        z = nn.Dense(256,\
+    \ kernel_init=nn.initializers.xavier_uniform())(z); z = nn.relu(z)\n        policy_logits\
+    \ = nn.Dense(4, kernel_init=nn.initializers.xavier_uniform())(z)\n        value\
+    \ = nn.Dense(1, kernel_init=nn.initializers.xavier_uniform())(z).squeeze(-1)\n\
+    \        \n        return policy_logits, value, new_rnn_state\n\n# --- Hyperparameters\
+    \ from Archive #24 ---\nBASE_SEED = 42 # Fixed base seed from Zephyr II SOTA\n\
+    \ndef _define_hyperparameters():\n    return {\n        'learning_rate': tune.choice([4e-4]),\n\
+    \        'entropy_coef': tune.choice([0.01]),\n        'value_loss_coef': tune.choice([0.5]),\n\
+    \        'cnn_features_1': tune.choice([32]),\n        'cnn_features_2': tune.choice([64]),\n\
+    \        'conv_lstm_features': tune.choice([64]),\n        'dilation': tune.choice([6]),\n\
+    \        'bottleneck_ratio': tune.choice([0.28]),\n    }\n\ndef create_network(hparams):\n\
+    \    return FourStepLNConvLSTM_AttnGAP_InputNorm(\n        cnn_features_1=hparams['cnn_features_1'],\n\
+    \        cnn_features_2=hparams['cnn_features_2'],\n        conv_lstm_features=hparams['conv_lstm_features'],\n\
+    \        dilation=hparams['dilation'],\n        bottleneck_ratio=hparams['bottleneck_ratio'],\n\
+    \    )\n\n# --- Training Defaults (from Archive #24) ---\n# \"Defaults: Adam(lr=4e-4),\
+    \ global grad-clip=1.0, entropy_coef=0.01, value_loss_coef=0.5; GAE(γ=0.97, λ=0.97);\
+    \ rollout 64 envs × 20 steps.\"\n# This implies using the system's default Policy\
+    \ Gradient training_step, but with specific hyperparameters.\n# If a custom optimizer\
+    \ is needed beyond just learning_rate for Adam with global clip, define it here.\n\
+    \ndef create_optimizer(learning_rate: float = 4e-4) -> optax.GradientTransformation:\n\
+    \    return optax.chain(\n        optax.clip_by_global_norm(1.0), # Global gradient\
+    \ clipping as per SOTA\n        optax.adam(learning_rate=learning_rate)\n    )\n\
+    # Rely on system's default training_step, which handles GAE, losses, etc.\n"
+  word_count: 863
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

@@ -1,0 +1,46 @@
+{
+  "id": "1260",
+  "author": "Aletheia III",
+  "research_task_id": "1",
+  "title": "Synthesis: Three-Stage Nudge-Analyze-Refine",
+  "tags": [
+    "synthesis",
+    "nudging",
+    "targeted perturbation",
+    "consensus",
+    "innovation"
+  ],
+  "abstract": "This experiment proposes a novel three-stage optimization process, synthesizing the station's SOTA 'nudging' with the Aletheia lineage's 'targeted perturbation' concept. Stage 1 uses nudging on pair (0,1) to enter a promising structural basin. Stage 2 performs a novel on-the-fly analysis to identify the single least-constrained 'variable' circle in the new configuration. Stage 3 conducts an exhaustive refinement, but focuses the jitter perturbation only on this identified variable circle. The hypothesis is that this focused refinement will be more efficient and effective at deepening the optimum than a uniform jitter.",
+  "submitted_tick": 744,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9 \nTOL = 1e-9 \n\nBASE_CENTERS_PATH = 'storage/Quest/n26_sota/centers.txt'\nBASE_RADII_PATH = 'storage/Quest/n26_sota/radii.txt'\n\n# Nudging Parameters\nALPHA_ENCOURAGE_STEP = 5e1 \nEPS_CLOSE_STEP = 0.005 \nTARGET_PAIR_ENCOURAGE = (0, 1)\n\n# Refinement Parameters\nSLSQP_JITTER_AMPLITUDES = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3, 4e-3, 5e-3]\nSLSQP_RESTARTS_PER_AMPLITUDE = 5\n\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\ndef objective(z): return -np.sum(z[N*2:])\ndef ineq_boundary(z):\n    c, r = z_to_cr(z)\n    return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z)\n    diff = c[:, None, :] - c[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=-1) + 1e-15)\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef _ensure_validity(c, r):\n    r_new = np.copy(r)\n    for i in range(N): \n        r_new[i] = min(r_new[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n    for _ in range(10): \n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j])\n                if dist < r_new[i] + r_new[j]: \n                    violations+=1\n                    scale = (dist/(r_new[i] + r_new[j]))*(1.0-SAFETY) \n                    r_new[i]*=scale\n                    r_new[j]*=scale\n        if violations == 0: break \n    return c, np.maximum(r_new, 0) \n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt(BASE_CENTERS_PATH)\n        base_radii = np.loadtxt(BASE_RADII_PATH)\n    except Exception as e: return np.random.rand(N,2), np.full(N, 0.05)\n\n    # --- STAGE 1: NUDGE-SEED GENERATION ---\n    i_enc, j_enc = TARGET_PAIR_ENCOURAGE\n    dist_vec = base_centers[i_enc] - base_centers[j_enc]; dist = np.linalg.norm(dist_vec)\n    slack = dist - (base_radii[i_enc] + base_radii[j_enc])\n    nudged_centers, nudged_radii = np.copy(base_centers), np.copy(base_radii)\n    if slack > 0 and (EPS_CLOSE_STEP - slack) > 0:\n        grad_dist_ci = dist_vec / dist\n        move = ALPHA_ENCOURAGE_STEP * (EPS_CLOSE_STEP - slack)\n        nudged_centers[i_enc] -= grad_dist_ci * move * 0.01\n        nudged_centers[j_enc] += grad_dist_ci * move * 0.01\n        nudged_radii[i_enc] += move * 0.001\n        nudged_radii[j_enc] += move * 0.001\n    nudged_centers, nudged_radii = _ensure_validity(np.clip(nudged_centers,R_MIN,1-R_MIN), np.clip(nudged_radii,R_MIN,0.5))\n    \n    # --- STAGE 2: ON-THE-FLY ANALYSIS to find variable circle ---\n    contact_counts = np.zeros(N, dtype=int)\n    for i in range(N):\n        if abs(nudged_centers[i,0] - nudged_radii[i]) < TOL or abs(1 - (nudged_centers[i,0] + nudged_radii[i])) < TOL: contact_counts[i] += 1\n        if abs(nudged_centers[i,1] - nudged_radii[i]) < TOL or abs(1 - (nudged_centers[i,1] + nudged_radii[i])) < TOL: contact_counts[i] += 1\n    for i in range(N):\n        for j in range(i + 1, N):\n            if np.linalg.norm(nudged_centers[i] - nudged_centers[j]) - (nudged_radii[i] + nudged_radii[j]) < TOL:\n                contact_counts[i] += 1; contact_counts[j] += 1\n    variable_circle_idx = np.argmin(contact_counts)\n    print(f\"Analysis complete. Identified circle {variable_circle_idx} as most variable (contacts: {contact_counts[variable_circle_idx]})\")\n\n    # --- STAGE 3: FOCUSED REFINEMENT ---\n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    bounds = [(0,1)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n    \n    for amp in SLSQP_JITTER_AMPLITUDES:\n        for i in range(SLSQP_RESTARTS_PER_AMPLITUDE):\n            np.random.seed(int(amp * 1e6) + i)\n            perturbed_centers = np.copy(nudged_centers)\n            jitter = np.random.uniform(-amp, amp, size=2)\n            perturbed_centers[variable_circle_idx] += jitter # Perturb ONLY the variable circle\n            initial_z = cr_to_z(np.clip(perturbed_centers, R_MIN, 1 - R_MIN), nudged_radii)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success and -res.fun > best_score:\n                best_score = -res.fun\n                c_res, r_res = z_to_cr(res.x)\n                best_centers, best_radii = _ensure_validity(c_res, r_res)\n    \n    if best_centers is None: return nudged_centers, nudged_radii\n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761105340.0166435,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.635983082281458,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAnalysis complete. Identified circle 0 as most variable (contacts: 1)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761105344.8866985,
+      "evaluation_datetime": "2025-10-22T11:55:44.886701"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.635983082281458,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761105344.9061732,
+    "version_notified": "original",
+    "message": "Your research submission 'Synthesis: Three-Stage Nudge-Analyze-Refine' (ID: 1260) has been evaluated.\n\n**Score:** 2.635983082281458\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAnalysis complete. Identified circle 0 as most variable (contacts: 1)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

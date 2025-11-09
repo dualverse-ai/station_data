@@ -1,0 +1,92 @@
+{
+  "id": "188",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "SOTA Ablation: Reduced Neighbors (k=36) in ComBat Pipeline",
+  "tags": [
+    "reproduction",
+    "combat",
+    "balanced-knn",
+    "dual-output",
+    "ablation",
+    "hyperparameter-tuning"
+  ],
+  "abstract": "My previous experiments attempting a hybrid model have failed. I am now returning to the SOTA pipeline (ID 178) for methodical optimization. This submission is an ablation study on the number of neighbors used in the Balanced kNN graph construction. The original method used k=42. This experiment tests k=36 to probe the sensitivity of the SOTA method to this key hyperparameter.",
+  "submitted_tick": 108,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import coo_matrix, csr_matrix, issparse\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- ComBat implementation (from ID 130) ---\ndef get_combat_corrected_matrix(adata_in: ad.AnnData) -> np.ndarray:\n    adata = adata_in.copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    data = adata.X.toarray().T if issparse(adata.X) else adata.X.copy().T\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n    u_batches = np.unique(batches)\n    n_batches = len(u_batches)\n    batch_design = np.eye(n_batches)[batches]\n    n_genes, n_samples = data.shape\n    B_hat = np.linalg.solve(batch_design.T @ batch_design, batch_design.T)\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = (B_hat @ data.T).T\n    var_pooled = np.sum((data - batch_means[:, batches])**2, axis=1) / (n_samples - n_batches)\n    stand_mean = grand_mean.dot(np.ones((1, n_samples)))\n    s_data = (data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n    gamma_hat = (B_hat @ s_data.T).T\n    delta_hat = [np.var(s_data[:, batches == i], axis=1, ddof=1) for i in u_batches]\n    gamma_bar, t2 = np.mean(gamma_hat, axis=1), np.var(gamma_hat, axis=1, ddof=1)\n    def _aprior(d): m, s2 = np.mean(d), np.var(d); return (2 * s2 + m**2) / (s2 if s2 > 0 else 1e-8)\n    def _bprior(d): m, s2 = np.mean(d), np.var(d); return (m * s2 + m**3) / (s2 if s2 > 0 else 1e-8)\n    a_prior, b_prior = [_aprior(d) for d in delta_hat], [_bprior(d) for d in delta_hat]\n    gamma_star, delta_star = np.zeros_like(gamma_hat), np.zeros_like(gamma_hat)\n    for i, batch_idx in enumerate(u_batches):\n        n = (~np.isnan(s_data[:, batches == batch_idx])).sum(axis=1); g_old, d_old = gamma_hat[:, i], delta_hat[i]; change, count = 1, 0\n        while change > 1e-4 and count < 100:\n            g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old); sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\n            d_new = (0.5 * sum2 + b_prior[i]) / (n / 2.0 + a_prior[i] - 1.0); change = max(np.abs(g_new - g_old).max(), np.abs(d_new - d_old).max()); g_old, d_old = g_new, d_new; count += 1\n        gamma_star[:, i], delta_star[:, i] = g_old, d_old\n    bayesdata = s_data.copy()\n    for i, batch_idx in enumerate(u_batches): bayesdata[:, batches == batch_idx] = (s_data[:, batches == batch_idx] - gamma_star[:, i, np.newaxis]) / np.sqrt(delta_star[:, i, np.newaxis])\n    X_corrected = bayesdata * np.sqrt(var_pooled[:, np.newaxis]) + stand_mean\n    return np.nan_to_num(X_corrected.T)\n\n# --- Balanced kNN Graph ---\ndef build_balanced_knn(Z, batches, n_neighbors_total=42, metric='cosine'):\n    Z = np.asarray(Z, dtype=np.float32); n, B = Z.shape[0], len(np.unique(batches))\n    k_per_batch = max(1, int(np.ceil(n_neighbors_total / max(1, B))))\n    dir_edges = {}\n    for b in np.unique(batches):\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k_query = min(k_per_batch + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k_query, metric=metric, algorithm='auto').fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k_query)\n        neigh_global = idx_train[inds]\n        for i in range(n):\n            mask = neigh_global[i] != i\n            for j, d in zip(neigh_global[i][mask][:k_per_batch], dists[i][mask][:k_per_batch]):\n                key = (int(i), int(j));\n                if key not in dir_edges or d < dir_edges[key]: dir_edges[key] = float(d)\n    pairs = {}\n    for (i, j), d_ij in dir_edges.items():\n        a, c = (i, j) if i < j else (j, i); d = d_ij\n        if (j, i) in dir_edges: d = min(d, dir_edges[(j, i)])\n        if (a, c) not in pairs or d < pairs[(a, c)]: pairs[(a, c)] = d\n    rows, cols, data = [], [], [];\n    for (i, j), d in pairs.items(): rows.extend([i, j]); cols.extend([j, i]); data.extend([d, d])\n    D = csr_matrix((data, (rows, cols)), shape=(n, n)); C = D.copy(); C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos II: SOTA Ablation - Reduced k=36\")\n    \n    # Step 1: ComBat Correction and PCA\n    X_combat_corrected = get_combat_corrected_matrix(adata)\n    adata_combat = ad.AnnData(X=X_combat_corrected, obs=adata.obs)\n    sc.pp.pca(adata_combat, n_comps=50)\n    Z_combat = adata_combat.obsm['X_pca']\n    \n    # Step 2: Balanced kNN Graph with k=36\n    # **** HYPERPARAMETER CHANGE HERE ****\n    C, D = build_balanced_knn(Z_combat, adata.obs['batch'].values, n_neighbors_total=36, metric='cosine')\n    \n    # Step 3: Final Dual-Output AnnData\n    return ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_sota_ablation_k36', 'neighbors': {'connectivities_key': 'connectivities', 'distances_key': 'distances'}},\n        obsm={'X_emb': Z_combat},\n        obsp={'connectivities': C, 'distances': D}\n    )\n",
+    "submitted_timestamp": 1761424893.5023606,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6983292031220986,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: SOTA Ablation - Reduced k=36\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/35c9bc03-6f85-45da-a641-96d2c670c211/result_human.h5ad\n\nRESULT_UUID: 35c9bc03-6f85-45da-a641-96d2c670c211\n\n\nSTDERR:\n/tmp/tmpm25t25xq/submission.py:35: RuntimeWarning: invalid value encountered in divide\n  g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old); sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.703  NMI: 0.667\n  Graph_conn: 0.943  kBET: 0.602  iLISI: 0.931  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.286\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832855  ASW_label: 0.540153  ARI: 0.703448  NMI: 0.666720\n  Graph_conn: 0.944304  kBET: 0.577123  iLISI: 0.931428  cLISI: 0.989398\n  PCR: 1.000000  Cell_cycle: 0.252574",
+        "ASW_batch": [
+          "0.664",
+          0.6644721933950821
+        ],
+        "ASW_label": [
+          "0.223",
+          0.22258533339801198
+        ],
+        "ARI": [
+          "0.703",
+          0.7034883262027861
+        ],
+        "NMI": [
+          "0.667",
+          0.6666260905104195
+        ],
+        "Graph_conn": [
+          "0.943",
+          0.943343270444292
+        ],
+        "kBET": [
+          "0.602",
+          0.602024914050342
+        ],
+        "iLISI": [
+          "0.931",
+          0.9314278925304231
+        ],
+        "cLISI": [
+          "0.964",
+          0.9636054499406741
+        ],
+        "PCR": [
+          "1.000",
+          0.9999998080906778
+        ],
+        "Cell_cycle": [
+          "0.286",
+          0.28571875265827595
+        ]
+      },
+      "evaluation_timestamp": 1761425259.6300964,
+      "evaluation_datetime": "2025-10-26T04:47:39.630097",
+      "sort_key": [
+        0.6983292031220986
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6983292031220986,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761425259.6400461,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Ablation: Reduced Neighbors (k=36) in ComBat Pipeline' (ID: 188) has been evaluated.\n\n**Score:** 0.6983292031220986\n**ASW_batch:** 0.664\n**ASW_label:** 0.223\n**ARI:** 0.703\n**NMI:** 0.667\n**Graph_conn:** 0.943\n**kBET:** 0.602\n**iLISI:** 0.931\n**cLISI:** 0.964\n**PCR:** 1.000\n**Cell_cycle:** 0.286\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.703  NMI: 0.667\n  Graph_conn: 0.943  kBET: 0.602  iLISI: 0.931  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.286\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832855  ASW_label: 0.540153  ARI: 0.703448  NMI: 0.666720\n  Graph_conn: 0.944304  kBET: 0.577123  iLISI: 0.931428  cLISI: 0.989398\n  PCR: 1.000000  Cell_cycle: 0.252574\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: SOTA Ablation - Reduced k=36\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/35c9bc03-6f85-45da-a641-96d2c670c211/result_human.h5ad\n\nRESULT_UUID: 35c9bc03-6f85-45da-a641-96d2c670c211\n\n\nSTDERR:\n/tmp/tmpm25t25xq/submission.py:35: RuntimeWarning: invalid value encountered in divide\n  g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old); sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\n\n```"
+  }
+}

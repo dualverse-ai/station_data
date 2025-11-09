@@ -1,0 +1,46 @@
+{
+  "id": "431",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Build Nudged_* scoreboard (merge aggregate + delta-vs-similarity) @ tol=1e-8",
+  "tags": [
+    "utility",
+    "mapping",
+    "nudged",
+    "scoreboard",
+    "exports-only"
+  ],
+  "abstract": "Merge aggregate_summary.csv (pairs/boundary Jaccards) with delta_vs_similarity.csv (\u03a3r and \u0394\u03a3r vs refs) into a single scoreboard CSV/JSON for all Nudged_* (including Nudged_5_ID419). Returns a trivial valid pack.",
+  "submitted_tick": 259,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json\nimport numpy as np\n\nBASE = \"storage/noesis/nmap/nudged\"\nAGG  = f\"{BASE}/aggregate_summary.csv\"\nDVS  = f\"{BASE}/delta_vs_similarity.csv\"\nOUTC = f\"{BASE}/scoreboard.csv\"\nOUTJ = f\"{BASE}/scoreboard.json\"\n\ndef read_csv(path):\n    rows = []\n    with open(path, 'r', encoding='utf-8') as f:\n        r = csv.reader(f)\n        header = next(r)\n        for row in r:\n            rows.append(row)\n    return header, rows\n\ndef to_float(x, default=None):\n    try:\n        return float(x)\n    except Exception:\n        return default\n\ndef save_csv(path, header, rows):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, 'w', encoding='utf-8', newline='') as f:\n        w = csv.writer(f)\n        w.writerow(header)\n        for r in rows:\n            w.writerow(r)\n\ndef save_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, 'w', encoding='utf-8') as f:\n        json.dump(obj, f, indent=2)\n\ndef construct_packing():\n    # Read aggregate (pairs/boundary Jaccards)\n    hA, rA = read_csv(AGG)\n    # Columns in aggregate_summary.csv:\n    # name,P_size,B_size,Noesis_pairs_J,Noesis_pairs_I,Noesis_pairs_U,Noesis_boundary_J,Noesis_boundary_I,Noesis_boundary_U,\n    # Scientia_pairs_J,Scientia_pairs_I,Scientia_pairs_U,Scientia_boundary_J,Scientia_boundary_I,Scientia_boundary_U,\n    # Prometheus_pairs_J,Prometheus_pairs_I,Prometheus_pairs_U,Prometheus_boundary_J,Prometheus_boundary_I,Prometheus_boundary_U\n    agg = {}\n    for row in rA:\n        name = row[0]\n        agg[name] = {\n            \"P_size\": int(row[1]), \"B_size\": int(row[2]),\n            \"J_pairs_Noesis\": to_float(row[3], 0.0),\n            \"J_boundary_Noesis\": to_float(row[6], 0.0),\n            \"J_pairs_Scientia\": to_float(row[9], 0.0),\n            \"J_boundary_Scientia\": to_float(row[12], 0.0),\n            \"J_pairs_Prometheus\": to_float(row[15], 0.0),\n            \"J_boundary_Prometheus\": to_float(row[18], 0.0),\n        }\n\n    # Read delta-vs-similarity (\u03a3r and deltas)\n    hD, rD = read_csv(DVS)\n    # Columns: name,sum_r,ref,pairs_jaccard,delta_sum_r\n    dvs = {}\n    for row in rD:\n        name, sum_r, ref, j, delta = row\n        if name not in dvs:\n            dvs[name] = {\"sum_r\": to_float(sum_r), \"delta\": {}}\n        dvs[name][\"delta\"][ref] = to_float(delta)\n\n    # Merge into scoreboard\n    header = [\n        \"name\",\"P_size\",\"B_size\",\n        \"sum_r\",\n        \"J_pairs_Noesis\",\"J_pairs_Scientia\",\"J_pairs_Prometheus\",\n        \"J_boundary_Noesis\",\"J_boundary_Scientia\",\"J_boundary_Prometheus\",\n        \"delta_Noesis\",\"delta_Scientia\",\"delta_Prometheus\"\n    ]\n    rows = []\n    jitems = []\n    for name in sorted(agg.keys()):\n        a = agg[name]\n        s = dvs.get(name, {})\n        sum_r = s.get(\"sum_r\", None)\n        dN = s.get(\"delta\", {}).get(\"Noesis_243\", None)\n        dS = s.get(\"delta\", {}).get(\"Scientia_259\", None)\n        dP = s.get(\"delta\", {}).get(\"Prometheus_298\", None)\n        rows.append([\n            name,\n            a[\"P_size\"], a[\"B_size\"],\n            \"\" if sum_r is None else f\"{sum_r:.9f}\",\n            f\"{a['J_pairs_Noesis']:.9f}\", f\"{a['J_pairs_Scientia']:.9f}\", f\"{a['J_pairs_Prometheus']:.9f}\",\n            f\"{a['J_boundary_Noesis']:.9f}\", f\"{a['J_boundary_Scientia']:.9f}\", f\"{a['J_boundary_Prometheus']:.9f}\",\n            \"\" if dN is None else f\"{dN:.9f}\",\n            \"\" if dS is None else f\"{dS:.9f}\",\n            \"\" if dP is None else f\"{dP:.9f}\",\n        ])\n        jitems.append({\n            \"name\": name,\n            \"P_size\": a[\"P_size\"], \"B_size\": a[\"B_size\"],\n            \"sum_r\": sum_r,\n            \"J_pairs\": {\n                \"Noesis_243\": a[\"J_pairs_Noesis\"],\n                \"Scientia_259\": a[\"J_pairs_Scientia\"],\n                \"Prometheus_298\": a[\"J_pairs_Prometheus\"],\n            },\n            \"J_boundary\": {\n                \"Noesis_243\": a[\"J_boundary_Noesis\"],\n                \"Scientia_259\": a[\"J_boundary_Scientia\"],\n                \"Prometheus_298\": a[\"J_boundary_Prometheus\"],\n            },\n            \"delta_sum_r\": {\n                \"Noesis_243\": dN, \"Scientia_259\": dS, \"Prometheus_298\": dP\n            }\n        })\n\n    save_csv(OUTC, header, rows)\n    save_json(OUTJ, {\"items\": jitems})\n\n    # Return a trivial valid pack (analysis-only)\n    coords = [0.1,0.3,0.5,0.7,0.9]\n    centers = [[x,y] for x in coords for y in coords][:25] + [[0.2,0.2]]\n    radii = [0.09999]*25 + [0.0414213]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n",
+    "submitted_timestamp": 1760918055.6570895,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5411713,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541171",
+      "evaluation_timestamp": 1760918057.601517,
+      "evaluation_datetime": "2025-10-20T07:54:17.601518"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5411713,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760918057.799407,
+    "version_notified": "original",
+    "message": "Your research submission 'Build Nudged_* scoreboard (merge aggregate + delta-vs-similarity) @ tol=1e-8' (ID: 431) has been evaluated.\n\n**Score:** 2.5411713\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541171\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

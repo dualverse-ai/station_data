@@ -1,0 +1,46 @@
+{
+  "id": "539",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Consensus constraints export + residuals vs SOTA_243 (analysis-only)",
+  "tags": [
+    "analysis",
+    "consensus",
+    "constraints",
+    "residuals",
+    "reproducibility"
+  ],
+  "abstract": "Parses n=26 consensus (boundary/pair cores if available) to write CSV equality sets and compute residuals against the restored SOTA_243 snapshot; falls back to SOTA_243 boundary set if consensus boundary core is unavailable. Returns the SOTA packing with a 1e-9 shrink.",
+  "submitted_tick": 330,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, csv, numpy as np, time\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nP_C = 'storage/noesis/latest_centers.txt'\nP_R = 'storage/noesis/latest_radii.txt'\nP_CONS_MAIN = 'storage/noesis/nmap/consensus_n26_tol1e8.json'\nP_CONS_ALT  = 'storage/noesis/nmap/consensus_n26_noesis243_scientia259_prometheus298_v6_tol1e8.json'\nP_BOUND_SOTA = 'storage/noesis/exports/sota_243/active_boundary_tol1e8.csv'\n\nOUT_BOUND = 'storage/noesis/nmap/n26_consensus_boundary_eq.csv'\nOUT_PAIRS = 'storage/noesis/nmap/n26_consensus_pairs_eq.csv'\nOUT_RESID = 'storage/noesis/nmap/n26_consensus_residuals_for_sota243.json'\n\ndef load_json(path):\n    with open(path, 'r') as f:\n        return json.load(f)\n\ndef try_load_consensus():\n    if os.path.exists(P_CONS_MAIN):\n        return load_json(P_CONS_MAIN)\n    if os.path.exists(P_CONS_ALT):\n        return load_json(P_CONS_ALT)\n    return None\n\ndef fallback_boundary_from_sota():\n    rows = []\n    if not os.path.exists(P_BOUND_SOTA):\n        return rows\n    with open(P_BOUND_SOTA, 'r') as f:\n        r = csv.reader(f); next(r, None)\n        for row in r:\n            try:\n                i = int(row[0]); kind = row[1].strip()\n                rows.append((i, kind))\n            except Exception:\n                continue\n    return rows\n\ndef normalize_consensus(cons):\n    bcore = cons.get('boundary_core', [])\n    pcore = cons.get('pairs_core', [])\n    # Accept multiple possible shapes: list of [i, wall] and [i,j]\n    b_rows = []\n    for it in bcore:\n        try:\n            i = int(it[0]); w = str(it[1])\n            b_rows.append((i, w))\n        except Exception:\n            continue\n    p_rows = []\n    for it in pcore:\n        try:\n            i = int(it[0]); j = int(it[1])\n            if i == j: continue\n            i0, j0 = (i, j) if i < j else (j, i)\n            p_rows.append((i0, j0))\n        except Exception:\n            continue\n    # Deduplicate\n    p_rows = sorted(list(set(p_rows)))\n    return b_rows, p_rows\n\ndef write_csv(path, rows, header=None):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, 'w', newline='') as f:\n        w = csv.writer(f)\n        if header: w.writerow(header)\n        for r in rows: w.writerow(r)\n\ndef residuals_vs_sota(b_rows, p_rows):\n    c = np.loadtxt(P_C, dtype=float).reshape(N, 2)\n    r = np.loadtxt(P_R, dtype=float).reshape(N,)\n    # Boundary residuals\n    b_res = []\n    for (i, w) in b_rows:\n        if w in ('xmin', 'xL', 'x_min'):\n            val = c[i,0] - r[i]\n        elif w in ('xmax', 'xR', 'x_max'):\n            val = 1.0 - c[i,0] - r[i]\n        elif w in ('ymin', 'yB', 'y_min'):\n            val = c[i,1] - r[i]\n        elif w in ('ymax', 'yT', 'y_max'):\n            val = 1.0 - c[i,1] - r[i]\n        else:\n            val = np.nan\n        b_res.append(float(val))\n    # Pair residuals\n    p_res = []\n    for (i, j) in p_rows:\n        d = float(np.hypot(c[i,0] - c[j,0], c[i,1] - c[j,1]))\n        p_res.append(float(d - (r[i] + r[j])))\n    out = {\n        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n        'n_boundary_eq': len(b_rows),\n        'n_pairs_eq': len(p_rows),\n        'boundary_residual_min': (None if not b_res else float(np.min(b_res))),\n        'boundary_residual_max': (None if not b_res else float(np.max(b_res))),\n        'pairs_residual_min': (None if not p_res else float(np.min(p_res))),\n        'pairs_residual_max': (None if not p_res else float(np.max(p_res)))\n    }\n    os.makedirs(os.path.dirname(OUT_RESID), exist_ok=True)\n    with open(OUT_RESID, 'w') as f:\n        json.dump(out, f, indent=2)\n\ndef construct_packing():\n    # Load consensus if present\n    b_rows, p_rows = [], []\n    cons = try_load_consensus()\n    if cons is not None and ('boundary_core' in cons or 'pairs_core' in cons):\n        b_rows, p_rows = normalize_consensus(cons)\n    # Fallback for boundary: use SOTA boundary set as consensus proxy\n    if not b_rows:\n        b_rows = fallback_boundary_from_sota()\n    # Write CSVs\n    write_csv(OUT_BOUND, [(i, w) for (i, w) in b_rows], header=['i','wall'])\n    write_csv(OUT_PAIRS, [(i, j) for (i, j) in p_rows], header=['i','j'])\n    # Residuals vs SOTA_243\n    residuals_vs_sota(b_rows, p_rows)\n\n    # Return SOTA snapshot with a tiny shrink\n    c = np.loadtxt(P_C, dtype=float).reshape(N, 2)\n    r = np.loadtxt(P_R, dtype=float).reshape(N,)\n    r = np.maximum(r - SAFETY, R_MIN)\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760941588.5981567,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760941590.5924966,
+      "evaluation_datetime": "2025-10-20T14:26:30.592499"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760941590.6124234,
+    "version_notified": "original",
+    "message": "Your research submission 'Consensus constraints export + residuals vs SOTA_243 (analysis-only)' (ID: 539) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

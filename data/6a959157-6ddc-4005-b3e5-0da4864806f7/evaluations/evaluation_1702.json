@@ -1,0 +1,92 @@
+{
+  "id": "1702",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "\u03b1_mix sweep: \u03b1=0.20, kq=1280 (within\u2011batch structural + equal\u2011quota, k=50, cosine)",
+  "tags": [
+    "graph",
+    "quotas",
+    "within-batch",
+    "blend",
+    "residualization",
+    "knn"
+  ],
+  "abstract": "Second \u03b1_mix ablation to balance PCR and mixing. We blend a within\u2011batch structural KNN graph (raw PCs) with an equal\u2011quota cross\u2011batch graph (batch\u2011residualized PCs) via C=(1\u2212\u03b1)\u00b7C_wb+\u03b1\u00b7C_eq using \u03b1=0.20 and a larger candidate pool kq=1280. Distances take the union with elementwise min. Returns both connectivities and distances; neighbors metadata set.",
+  "submitted_tick": 1195,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nimport anndata as ad\n\nsys.path.append('storage/praxis')\nfrom integration_utils import (\n    normalize_log1p_counts, select_features, pca_svd,\n    ridge_residualize_per_pc, equal_quota_knn, set_neighbors_meta\n)\n\ndef _to_csr(X):\n    return X if sp.isspmatrix_csr(X) else (X.tocsr() if sp.issparse(X) else sp.csr_matrix(X))\n\ndef _row_normalize(C):\n    C = _to_csr(C).astype(np.float64)\n    rs = np.asarray(C.sum(axis=1)).ravel()\n    rs[rs == 0.0] = 1.0\n    C = C.tocsr(copy=True)\n    C.data *= np.repeat(1.0 / rs, np.diff(C.indptr))\n    return C\n\ndef _build_within_batch_knn(Z, batches, k=50, k_candidates=1280, kwb_target=10, metric=\"cosine\"):\n    n = Z.shape[0]\n    nn = NearestNeighbors(n_neighbors=min(k_candidates, n-1) + 1, metric=metric)\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d = d_all[:, 1:]\n    idx = idx_all[:, 1:]\n    batches = np.asarray(batches)\n\n    rows, cols, wdat, ddat = [], [], [], []\n    for i in range(n):\n        mask = (batches[idx[i]] == batches[i])\n        if mask.any():\n            di = d[i][mask]\n            ji = idx[i][mask]\n            take = min(kwb_target, di.shape[0])\n            if take > 0:\n                order = np.argpartition(di, kth=take-1)[:take]\n                sel_j = ji[order]\n                sel_d = di[order]\n                rows.extend([i]*take)\n                cols.extend(sel_j.tolist())\n                wdat.extend([1.0]*take)\n                ddat.extend(sel_d.tolist())\n    C_dir = sp.coo_matrix((wdat, (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((ddat, (rows, cols)), shape=(n, n)).tocsr()\n    C_sym = C_dir.maximum(C_dir.T)\n    D_sym = D_dir.minimum(D_dir.T)\n    return C_sym.tocsr().astype(np.float64), D_sym.tocsr().astype(np.float64)\n\ndef _union_min_distances(D_a, D_b):\n    D_a = _to_csr(D_a)\n    D_b = _to_csr(D_b)\n    D = D_a.tolil(copy=True)\n    B = D_b.tocsr()\n    for i in range(B.shape[0]):\n        start, end = B.indptr[i], B.indptr[i+1]\n        js = B.indices[start:end]\n        vals = B.data[start:end]\n        if js.size == 0:\n            continue\n        pos = {int(col): p for p, col in enumerate(D.rows[i])}\n        new_rows = list(D.rows[i])\n        new_vals = list(D.data[i])\n        updated = False\n        for j, v in zip(js, vals):\n            if j in pos:\n                p = pos[j]\n                if v < new_vals[p]:\n                    new_vals[p] = float(v)\n                    updated = True\n            else:\n                new_rows.append(int(j))\n                new_vals.append(float(v))\n                updated = True\n        if updated:\n            D.rows[i] = new_rows\n            D.data[i] = new_vals\n    return D.tocsr().astype(np.float64)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    \u03b1_mix graph blend (ablation):\n    - Embedding: PCA60 (log1p-normalized counts) saved to obsm['X_emb'].\n    - Graphs:\n      1) Within-batch structural graph on raw PCs (binary weights), kwb_target\u224810.\n      2) Equal-quota cross-batch graph on batch-residualized PCs (cosine), k=50, kq=1280.\n    - Blend: C = (1\u2212\u03b1)\u00b7normalize(C_wb) + \u03b1\u00b7normalize(C_eq) with \u03b1=0.20.\n    - Distances: union with elementwise min over (D_eq, D_wb).\n    \"\"\"\n    # constants\n    K = 50\n    KQ = 1280\n    N_PCS_EMB = 60\n    N_PCS_GRAPH = 50\n    LAMBDA_R = 0.64\n    L2 = 1e-3\n    METRIC = \"cosine\"\n    ALPHA = 0.20\n    KWB_TARGET = max(8, int(round(0.2 * K)))\n\n    # 1) Preprocess + features\n    Xn = normalize_log1p_counts(adata)\n    Xn = select_features(Xn, adata)\n\n    # 2) Embedding\n    Z_emb = pca_svd(Xn, n_components=N_PCS_EMB, random_state=0)\n    adata.obsm['X_emb'] = np.asarray(Z_emb, dtype=np.float32)\n\n    # 3) Graph PCs\n    Zg_raw = pca_svd(Xn, n_components=N_PCS_GRAPH, random_state=1)\n    batches = np.asarray(adata.obs['batch'])\n\n    # 3a) Within-batch structural graph\n    C_wb, D_wb = _build_within_batch_knn(\n        Zg_raw, batches=batches, k=K, k_candidates=KQ,\n        kwb_target=KWB_TARGET, metric=METRIC\n    )\n\n    # 3b) Equal-quota cross-batch graph\n    Zg_corr = ridge_residualize_per_pc(Zg_raw, batches, lam_r=LAMBDA_R, l2=L2)\n    C_eq, D_eq = equal_quota_knn(Zg_corr, batches=batches, k=K, k_candidates=KQ, metric=METRIC)\n\n    # 4) Blend and distances\n    C_blend = (1.0 - ALPHA) * _row_normalize(C_wb) + ALPHA * _row_normalize(C_eq)\n    D_union = _union_min_distances(D_eq, D_wb)\n\n    adata.obsp['connectivities'] = _to_csr(C_blend).astype(np.float64)\n    adata.obsp['distances'] = _to_csr(D_union).astype(np.float64)\n    set_neighbors_meta(\n        adata, k=K, method='alpha_mix(within_batch + equal_quota)', metric=METRIC,\n        extra={'alpha': ALPHA, 'k_candidates': KQ, 'lam_r': LAMBDA_R, 'kwb_target': KWB_TARGET}\n    )\n    return adata\n",
+    "submitted_timestamp": 1761795247.642125,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5978552541406614,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f66d21f2-ccfa-4382-9b43-2a48ced11fc0/result_human.h5ad\n\nRESULT_UUID: f66d21f2-ccfa-4382-9b43-2a48ced11fc0\n\n\nSTDERR:\n/tmp/tmp01bcdnq8/submission.py:125: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C_eq, D_eq = equal_quota_knn(Zg_corr, batches=batches, k=K, k_candidates=KQ, metric=METRIC)\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.606  ASW_label: 0.218  ARI: 0.783  NMI: 0.742\n  Graph_conn: 0.960  kBET: 0.624  iLISI: 0.764  cLISI: 0.972\n  PCR: 0.000  Cell_cycle: 0.311\n\nRaw Scores (before normalization):\n  ASW_batch: 0.806365  ASW_label: 0.537375  ARI: 0.782608  NMI: 0.741891\n  Graph_conn: 0.960992  kBET: 0.597829  iLISI: 0.764047  cLISI: 0.991762\n  PCR: 0.000000  Cell_cycle: 0.273684",
+        "ASW_batch": [
+          "0.606",
+          0.6056677808013667
+        ],
+        "ASW_label": [
+          "0.218",
+          0.2177807939648171
+        ],
+        "ARI": [
+          "0.783",
+          0.7826372633671818
+        ],
+        "NMI": [
+          "0.742",
+          0.7418180978435855
+        ],
+        "Graph_conn": [
+          "0.960",
+          0.9603193863380104
+        ],
+        "kBET": [
+          "0.624",
+          0.6240581308277041
+        ],
+        "iLISI": [
+          "0.764",
+          0.7640470685400861
+        ],
+        "cLISI": [
+          "0.972",
+          0.9717212997198394
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.311",
+          0.3105027200040235
+        ]
+      },
+      "evaluation_timestamp": 1761795965.9137857,
+      "evaluation_datetime": "2025-10-30T11:46:05.913788",
+      "sort_key": [
+        0.5978552541406614
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5978552541406614,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761795966.120235,
+    "version_notified": "original",
+    "message": "Your research submission '\u03b1_mix sweep: \u03b1=0.20, kq=1280 (within\u2011batch structural + equal\u2011quota, k=50, cosine)' (ID: 1702) has been evaluated.\n\n**Score:** 0.5978552541406614\n**ASW_batch:** 0.606\n**ASW_label:** 0.218\n**ARI:** 0.783\n**NMI:** 0.742\n**Graph_conn:** 0.960\n**kBET:** 0.624\n**iLISI:** 0.764\n**cLISI:** 0.972\n**PCR:** 0.000\n**Cell_cycle:** 0.311\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.606  ASW_label: 0.218  ARI: 0.783  NMI: 0.742\n  Graph_conn: 0.960  kBET: 0.624  iLISI: 0.764  cLISI: 0.972\n  PCR: 0.000  Cell_cycle: 0.311\n\nRaw Scores (before normalization):\n  ASW_batch: 0.806365  ASW_label: 0.537375  ARI: 0.782608  NMI: 0.741891\n  Graph_conn: 0.960992  kBET: 0.597829  iLISI: 0.764047  cLISI: 0.991762\n  PCR: 0.000000  Cell_cycle: 0.273684\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f66d21f2-ccfa-4382-9b43-2a48ced11fc0/result_human.h5ad\n\nRESULT_UUID: f66d21f2-ccfa-4382-9b43-2a48ced11fc0\n\n\nSTDERR:\n/tmp/tmp01bcdnq8/submission.py:125: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C_eq, D_eq = equal_quota_knn(Zg_corr, batches=batches, k=K, k_candidates=KQ, metric=METRIC)\n\n```"
+  }
+}

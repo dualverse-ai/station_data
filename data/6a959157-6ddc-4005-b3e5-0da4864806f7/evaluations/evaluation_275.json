@@ -1,0 +1,90 @@
+{
+  "id": "275",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "Novel Method v2: Targeted ComBat Correction",
+  "tags": [
+    "novel-method",
+    "principal-components",
+    "combat",
+    "cell-cycle"
+  ],
+  "abstract": "Following the catastrophic failure of the 'Subtract-and-Add-Back' method (ID 272), which validated that PC1 is the cell cycle axis but destroyed batch correction, this experiment tests a more refined approach. It uses data with PC1 regressed out to *learn* the ComBat correction parameters. These parameters, now blind to the cell cycle variance, are then applied to the *original* data. This \"Targeted Correction\" hypothesis aims to remove batch effects without disturbing the primary biological signal captured by PC1.",
+  "submitted_tick": 162,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/logos')\nimport numpy as np\nimport anndata as ad\nimport scanpy as sc\nfrom scipy import sparse as sp\nfrom integration_utils import build_balanced_knn\n\ndef get_targeted_combat_matrix(adata_in: ad.AnnData) -> np.ndarray:\n    print(\"--- Performing Targeted ComBat Correction ---\")\n    \n    # Step 1: Get PC1 from original data\n    adata_orig = adata_in.copy()\n    sc.pp.normalize_total(adata_orig)\n    sc.pp.log1p(adata_orig)\n    sc.pp.pca(adata_orig, n_comps=1, random_state=0)\n    pc1_scores = adata_orig.obsm['X_pca']\n    pc1_loadings = adata_orig.varm['PCs']\n    X_orig_normalized = adata_orig.X.toarray() if sp.issparse(adata_orig.X) else adata_orig.X\n    \n    # Step 2: Create a residual matrix by subtracting PC1\n    X_residuals = X_orig_normalized - (pc1_scores @ pc1_loadings.T)\n    \n    # Step 3: Learn ComBat parameters on the residual data\n    print(\"  Learning ComBat params on residual data...\")\n    data = X_residuals.T\n    batches = adata_in.obs['batch'].astype('category').cat.codes.values\n    u_batches, n_batches = np.unique(batches), len(np.unique(batches))\n    batch_design = np.eye(n_batches)[batches]\n    B_hat = np.linalg.solve(batch_design.T @ batch_design, batch_design.T)\n    \n    # These params are learned on the PC1-regressed data\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = (B_hat @ data.T).T\n    var_pooled = np.sum((data - batch_means[:, batches])**2, axis=1) / (len(batches) - n_batches)\n    \n    s_data = (data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n    gamma_hat = (B_hat @ s_data.T).T\n    delta_hat = [np.var(s_data[:, batches == i], axis=1, ddof=1) for i in u_batches]\n    gamma_bar, t2 = np.mean(gamma_hat, axis=1), np.var(gamma_hat, axis=1, ddof=1)\n    a_prior, b_prior = [(2*np.var(d)+np.mean(d)**2)/(np.var(d) if np.var(d)>0 else 1e-8) for d in delta_hat], [(np.mean(d)*np.var(d)+np.mean(d)**3)/(np.var(d) if np.var(d)>0 else 1e-8) for d in delta_hat]\n    \n    gamma_star, delta_star = np.zeros_like(gamma_hat), np.zeros_like(gamma_hat)\n    for i, b_idx in enumerate(u_batches):\n        n, g_old, d_old = (~np.isnan(s_data[:, batches == b_idx])).sum(axis=1), gamma_hat[:, i], delta_hat[i]\n        for _ in range(100):\n            g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old + 1e-8)\n            d_new = (0.5 * np.sum((s_data[:, batches == b_idx] - g_new[:, np.newaxis])**2, axis=1) + b_prior[i]) / (n / 2.0 + a_prior[i] - 1.0)\n            if max(np.abs(g_new - g_old).max(), np.abs(d_new - d_old).max()) < 1e-4: break\n            g_old, d_old = g_new, d_new\n        gamma_star[:, i], delta_star[:, i] = g_old, d_old\n\n    # Step 4: Apply the learned correction to the ORIGINAL data\n    print(\"  Applying learned params to original data...\")\n    original_data = X_orig_normalized.T # Use the original, non-regressed data\n    stand_mean = grand_mean.dot(np.ones((1, len(batches))))\n    s_data_orig = (original_data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n\n    bayesdata = s_data_orig.copy()\n    for i, b_idx in enumerate(u_batches):\n        bayesdata[:, batches == b_idx] = (s_data_orig[:, batches == b_idx] - gamma_star[:, i, np.newaxis]) / np.sqrt(delta_star[:, i, np.newaxis] + 1e-8)\n\n    X_corrected = bayesdata * np.sqrt(var_pooled[:, np.newaxis]) + stand_mean\n    return np.nan_to_num(X_corrected.T)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    X_final = get_targeted_combat_matrix(adata)\n    adata_final = ad.AnnData(X=X_final, obs=adata.obs, var=adata.var)\n    sc.pp.pca(adata_final, n_comps=50, random_state=0)\n    Z_emb = adata_final.obsm['X_pca']\n    C, D = build_balanced_knn(Z_emb, adata.obs['batch'].values, n_neighbors_total=42, metric='cosine')\n    return ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_targeted_combat_v1'},\n        obsm={'X_emb': Z_emb}, obsp={'connectivities': C, 'distances': D}\n    )\n",
+    "submitted_timestamp": 1761439604.2862232,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5775452177460391,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Performing Targeted ComBat Correction ---\n  Learning ComBat params on residual data...\n  Applying learned params to original data...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e31ce9ec-7dcd-4916-8f7b-d2df091b2517/result_human.h5ad\n\nRESULT_UUID: e31ce9ec-7dcd-4916-8f7b-d2df091b2517\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.229  ARI: 0.620  NMI: 0.682\n  Graph_conn: 0.888  kBET: 0.645  iLISI: 0.037  cLISI: 0.989\n  PCR: 0.691  Cell_cycle: 0.359\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820451  ASW_label: 0.543821  ARI: 0.620091  NMI: 0.682058\n  Graph_conn: 0.889813  kBET: 0.617160  iLISI: 0.036763  cLISI: 0.996679\n  PCR: 0.690959  Cell_cycle: 0.314662",
+        "ASW_batch": [
+          "0.637",
+          0.6369368766518758
+        ],
+        "ASW_label": [
+          "0.229",
+          0.22892929962068578
+        ],
+        "ARI": [
+          "0.620",
+          0.6201429814170206
+        ],
+        "NMI": [
+          "0.682",
+          0.6819683151879133
+        ],
+        "Graph_conn": [
+          "0.888",
+          0.8879121055267721
+        ],
+        "kBET": [
+          "0.645",
+          0.6446276520436186
+        ],
+        "iLISI": [
+          "0.037",
+          0.0367625985949506
+        ],
+        "cLISI": [
+          "0.989",
+          0.9885986071706112
+        ],
+        "PCR": [
+          "0.691",
+          0.6909589283701051
+        ],
+        "Cell_cycle": [
+          "0.359",
+          0.35861481287683816
+        ]
+      },
+      "evaluation_timestamp": 1761439912.8220522,
+      "evaluation_datetime": "2025-10-26T08:51:52.822056",
+      "sort_key": [
+        0.5775452177460391
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5775452177460391,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761439912.837873,
+    "version_notified": "original",
+    "message": "Your research submission 'Novel Method v2: Targeted ComBat Correction' (ID: 275) has been evaluated.\n\n**Score:** 0.5775452177460391\n**ASW_batch:** 0.637\n**ASW_label:** 0.229\n**ARI:** 0.620\n**NMI:** 0.682\n**Graph_conn:** 0.888\n**kBET:** 0.645\n**iLISI:** 0.037\n**cLISI:** 0.989\n**PCR:** 0.691\n**Cell_cycle:** 0.359\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.229  ARI: 0.620  NMI: 0.682\n  Graph_conn: 0.888  kBET: 0.645  iLISI: 0.037  cLISI: 0.989\n  PCR: 0.691  Cell_cycle: 0.359\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820451  ASW_label: 0.543821  ARI: 0.620091  NMI: 0.682058\n  Graph_conn: 0.889813  kBET: 0.617160  iLISI: 0.036763  cLISI: 0.996679\n  PCR: 0.690959  Cell_cycle: 0.314662\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Performing Targeted ComBat Correction ---\n  Learning ComBat params on residual data...\n  Applying learned params to original data...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e31ce9ec-7dcd-4916-8f7b-d2df091b2517/result_human.h5ad\n\nRESULT_UUID: e31ce9ec-7dcd-4916-8f7b-d2df091b2517\n\n\nSTDERR:\n\n```"
+  }
+}

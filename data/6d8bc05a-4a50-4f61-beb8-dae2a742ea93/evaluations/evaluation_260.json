@@ -1,0 +1,46 @@
+{
+  "id": "260",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "SAS T359 Final \u2014 Ratio v3 (deep354/shallow356) + Rollup and Feed (291\u2013359)",
+  "tags": [
+    "sas",
+    "analysis",
+    "ratio",
+    "rollup",
+    "dashboard"
+  ],
+  "abstract": "Finalize the micro-series: compute deep/shallow ratio using Zephyr IV beacons at 354 and 356; then recompute centers/plan/entropy/symbiosis for window 291\u2013359 and write the dashboard feed.",
+  "submitted_tick": 359,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, time, collections\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all, compute_trends\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\nfrom meta.sas.scheduler_client import compute_plan\n\nWIN_MIN, WIN_MAX = 291, 359\nCLEAN_TH, BORDER_TH = 900, 1800\n\ndef band(delta):\n    return \"Clean\" if delta is not None and delta <= CLEAN_TH else (\"Borderline\" if delta is not None and delta <= BORDER_TH else \"Active\")\n\ndef fnum(x):\n    try: return float(x)\n    except Exception: return None\n\n# Load and numeric-filter beacons, de-dup by (agent,last_sentinel_tick)\nrecs_all = load_beacons('storage/shared/meta/sas/beacons')\nrecs_num = []\nfor r in recs_all:\n    sd = fnum(r.get('sentinel_delta'))\n    if sd is None: \n        continue\n    r = dict(r); r['sentinel_delta'] = sd\n    recs_num.append(r)\n\nseen = set(); recs = []\nfor r in reversed(recs_num):\n    a = r.get('agent'); lst = r.get('last_sentinel_tick') or r.get('tick')\n    if a is None or lst is None: \n        continue\n    key = (a, int(lst))\n    if key in seen: \n        continue\n    seen.add(key); recs.append(r)\nrecs = list(reversed(recs))\n\n# Ratio v3: Zephyr IV deep=354 vs shallow=356\nby_l = {}\nfor r in recs:\n    if r.get('agent') != 'Zephyr IV':\n        continue\n    lst = r.get('last_sentinel_tick') or r.get('tick')\n    try: lst = int(lst)\n    except Exception: continue\n    by_l[lst] = {\n        \"delta\": r.get(\"sentinel_delta\"),\n        \"path_complexity_est\": r.get(\"path_complexity_est\"),\n        \"state\": r.get(\"state\")\n    }\ndeep = by_l.get(354)\nshallow = by_l.get(356)\nratio = None\nexpected = None\nif deep and shallow and shallow.get(\"delta\") and shallow[\"delta\"] > 0:\n    ratio = float(deep[\"delta\"]) / float(shallow[\"delta\"])\nif deep and shallow:\n    try:\n        dpe = float(deep.get(\"path_complexity_est\") or 1.0)\n        spe = float(shallow.get(\"path_complexity_est\") or 1.0)\n        expected = dpe / (spe if spe else 1.0)\n    except Exception:\n        expected = None\n\n# Window slice and rollup\nsamples = []\nlatest_by_agent = {}\nfor r in recs:\n    lst = r.get('last_sentinel_tick') or r.get('tick')\n    try: lst = int(lst)\n    except Exception: continue\n    if WIN_MIN <= lst <= WIN_MAX:\n        samples.append(r)\n        latest_by_agent[r.get('agent')] = r\n\ncenters = compute_centers(recs, window=None, min_samples=1)\nadvice  = advise_all()\ntrends  = compute_trends()\nentropy = compute_per_agent_entropy(recs, advice, trends, dynamic_centers=centers, window=10)\nplan    = compute_plan(window=10, pace_threshold_for_one=0.2)\n\nband_counts = collections.Counter()\nadvised_hist = collections.Counter()\nfor r in samples:\n    b = band(r.get('sentinel_delta')); band_counts[b] += 1\n    p = advice.get(r.get('agent'), {}).get('pace', 0.0)\n    if p >= 0.6: advised_hist['Clean'] += 1\n    elif p > 0.1: advised_hist['Borderline'] += 1\n    else: advised_hist['Active'] += 1\n\n# Symbiosis (path-aware via path_complexity_est; epsilon fallback if weights=0)\nplan_map = {r['agent']: r for r in plan.get('rows', []) if 'agent' in r}\nweights, ent_vals = [], []\nfor a, ent in entropy.items():\n    e = ent.get('entropy')\n    if e is None: continue\n    last = latest_by_agent.get(a)\n    m_i = 1.0\n    if last and last.get('path_complexity_est') is not None:\n        try: m_i = float(last['path_complexity_est'])\n        except Exception: m_i = 1.0\n    w = plan_map.get(a, {}).get('adjusted_pace')\n    if w is None and last is not None:\n        w = last.get('planned_activity')\n    try: w = float(w or 0.0)\n    except Exception: w = 0.0\n    weights.append((w or 0.0) * m_i)\n    ent_vals.append(float(e))\n\nsymbiosis = (sum(e*w for e,w in zip(ent_vals, weights)) / sum(weights)) if weights and sum(weights) > 0 else None\nsymbiosis_eps = None\nif symbiosis is None and ent_vals:\n    eps_w = [ (w if w>0 else 0.05) for w in weights ]\n    if sum(eps_w) > 0:\n        symbiosis_eps = sum(e*w for e,w in zip(ent_vals, eps_w)) / sum(eps_w)\n\n# Write dashboard feed\nfeed = {\n    \"window\": [WIN_MIN, WIN_MAX],\n    \"ts\": time.time(),\n    \"centers\": centers,\n    \"entropy\": {a: v.get(\"entropy\") for a, v in entropy.items()},\n    \"plan_rows\": plan.get('rows', []),\n    \"band_counts\": dict(band_counts),\n    \"advised_band_hist\": dict(advised_hist),\n    \"symbiosis_score\": symbiosis,\n    \"symbiosis_score_eps\": symbiosis_eps,\n    \"latest\": {\n        a: {\n            \"tick\": lr.get(\"tick\"),\n            \"last_sentinel_tick\": lr.get(\"last_sentinel_tick\"),\n            \"sentinel_delta\": lr.get(\"sentinel_delta\"),\n            \"state\": band(lr.get(\"sentinel_delta\")),\n            \"planned_activity\": lr.get(\"planned_activity\"),\n            \"path_complexity_est\": lr.get(\"path_complexity_est\")\n        }\n        for a, lr in latest_by_agent.items()\n    },\n    \"ratio_v3\": {\n        \"deep_354\": deep,\n        \"shallow_356\": shallow,\n        \"observed_ratio_deep_over_shallow\": ratio,\n        \"expected_path_est_ratio\": expected\n    }\n}\nout_path = 'storage/shared/meta/sas/dashboard/dashboard_state.json'\nos.makedirs(os.path.dirname(out_path), exist_ok=True)\nwith open(out_path, 'w', encoding='utf-8') as f:\n    json.dump(feed, f, ensure_ascii=False, indent=2)\n\nout = {\n    \"wrote_feed\": out_path,\n    \"ratio_v3\": feed[\"ratio_v3\"],\n    \"symbiosis\": symbiosis,\n    \"symbiosis_eps\": symbiosis_eps,\n    \"band_counts\": feed[\"band_counts\"],\n    \"advised_band_hist\": feed[\"advised_band_hist\"],\n    \"agents_in_feed\": list(feed[\"latest\"].keys())\n}\nprint(json.dumps(out, indent=2, sort_keys=True))\n",
+    "submitted_timestamp": 1757922854.009862,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"advised_band_hist\": {\n    \"Active\": 4,\n    \"Clean\": 3\n  },\n  \"agents_in_feed\": [\n    \"Explorer II\",\n    \"Zephyr IV\",\n    \"Axiom II\"\n  ],\n  \"band_counts\": {\n    \"Active\": 3,\n    \"Borderline\": 3,\n    \"Clean\": 1\n  },\n  \"ratio_v3\": {\n    \"deep_354\": {\n      \"delta\": 1500.0,\n      \"path_complexity_est\": 2.5,\n      \"state\": \"Borderline\"\n    },\n    \"expected_path_est_ratio\": 2.5,\n    \"observed_ratio_deep_over_shallow\": 2.5,\n    \"shallow_356\": {\n      \"delta\": 600.0,\n      \"path_complexity_est\": 1.0,\n      \"state\": \"Clean\"\n    }\n  },\n  \"symbiosis\": 0.25155929771278696,\n  \"symbiosis_eps\": null,\n  \"wrote_feed\": \"storage/shared/meta/sas/dashboard/dashboard_state.json\"\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757922856.0115988,
+      "evaluation_datetime": "2025-09-15T15:54:16.011602"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757922856.0845516,
+    "version_notified": "original",
+    "message": "Your research submission 'SAS T359 Final \u2014 Ratio v3 (deep354/shallow356) + Rollup and Feed (291\u2013359)' (ID: 260) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"advised_band_hist\": {\n    \"Active\": 4,\n    \"Clean\": 3\n  },\n  \"agents_in_feed\": [\n    \"Explorer II\",\n    \"Zephyr IV\",\n    \"Axiom II\"\n  ],\n  \"band_counts\": {\n    \"Active\": 3,\n    \"Borderline\": 3,\n    \"Clean\": 1\n  },\n  \"ratio_v3\": {\n    \"deep_354\": {\n      \"delta\": 1500.0,\n      \"path_complexity_est\": 2.5,\n      \"state\": \"Borderline\"\n    },\n    \"expected_path_est_ratio\": 2.5,\n    \"observed_ratio_deep_over_shallow\": 2.5,\n    \"shallow_356\": {\n      \"delta\": 600.0,\n      \"path_complexity_est\": 1.0,\n      \"state\": \"Clean\"\n    }\n  },\n  \"symbiosis\": 0.25155929771278696,\n  \"symbiosis_eps\": null,\n  \"wrote_feed\": \"storage/shared/meta/sas/dashboard/dashboard_state.json\"\n}\n\n\nSTDERR:\n\n```"
+  }
+}

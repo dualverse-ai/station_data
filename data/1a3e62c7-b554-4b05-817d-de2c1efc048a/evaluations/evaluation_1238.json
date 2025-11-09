@@ -1,0 +1,46 @@
+{
+  "id": "1238",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Iterative Improvement: KKT Nudge on Top 5 Constraints",
+  "tags": [
+    "kkt",
+    "nudging",
+    "optimization",
+    "praxis-lineage",
+    "iterative-improvement"
+  ],
+  "abstract": "Building on the success of the single-nudge proof-of-concept (ID 1236), this experiment tests if addressing multiple bottlenecks yields a greater improvement. It loads the SOTA packing and KKT data, identifies the top 5 constraints with the highest multipliers, applies a sequential nudge for each, and then re-optimizes the final configuration. The goal is to achieve a more significant score increase.",
+  "submitted_tick": 733,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds\nimport os\nimport time\n\ndef construct_packing() -> tuple:\n    n = 26\n    storage_path = 'storage/praxis'\n    \n    # --- Step 1: Load SOTA artifacts from lineage storage ---\n    print(\"Step 1: Loading SOTA packing and KKT data...\")\n    try:\n        centers = np.load(os.path.join(storage_path, 'sota_packing_centers.npy'))\n        radii = np.load(os.path.join(storage_path, 'sota_packing_radii.npy'))\n        kkt_multipliers = np.load(os.path.join(storage_path, 'sota_kkt_multipliers.npy'))\n        print(\"Artifacts loaded successfully.\")\n    except FileNotFoundError:\n        print(\"Error: SOTA artifacts not found. Aborting.\")\n        return np.array([[0.1]*2]*n), np.array([0.01]*n)\n\n    x_initial = np.concatenate([centers.flatten(), radii])\n\n    # --- Step 2: Analyze KKT multipliers to find the top K constraints ---\n    print(\"Step 2: Analyzing KKT multipliers to find top 5 constraints...\")\n    \n    num_non_overlap = n * (n - 1) // 2\n    num_nudges = 5\n    \n    # Get indices of the top K multipliers\n    top_k_indices = np.argsort(kkt_multipliers)[-num_nudges:][::-1]\n    \n    x_nudged = x_initial.copy()\n    nudge_strength = 1e-5\n\n    # --- Step 3: Apply nudges for each of the top K constraints ---\n    print(f\"Step 3: Applying {num_nudges} sequential nudges.\")\n    for rank, constraint_index in enumerate(top_k_indices):\n        print(f\"--- Nudge {rank+1}/{num_nudges} ---\")\n        if constraint_index < num_non_overlap:\n            # It's a non-overlap constraint\n            k = 0\n            i, j = -1, -1\n            for i_ in range(n):\n                for j_ in range(i_ + 1, n):\n                    if k == constraint_index:\n                        i, j = i_, j_\n                        break\n                    k += 1\n                if i != -1:\n                    break\n            \n            print(f\"Nudging non-overlap between circles {i} and {j} (KKT value: {kkt_multipliers[constraint_index]})\")\n            center_i = x_nudged[2*i : 2*i+2]\n            center_j = x_nudged[2*j : 2*j+2]\n            direction_vec = center_i - center_j\n            norm = np.linalg.norm(direction_vec)\n            if norm > 1e-9:\n                unit_vec = direction_vec / norm\n                x_nudged[2*i : 2*i+2] += unit_vec * nudge_strength\n                x_nudged[2*j : 2*j+2] -= unit_vec * nudge_strength\n            \n        else:\n            # It's a boundary constraint\n            boundary_index = constraint_index - num_non_overlap\n            circle_idx = boundary_index % n\n            boundary_type = boundary_index // n\n            \n            print(f\"Nudging boundary for circle {circle_idx} (KKT value: {kkt_multipliers[constraint_index]})\")\n            if boundary_type == 0: # x_min\n                x_nudged[2*circle_idx] += nudge_strength\n            elif boundary_type == 1: # x_max\n                x_nudged[2*circle_idx] -= nudge_strength\n            elif boundary_type == 2: # y_min\n                x_nudged[2*circle_idx+1] += nudge_strength\n            else: # y_max\n                x_nudged[2*circle_idx+1] -= nudge_strength\n\n    # --- Step 4: Re-optimize from the final nudged position ---\n    print(\"Step 4: Re-optimizing from the multi-nudged configuration using SLSQP...\")\n    epsilon = 1e-9\n    \n    def make_slsqp_constraints(x_vec):\n        constraints = []\n        for i in range(n):\n            for j in range(i + 1, n):\n                constraints.append({'type': 'ineq', 'fun': lambda x, i=i, j=j: np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2) - (x[2*n+i] + x[2*n+j])**2 - epsilon})\n        for i in range(n):\n            constraints.extend([\n                {'type': 'ineq', 'fun': lambda x, i=i: x[2*i] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: x[2*i+1] - x[2*n+i] - epsilon},\n                {'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i+1] - x[2*n+i] - epsilon}\n            ])\n        return constraints\n\n    bounds = Bounds([0]* (2*n) + [0.001]*n, [1]* (2*n) + [0.5]*n)\n    \n    def objective(x):\n        return -np.sum(x[2*n:])\n\n    result = minimize(objective, x_nudged, method='SLSQP', bounds=bounds,\n                      constraints=make_slsqp_constraints(x_nudged), options={'maxiter': 200, 'disp': True})\n\n    final_params = result.x\n    final_centers = final_params[:2*n].reshape(n, 2)\n    final_radii = final_params[2*n:]\n    \n    print(f\"Re-optimization complete. Final score: {-result.fun}\")\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1761097363.462175,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.626125451041601,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading SOTA packing and KKT data...\nArtifacts loaded successfully.\nStep 2: Analyzing KKT multipliers to find top 5 constraints...\nStep 3: Applying 5 sequential nudges.\n--- Nudge 1/5 ---\nNudging non-overlap between circles 9 and 15 (KKT value: 0.03947392753788541)\n--- Nudge 2/5 ---\nNudging non-overlap between circles 9 and 21 (KKT value: 0.03929884502631953)\n--- Nudge 3/5 ---\nNudging non-overlap between circles 5 and 25 (KKT value: 0.03349271247361267)\n--- Nudge 4/5 ---\nNudging non-overlap between circles 10 and 14 (KKT value: 0.03329506056970117)\n--- Nudge 5/5 ---\nNudging non-overlap between circles 9 and 10 (KKT value: 0.032587007913134174)\nStep 4: Re-optimizing from the multi-nudged configuration using SLSQP...\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.626125451041601\n            Iterations: 1\n            Function evaluations: 80\n            Gradient evaluations: 1\nRe-optimization complete. Final score: 2.626125451041601\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.626125",
+      "evaluation_timestamp": 1761097366.157536,
+      "evaluation_datetime": "2025-10-22T09:42:46.157538"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.626125451041601,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761097366.1805425,
+    "version_notified": "original",
+    "message": "Your research submission 'Iterative Improvement: KKT Nudge on Top 5 Constraints' (ID: 1238) has been evaluated.\n\n**Score:** 2.626125451041601\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.626125\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading SOTA packing and KKT data...\nArtifacts loaded successfully.\nStep 2: Analyzing KKT multipliers to find top 5 constraints...\nStep 3: Applying 5 sequential nudges.\n--- Nudge 1/5 ---\nNudging non-overlap between circles 9 and 15 (KKT value: 0.03947392753788541)\n--- Nudge 2/5 ---\nNudging non-overlap between circles 9 and 21 (KKT value: 0.03929884502631953)\n--- Nudge 3/5 ---\nNudging non-overlap between circles 5 and 25 (KKT value: 0.03349271247361267)\n--- Nudge 4/5 ---\nNudging non-overlap between circles 10 and 14 (KKT value: 0.03329506056970117)\n--- Nudge 5/5 ---\nNudging non-overlap between circles 9 and 10 (KKT value: 0.032587007913134174)\nStep 4: Re-optimizing from the multi-nudged configuration using SLSQP...\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.626125451041601\n            Iterations: 1\n            Function evaluations: 80\n            Gradient evaluations: 1\nRe-optimization complete. Final score: 2.626125451041601\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

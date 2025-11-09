@@ -1,0 +1,49 @@
+{
+  "id": "1283",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "TOOL DEV: Train AAE for Pre-processing (CPU Fix)",
+  "tags": [
+    "tool-development",
+    "autoencoder",
+    "adversarial",
+    "training",
+    "cpu-fix"
+  ],
+  "abstract": "Resubmission of the AAE training job (ID 1282). This version includes a fix to force JAX to use the CPU backend, resolving the 'No visible GPU devices' error. The script will train the AAE and save the encoder weights to lineage storage.",
+  "submitted_tick": 921,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os\n# CRITICAL FIX: Force JAX to use the CPU platform.\nos.environ['JAX_PLATFORMS'] = 'cpu'\n\nimport sys\nimport anndata as ad\nimport scanpy as sc\nimport jax\nimport jax.numpy as jnp\nimport flax\nfrom flax.training import train_state\nimport optax\nimport pickle\n\n# Ensure the model definition is available\nsys.path.append('storage/axiom')\nfrom aae_model import get_models\n\n# This is the main function that will be executed.\ndef test(adata: ad.AnnData):\n    \"\"\"\n    Trains the AAE on CPU and saves the encoder weights.\n    \"\"\"\n    print(\"--- Starting AAE Training Run (CPU Version) ---\")\n    \n    # --- 1. Data Preparation ---\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    \n    X = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X\n    batch_labels = adata.obs['batch'].cat.codes.values\n    n_batches = len(adata.obs['batch'].cat.categories)\n    n_features = X.shape[1]\n    \n    # --- 2. Model and Optimizer Initialization ---\n    encoder, decoder, adversary = get_models(n_input_features=n_features, n_batches=n_batches)\n    key = jax.random.PRNGKey(0)\n    \n    # Init models\n    encoder_params = encoder.init(key, jnp.ones((1, n_features)))['params']\n    decoder_params = decoder.init(key, jnp.ones((1, 50)))['params']\n    adversary_params = adversary.init(key, jnp.ones((1, 50)))['params']\n    \n    # Create train states\n    ae_optimizer = optax.adam(1e-4)\n    adv_optimizer = optax.adam(1e-4)\n    \n    ae_state = train_state.TrainState.create(apply_fn=None, params={'encoder': encoder_params, 'decoder': decoder_params}, tx=ae_optimizer)\n    adv_state = train_state.TrainState.create(apply_fn=adversary.apply, params=adversary_params, tx=adv_optimizer)\n    \n    # --- 3. Loss Functions ---\n    def ae_loss_fn(params, x, batch_idx):\n        z = encoder.apply({'params': params['encoder']}, x)\n        x_recon = decoder.apply({'params': params['decoder']}, z)\n        recon_loss = jnp.mean((x - x_recon)**2)\n        adv_logits = adversary.apply({'params': adv_state.params}, z)\n        uniform_target = jnp.ones_like(adv_logits) / n_batches\n        adv_loss = -jnp.mean(jnp.sum(uniform_target * jax.nn.log_softmax(adv_logits), axis=-1))\n        lambda_adv = 0.1\n        total_loss = recon_loss + lambda_adv * adv_loss\n        return total_loss, (recon_loss, adv_loss)\n        \n    def adv_loss_fn(params, x, batch_idx):\n        z = encoder.apply({'params': ae_state.params['encoder']}, x)\n        adv_logits = adversary.apply({'params': params}, z)\n        one_hot_labels = jax.nn.one_hot(batch_idx, n_batches)\n        loss = -jnp.mean(jnp.sum(one_hot_labels * jax.nn.log_softmax(adv_logits), axis=-1))\n        return loss\n        \n    # --- 4. Training Loop ---\n    ae_train_step = jax.jit(lambda state, x, b: state.apply_gradients(grads=jax.grad(ae_loss_fn, has_aux=True)(state.params, x, b)[0]))\n    adv_train_step = jax.jit(lambda state, x, b: state.apply_gradients(grads=jax.grad(adv_loss_fn)(state.params, x, b)))\n\n    n_epochs = 50\n    batch_size = 128\n    \n    for epoch in range(n_epochs):\n        for i in range(0, X.shape[0], batch_size):\n            x_batch = X[i:i+batch_size]\n            b_batch = batch_labels[i:i+batch_size]\n            adv_state = adv_train_step(adv_state, x_batch, b_batch)\n            ae_state = ae_train_step(ae_state, x_batch, b_batch)\n        \n        if epoch % 10 == 0:\n            ae_total, (recon, adv) = ae_loss_fn(ae_state.params, x_batch, b_batch)\n            adv_l = adv_loss_fn(adv_state.params, x_batch, b_batch)\n            print(f\"Epoch {epoch}: AE Loss={ae_total:.4f} (Recon={recon:.4f}, Adv={adv:.4f}), Adv Loss={adv_l:.4f}\")\n            \n    print(\"--- Training Complete ---\")\n    \n    # --- 5. Save Encoder Weights ---\n    encoder_weights_to_save = ae_state.params['encoder']\n    with open(\"storage/axiom/trained_encoder.pkl\", \"wb\") as f:\n        pickle.dump(flax.serialization.to_state_dict(encoder_weights_to_save), f)\n        \n    print(\"Trained encoder weights saved to storage/axiom/trained_encoder.pkl\")\n    \n    return \"AAE training completed and encoder saved.\"\n",
+    "submitted_timestamp": 1761692902.9692538,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting AAE Training Run (CPU Version) ---\nEpoch 0: AE Loss=0.9172 (Recon=0.7774, Adv=1.3973), Adv Loss=1.3642\nEpoch 10: AE Loss=0.7378 (Recon=0.5823, Adv=1.5544), Adv Loss=1.1713\nEpoch 20: AE Loss=0.7488 (Recon=0.5611, Adv=1.8769), Adv Loss=1.0830\nEpoch 30: AE Loss=0.8113 (Recon=0.5501, Adv=2.6115), Adv Loss=1.3545\nEpoch 40: AE Loss=0.8887 (Recon=0.5421, Adv=3.4667), Adv Loss=1.8782\n--- Training Complete ---\nTrained encoder weights saved to storage/axiom/trained_encoder.pkl\nTest result: AAE training completed and encoder saved.\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761692986.4347591,
+      "evaluation_datetime": "2025-10-29T07:09:46.434763",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761692986.5043044,
+    "version_notified": "original",
+    "message": "Your research submission 'TOOL DEV: Train AAE for Pre-processing (CPU Fix)' (ID: 1283) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting AAE Training Run (CPU Version) ---\nEpoch 0: AE Loss=0.9172 (Recon=0.7774, Adv=1.3973), Adv Loss=1.3642\nEpoch 10: AE Loss=0.7378 (Recon=0.5823, Adv=1.5544), Adv Loss=1.1713\nEpoch 20: AE Loss=0.7488 (Recon=0.5611, Adv=1.8769), Adv Loss=1.0830\nEpoch 30: AE Loss=0.8113 (Recon=0.5501, Adv=2.6115), Adv Loss=1.3545\nEpoch 40: AE Loss=0.8887 (Recon=0.5421, Adv=3.4667), Adv Loss=1.8782\n--- Training Complete ---\nTrained encoder weights saved to storage/axiom/trained_encoder.pkl\nTest result: AAE training completed and encoder saved.\n\n\nSTDERR:\n\n```"
+  }
+}

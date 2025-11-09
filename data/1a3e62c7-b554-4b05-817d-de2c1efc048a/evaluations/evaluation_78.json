@@ -1,0 +1,47 @@
+{
+  "id": "78",
+  "author": "Inquire I",
+  "research_task_id": "1",
+  "title": "Multi-Start Local Search Optimization (Further Increased Epochs V16)",
+  "tags": [
+    "local search",
+    "iterative optimization",
+    "hill climbing",
+    "multi-start",
+    "parameter tuning",
+    "exploitation"
+  ],
+  "abstract": "Building on the new best score (Eval ID 75), this submission further increases the local search epochs per run from 60 to 70, while maintaining 4 multi-start runs. This aims to allow for even deeper refinement of circle center positions, pushing the local search to explore more thoroughly within each initial configuration. The robust `compute_max_radii` (100 iterations) is retained, balancing precision with the incrementally increased computational demand to target a new optimal packing.",
+  "submitted_tick": 41,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\n# A small value used for all floating point comparisons, minimum radii,\n# and the required separation gap between circles and boundaries.\n# This ensures validation passes with a small buffer.\nEPS = 1e-8 \n\ndef compute_max_radii(centers, num_iterations=100): \n    \"\"\"\n    Computes the maximum possible radii for a given set of circle centers\n    within a unit square, ensuring no overlap and strict containment with a buffer.\n    \"\"\"\n    n = centers.shape[0]\n    radii = np.ones(n) # Initialize with a large radius (will be immediately constrained)\n    \n    # Limit by distance to square borders, ensuring a gap 'EPS' from the boundary.\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - EPS, y - EPS, 1 - x - EPS, 1 - y - EPS)\n        \n        # Ensure radius is at least 'EPS' (strictly positive and minimal)\n        radii[i] = max(radii[i], EPS)\n        \n    # Iteratively shrink radii to resolve overlaps.\n    # The goal is to ensure `dist >= radii[i] + radii[j] + EPS` for validation.\n    for iteration in range(num_iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                dist = np.sqrt(dist_sq)\n                current_rad_sum = radii[i] + radii[j]\n                \n                # If circles are overlapping OR are too close (distance < current_rad_sum + EPS)\n                if dist < current_rad_sum + EPS: \n                    \n                    # Calculate the new sum of radii such that it equals (dist - EPS)\n                    target_sum_radii = max(2 * EPS, dist - EPS) \n                    \n                    if current_rad_sum > 2 * EPS and target_sum_radii < current_rad_sum:\n                        scale_factor = target_sum_radii / current_rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n                    elif current_rad_sum <= 2 * EPS: \n                        radii[i] = EPS\n                        radii[j] = EPS\n    \n    return np.maximum(radii, EPS) \n\n\ndef construct_packing_single_run() -> tuple:\n    \"\"\"\n    Performs a single run of local search optimization.\n    \"\"\"\n    n = 26\n    \n    # Initialize centers using the baseline's ring pattern\n    centers = np.zeros((n, 2))\n    centers[0] = [0.5, 0.5]\n    for i in range(8):\n        angle = 2 * np.pi * i / 8\n        centers[i + 1] = [0.5 + 0.25 * np.cos(angle), 0.5 + 0.25 * np.sin(angle)]\n    for i in range(16):\n        angle = 2 * np.pi * i / 16\n        centers[i + 9] = [0.5 + 0.4 * np.cos(angle), 0.5 + 0.4 * np.sin(angle)]\n    centers[25] = [0.5, 0.7]\n    centers = np.clip(centers, 0.05, 0.95) \n\n    # Add a small initial jitter to baseline centers\n    jitter_amount = 0.01 \n    centers += (np.random.rand(n, 2) * 2 - 1) * jitter_amount\n    centers = np.clip(centers, EPS, 1 - EPS) \n\n    current_best_centers = centers.copy()\n    current_best_radii = compute_max_radii(current_best_centers, num_iterations=100)\n    current_best_sum_radii = np.sum(current_best_radii)\n\n    # Local search parameters\n    num_epochs = 70 # Increased epochs\n    initial_step_size = 0.03 \n    step_decay_rate = 0.95 \n    current_step_size = initial_step_size\n\n    for epoch in range(num_epochs):\n        shuffled_indices = np.random.permutation(n)\n        for i in shuffled_indices:\n            original_center_i = centers[i].copy()\n            \n            dx = (np.random.rand() * 2 - 1) * current_step_size\n            dy = (np.random.rand() * 2 - 1) * current_step_size\n            \n            centers[i, 0] = np.clip(centers[i, 0] + dx, EPS, 1 - EPS)\n            centers[i, 1] = np.clip(centers[i, 1] + dy, EPS, 1 - EPS)\n            \n            temp_radii = compute_max_radii(centers, num_iterations=100)\n            temp_sum_radii = np.sum(temp_radii)\n            \n            if temp_sum_radii > current_best_sum_radii:\n                current_best_sum_radii = temp_sum_radii\n                current_best_centers = centers.copy()\n                current_best_radii = temp_radii.copy() \n            else:\n                centers[i] = original_center_i \n\n        current_step_size *= step_decay_rate\n        \n    return current_best_centers, current_best_radii, current_best_sum_radii\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles in the unit square using a multi-start local search\n    optimization.\n    \n    Returns:\n        Tuple of (centers, radii)\n        centers: np.array of shape (26, 2) with (x, y) coordinates\n        radii: np.array of shape (26) with radius of each circle\n    \"\"\"\n    best_overall_sum_radii = 0.0\n    best_overall_centers = None\n    best_overall_radii = None\n    \n    num_restarts = 4 \n\n    for _ in range(num_restarts):\n        centers, radii, sum_radii = construct_packing_single_run()\n        \n        if sum_radii > best_overall_sum_radii:\n            best_overall_sum_radii = sum_radii\n            best_overall_centers = centers\n            best_overall_radii = radii\n          \n    return best_overall_centers, best_overall_radii\n",
+    "submitted_timestamp": 1760863224.512261,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels",
+      "logs": "PYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1760864486.089653,
+      "evaluation_datetime": "2025-10-19T17:01:26.089655"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760864486.0970922,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start Local Search Optimization (Further Increased Epochs V16)' (ID: 78) evaluation failed.\n\n**Error Summary:** Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n\n```"
+  }
+}

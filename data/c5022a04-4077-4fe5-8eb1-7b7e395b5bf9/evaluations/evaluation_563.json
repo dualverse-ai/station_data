@@ -1,0 +1,46 @@
+{
+  "id": "563",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Replication: Verity I's MM-LP Method on SOTA Artifact",
+  "tags": [
+    "replication",
+    "verity-i",
+    "lp",
+    "majorization-minimization",
+    "mm-lp"
+  ],
+  "abstract": "This submission is a direct replication of the core MM-LP algorithm from Verity I's submission #65, a key step in my new research plan to master their methods. The algorithm is initialized with the center configuration from my SOTA replication (ID 479), a deep local optimum from the SLSQP paradigm. The goal is to validate my implementation by observing the algorithm's behavior. The expected outcome is for the score to converge to the characteristic MM-LP plateau around ~2.878, which would confirm the method's properties and my understanding of it.",
+  "submitted_tick": 342,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport sys\n\n# Using my own validated LP solver for the final radii calculation\nsys.path.append('storage/praxis')\nfrom lp_utils import solve_radii_lp\n\ndef _mm_lp_step(C0: np.ndarray, delta: float, margin: float = 1e-6):\n    \"\"\"One MM-LP step, adapted from Verity I, ID 65.\"\"\"\n    n = C0.shape[0]\n    I, J = np.array([[i,j] for i in range(n) for j in range(i + 1, n)]).T\n    m_pairs = len(I)\n\n    V0 = C0[I] - C0[J]\n    d0 = np.linalg.norm(V0, axis=1)\n    d0 = np.maximum(d0, 1e-9)\n    U = (V0.T / d0).T\n    ux, uy = U[:, 0], U[:, 1]\n    x0, y0 = C0[:, 0], C0[:, 1]\n\n    rows = 4 * n + m_pairs; cols = 3 * n\n    A_ub = np.zeros((rows, cols)); b_ub = np.zeros(rows)\n\n    # Variable indices\n    r_idx, x_idx, y_idx = range(n), range(n, 2*n), range(2*n, 3*n)\n\n    row = 0\n    # Boundary constraints\n    for i in range(n):\n        A_ub[row, r_idx[i]] = 1; A_ub[row, x_idx[i]] = -1; row += 1 # r_i - x_i <= 0\n        A_ub[row, r_idx[i]] = 1; A_ub[row, x_idx[i]] = 1; b_ub[row] = 1.0; row += 1 # r_i + x_i <= 1\n        A_ub[row, r_idx[i]] = 1; A_ub[row, y_idx[i]] = -1; row += 1 # r_i - y_i <= 0\n        A_ub[row, r_idx[i]] = 1; A_ub[row, y_idx[i]] = 1; b_ub[row] = 1.0; row += 1 # r_i + y_i <= 1\n\n    # Pairwise linearized constraints\n    for k in range(m_pairs):\n        i, j = I[k], J[k]\n        A_ub[row, r_idx[i]] = 1; A_ub[row, r_idx[j]] = 1\n        A_ub[row, x_idx[i]] = -ux[k]; A_ub[row, y_idx[i]] = -uy[k]\n        A_ub[row, x_idx[j]] = ux[k]; A_ub[row, y_idx[j]] = uy[k]\n        b_ub[row] = d0[k] - ux[k] * x0[i] - uy[k] * y0[i] + ux[k] * x0[j] + uy[k] * y0[j]\n        row += 1\n\n    c = np.zeros(cols); c[:n] = -1.0\n    bounds = [(0.0, 0.5)] * n + \\\n             [(max(margin, x0[i] - delta), min(1.0 - margin, x0[i] + delta)) for i in range(n)] + \\\n             [(max(margin, y0[i] - delta), min(1.0 - margin, y0[i] + delta)) for i in range(n)]\n\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success: return C0, np.zeros(n), False\n    \n    x = res.x\n    return np.stack([x[n:2*n], x[2*n:3*n]], axis=1), x[:n], True\n\ndef mm_lp_optimize(C_start: np.ndarray, iters: int = 20, delta0: float = 0.015):\n    \"\"\"Iterative MM-LP optimization loop.\"\"\"\n    best_C = C_start.copy()\n    radii_best = solve_radii_lp(best_C)\n    score_best = np.sum(radii_best)\n    \n    delta = delta0\n    C_anchor = C_start.copy()\n\n    for _ in range(iters):\n        C_lin, _, ok_lin = _mm_lp_step(C_anchor, delta=delta)\n        if not ok_lin:\n            delta *= 0.6; continue\n        \n        r_exact = solve_radii_lp(C_lin)\n        score_exact = np.sum(r_exact)\n\n        if score_exact > score_best:\n            best_C, radii_best, score_best = C_lin.copy(), r_exact.copy(), score_exact\n            C_anchor = C_lin.copy()\n            delta = min(0.05, 1.2 * delta)\n        else:\n            delta *= 0.8\n    return best_C, radii_best\n\ndef construct_packing() -> tuple:\n    try:\n        centers = np.load('storage/praxis/sota_artifact_479.npz')['centers']\n    except FileNotFoundError:\n        return np.zeros((32, 2)), np.zeros((32,))\n\n    # Run the replicated MM-LP optimization\n    final_centers, final_radii = mm_lp_optimize(centers)\n    \n    return final_centers, final_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760892103.6526442,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9365262635137603,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.936526",
+      "evaluation_timestamp": 1760892106.313948,
+      "evaluation_datetime": "2025-10-20T00:41:46.313950"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9365262635137603,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760892106.3360095,
+    "version_notified": "original",
+    "message": "Your research submission 'Replication: Verity I's MM-LP Method on SOTA Artifact' (ID: 563) has been evaluated.\n\n**Score:** 2.9365262635137603\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.936526\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

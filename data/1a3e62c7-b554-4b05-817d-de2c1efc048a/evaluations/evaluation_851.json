@@ -1,0 +1,47 @@
+{
+  "id": "851",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 12: Automated Nudge Target Selection",
+  "tags": [
+    "episteme",
+    "innovation",
+    "sota",
+    "nudging",
+    "heuristic",
+    "automation"
+  ],
+  "abstract": "This experiment innovates upon the 'Nudge and Refine' SOTA methodology (replicated in ID 847).\nInstead of manually selecting a pair of circles to nudge, this script automates the target selection.\nThe hypothesis is that a data-driven approach to selecting the nudge target can outperform manual selection.\nThe script analyzes the base SOTA packing and selects the non-touching circle pair with the smallest 'slack' (distance - (r1+r2)) as the most promising target to encourage contact.",
+  "submitted_tick": 535,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/episteme/sota_base_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/sota_base_radii.txt')\n    except Exception:\n        return np.array([[0.1*i, 0.1*j] for i in range(5) for j in range(6)][:N]), np.full(N, 0.05)\n\n    # --- Automated Nudge Target Selection ---\n    min_slack = np.inf\n    target_pair = (None, None)\n    contact_threshold = 1e-6\n\n    for i in range(N):\n        for j in range(i + 1, N):\n            dist = np.linalg.norm(base_centers[i] - base_centers[j])\n            radii_sum = base_radii[i] + base_radii[j]\n            slack = dist - radii_sum\n            # Find the smallest positive slack (closest non-touching pair)\n            if slack > contact_threshold and slack < min_slack:\n                min_slack = slack\n                target_pair = (i, j)\n    \n    # --- Helper functions ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]\n        dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1)\n        return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            violations = 0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j])\n                    rad_sum = r[i] + r[j]\n                    if dist < rad_sum:\n                        violations+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if violations == 0: break\n        return c, np.maximum(r, 0)\n\n    # --- Stage 1: Nudging (with automated target) ---\n    nudged_centers = np.copy(base_centers)\n    nudged_radii = np.copy(base_radii)\n    \n    if target_pair[0] is not None:\n        i_enc, j_enc = target_pair\n        dist_vec = nudged_centers[i_enc] - nudged_centers[j_enc]\n        dist = np.linalg.norm(dist_vec)\n        if dist > 1e-9:\n            grad_ci = dist_vec / dist\n            move_amount = 5e1 * (0.005 - min_slack) * 0.01\n            if move_amount > 0:\n              nudged_centers[i_enc] += grad_ci * move_amount\n              nudged_centers[j_enc] -= grad_ci * move_amount\n\n    nudged_centers, nudged_radii = _ensure_validity(nudged_centers, nudged_radii)\n\n    # --- Stage 2: Refinement ---\n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3, 4e-3, 5e-3]\n    restarts_per_amplitude = 5\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            np.random.seed(int(amp * 1e6) + i + 100) # New seed series\n            jitter = np.random.uniform(-amp, amp, size=nudged_centers.shape)\n            perturbed_centers = np.clip(nudged_centers + jitter, 1e-6, 1 - 1e-6)\n            initial_z = cr_to_z(perturbed_centers, nudged_radii)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success:\n                c_res, r_res = z_to_cr(res.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                final_score = np.sum(r_final)\n                if final_score > best_score:\n                    best_score = final_score\n                    best_centers, best_radii = c_final, r_final\n\n    if best_centers is None:\n        return nudged_centers, nudged_radii\n    \n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761001291.374968,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359830849173997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761001295.4635084,
+      "evaluation_datetime": "2025-10-21T07:01:35.463511"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359830849173997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761001295.4933202,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 12: Automated Nudge Target Selection' (ID: 851) has been evaluated.\n\n**Score:** 2.6359830849173997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

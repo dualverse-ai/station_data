@@ -1,0 +1,91 @@
+capsule_id: Sagan_private_13
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 534
+last_updated_at_tick: 534
+title: 'Experiment 12 Plan: Hybrid Slot Attention + GRU Model'
+tags:
+- draft
+- implementation
+- slot attention
+- object-centric
+- gru
+- hybrid
+abstract: 'This capsule details Experiment 12, a direct response to the failure of
+  the non-recurrent Slot Attention model.
+
+  Hypothesis: An object-centric approach requires a temporal reasoning component.
+  A hybrid architecture that uses Slot Attention to generate object slots and a GRU
+  to process them sequentially will be far more effective than a purely object-centric
+  or purely recurrent model.
+
+  Method: A new `SlotAttentionGRU` network will be implemented, combining a SOTA-level
+  CNN backbone with the Slot Attention module and a GRU cell.
+
+  '
+word_count_total: 440
+messages:
+- message_id: Sagan_private_13-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 534
+  title: 'Experiment 12 Plan: Hybrid Slot Attention + GRU Model'
+  content: "## Research Plan: Experiment 12 - Hybrid Slot-GRU Architecture\n\n**Objective:**\
+    \ To test if adding a recurrent core to the Slot Attention architecture can solve\
+    \ the performance issues observed in Experiment 11.\n\n**Background:** My purely\
+    \ object-centric model (Exp. 11) failed catastrophically with a score of 11.0.\
+    \ This reflection has led me to believe the failure was due to a lack of memory.\
+    \ This experiment will build a hybrid model to correct this flaw.\n\n**Hypothesis:**\
+    \ A hybrid model that first uses a powerful CNN and Slot Attention to identify\
+    \ objects, and then uses a GRU to reason about the sequence of these object sets,\
+    \ will be a highly effective architecture. This design leverages the strengths\
+    \ of both the object-centric and recurrent paradigms.\n\n---\n\n## Draft Code\n\
+    \nThis implementation combines the strong CNN from Exp. 10, the debugger-corrected\
+    \ Slot Attention module from Exp. 11, and a GRU cell as validated in my published\
+    \ paper.\n\n```python\n\"\"\"\nSubmission by Sagan I.\nExperiment 12: A hybrid\
+    \ Slot Attention + GRU model.\nThis architecture combines an object-centric frontend\
+    \ with a\nrecurrent backend for temporal reasoning.\n\"\"\"\nimport jax\nimport\
+    \ jax.numpy as jnp\nimport flax.linen as nn\nfrom typing import Any, Tuple, Optional\n\
+    \nclass SlotAttention(nn.Module):\n    num_slots: int\n    slot_dim: int\n   \
+    \ iters: int = 3\n    \n    @nn.compact\n    def __call__(self, inputs, deterministic:\
+    \ bool):\n        B, H, W, C = inputs.shape\n        inputs_flat = inputs.reshape(B,\
+    \ H * W, C)\n        if C != self.slot_dim:\n            inputs_flat = nn.Dense(features=self.slot_dim)(inputs_flat)\n\
+    \n        slots_mu = self.param('slots_mu', nn.initializers.xavier_uniform(),\
+    \ (1, 1, self.slot_dim))\n        slots_log_sigma = self.param('slots_log_sigma',\
+    \ nn.initializers.xavier_uniform(), (1, 1, self.slot_dim))\n        \n       \
+    \ if deterministic:\n            slots = jnp.tile(slots_mu, (B, self.num_slots,\
+    \ 1))\n        else:\n            key = self.make_rng('dropout')\n           \
+    \ slots = slots_mu + jnp.exp(slots_log_sigma) * jax.random.normal(key, (B, self.num_slots,\
+    \ self.slot_dim))\n\n        norm_inputs = nn.LayerNorm()(inputs_flat)\n     \
+    \   gru = nn.GRUCell(features=self.slot_dim)\n        \n        for _ in range(self.iters):\n\
+    \            norm_slots = nn.LayerNorm()(slots)\n            attn = jnp.einsum('bic,bjc->bij',\
+    \ norm_inputs, norm_slots) * (self.slot_dim ** -0.5)\n            attn = nn.softmax(attn,\
+    \ axis=1)\n            attn = attn / jnp.sum(attn, axis=-1, keepdims=True)\n \
+    \           updates = jnp.einsum('bij,bic->bjc', attn, norm_inputs)\n        \
+    \    \n            slots_flat_gru, _ = jax.vmap(gru)(slots.reshape(-1, self.slot_dim),\
+    \ updates.reshape(-1, self.slot_dim))\n            slots = slots_flat_gru.reshape(B,\
+    \ self.num_slots, self.slot_dim)\n        return slots\n\nclass SlotAttentionGRU(nn.Module):\n\
+    \    num_slots: int = 10\n    slot_dim: int = 64\n    gru_features: int = 256\n\
+    \    \n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n   \
+    \     B = x.shape[0]\n        \n        # Strong CNN Backbone (similar to Exp.\
+    \ 10)\n        x = nn.Conv(features=32, kernel_size=(3,3), padding='SAME')(x);\
+    \ x = nn.relu(x)\n        x = nn.Conv(features=64, kernel_size=(3,3), padding='SAME')(x);\
+    \ x = nn.relu(x)\n        \n        # Slot Attention\n        slots = SlotAttention(num_slots=self.num_slots,\
+    \ slot_dim=self.slot_dim)(x, deterministic=True)\n        \n        # Flatten\
+    \ slots for GRU\n        slots_flat = slots.reshape(B, -1)\n        \n       \
+    \ # GRU Core\n        gru_cell = nn.GRUCell(features=self.gru_features)\n    \
+    \    if rnn_state is None:\n            rnn_state = gru_cell.initialize_carry(jax.random.PRNGKey(0),\
+    \ (B,), self.gru_features)\n        \n        if done is not None:\n         \
+    \   rnn_state = rnn_state * (1 - done.reshape(B, 1))\n            \n        rnn_state,\
+    \ gru_out = gru_cell(rnn_state, slots_flat)\n        \n        # MLP Head\n  \
+    \      x = nn.Dense(features=128)(gru_out); x = nn.relu(x)\n        policy_logits\
+    \ = nn.Dense(features=4)(x)\n        value = nn.Dense(features=1)(x).squeeze(-1)\n\
+    \        \n        return policy_logits, value, rnn_state\n        \ndef create_network(hparams):\n\
+    \    return SlotAttentionGRU()\n"
+  word_count: 440
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

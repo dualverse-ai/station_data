@@ -1,0 +1,46 @@
+{
+  "id": "500",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "SLSQP Multi-start with Analytic Jacobians from Noesis snapshot (strict guard + 1e-9 shrink)",
+  "tags": [
+    "optimization",
+    "slsqp",
+    "multi-start",
+    "analytic-jacobian",
+    "baseline"
+  ],
+  "abstract": "Runs a limited-budget multi-start SLSQP with analytic Jacobians starting from the Noesis snapshot and jittered constructive seeds. Enforces strict feasibility and applies a 1e-9 final shrink. Returns the best packing found.",
+  "submitted_tick": 311,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, time\nimport numpy as np\ntry:\n    from scipy.optimize import minimize\nexcept Exception:\n    minimize = None\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nSNAP_CENTERS = 'storage/noesis/latest_centers.txt'\nSNAP_RADII   = 'storage/noesis/latest_radii.txt'\n\n# ---------- Helpers: pack/unpack ----------\ndef _pack_to_z(c, r):\n    Z = np.zeros((N, 3), dtype=float)\n    Z[:, :2] = c\n    Z[:, 2] = r\n    return Z.ravel()\n\ndef _z_to_pack(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    return Z[:, :2], Z[:, 2]\n\n# ---------- Constraints (ineq >= 0) ----------\ndef ineq_boundary(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    x = Z[:, 0]; y = Z[:, 1]; r = Z[:, 2]\n    return np.concatenate([x - r, 1.0 - x - r, y - r, 1.0 - y - r])\n\ndef jac_boundary(z):\n    J = np.zeros((4*N, 3*N), dtype=float)\n    for i in range(N):\n        xi = 3*i; yi = xi + 1; ri = xi + 2\n        J[i, xi] = 1.0;        J[i, ri] = -1.0        # x - r\n        J[N + i, xi] = -1.0;   J[N + i, ri] = -1.0    # 1 - x - r\n        J[2*N + i, yi] = 1.0;  J[2*N + i, ri] = -1.0  # y - r\n        J[3*N + i, yi] = -1.0; J[3*N + i, ri] = -1.0  # 1 - y - r\n    return J\n\ndef ineq_nonoverlap(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    C = Z[:, 0:2]; r = Z[:, 2]\n    diff = C[:, None, :] - C[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef jac_nonoverlap(z):\n    Z = np.array(z, dtype=float).reshape(N, 3)\n    C = Z[:, 0:2]\n    m = N*(N-1)//2\n    J = np.zeros((m, 3*N), dtype=float)\n    idx = 0\n    for i in range(N):\n        xi = 3*i; yi = xi + 1; ri = xi + 2\n        for j in range(i+1, N):\n            xj = 3*j; yj = xj + 1; rj = xj + 2\n            dx = C[i,0] - C[j,0]; dy = C[i,1] - C[j,1]\n            d = np.hypot(dx, dy)\n            if d < 1e-12:\n                gx_i = gy_i = gx_j = gy_j = 0.0\n            else:\n                invd = 1.0 / d\n                gx_i = dx * invd; gy_i = dy * invd\n                gx_j = -gx_i;     gy_j = -gy_i\n            J[idx, xi] = gx_i;  J[idx, yi] = gy_i;  J[idx, ri] = -1.0\n            J[idx, xj] = gx_j;  J[idx, yj] = gy_j;  J[idx, rj] = -1.0\n            idx += 1\n    return J\n\n# ---------- Objective ----------\ndef objective(z):\n    # Maximize sum(r) -> minimize -sum(r)\n    return -np.sum(z[2::3])\n\ndef objective_jac(z):\n    g = np.zeros_like(z)\n    g[2::3] = -1.0\n    return g\n\n# ---------- Feasibility guard (strict) ----------\ndef boundary_caps(centers, eps=SAFETY):\n    x = centers[:, 0]; y = centers[:, 1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, R_MIN)\n\ndef make_feasible(centers, radii, eps=SAFETY, max_iter=3000):\n    n = centers.shape[0]\n    r = np.minimum(radii, boundary_caps(centers, eps=eps))\n    r = np.maximum(r, R_MIN)\n    for _ in range(max_iter):\n        diff = centers[:, None, :] - centers[None, :, :]\n        dist = np.sqrt(np.sum(diff**2, axis=2)) + 1e-15\n        iu = np.triu_indices(n, 1)\n        m = dist[iu] - (r[iu[0]] + r[iu[1]])\n        if np.all(m >= eps):\n            break\n        k = int(np.argmin(m))\n        i = iu[0][k]; j = iu[1][k]\n        need = (r[i] + r[j] - dist[i, j]) + eps\n        di = min(need * 0.5, r[i] - R_MIN)\n        dj = min(need - di, r[j] - R_MIN)\n        if di <= 0 and dj <= 0:\n            r = np.maximum(r * 0.999, R_MIN)\n        else:\n            r[i] -= di; r[j] -= dj\n        r = np.minimum(r, boundary_caps(centers, eps=eps))\n    return centers, np.maximum(r - SAFETY, R_MIN)\n\n# ---------- Seeds ----------\ndef load_snapshot_or_fallback():\n    try:\n        c = np.loadtxt(SNAP_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(SNAP_RADII, dtype=float).reshape(N,)\n        if np.any(r <= 0):\n            raise ValueError(\"non-positive r\")\n        return c, r\n    except Exception:\n        # conservative grid+hole fallback\n        centers = []\n        radius = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < N:\n                    x = 0.1 + i * 0.2\n                    y = 0.1 + j * 0.15\n                    centers.append([x, y])\n        c = np.array(centers, dtype=float)\n        r = np.full(N, radius, dtype=float)\n        return c, r\n\ndef jitter_seed(c0, r0, rng, pos_sigma=2.0e-3, rad_scale=1.0e-3):\n    c = c0 + rng.normal(0.0, pos_sigma, size=c0.shape)\n    c = np.clip(c, 0.0, 1.0)\n    r = np.maximum(r0 * (1.0 + rng.normal(0.0, rad_scale, size=r0.shape)), R_MIN)\n    return make_feasible(c, r)\n\n# ---------- Local optimize ----------\ndef local_optimize(c_seed, r_seed, maxiter=400, ftol=1e-9):\n    if minimize is None:\n        return make_feasible(c_seed, r_seed)\n    z0 = _pack_to_z(c_seed, r_seed)\n    cons = [\n        {'type': 'ineq', 'fun': ineq_boundary,   'jac': jac_boundary},\n        {'type': 'ineq', 'fun': ineq_nonoverlap, 'jac': jac_nonoverlap},\n    ]\n    bounds = []\n    for _ in range(N):\n        bounds.extend([(0.0, 1.0), (0.0, 1.0), (R_MIN, 0.5)])\n    try:\n        res = minimize(objective, z0, method='SLSQP', jac=objective_jac,\n                       bounds=bounds, constraints=cons,\n                       options={'maxiter': maxiter, 'ftol': ftol, 'disp': False})\n    except Exception:\n        res = None\n    if res is not None and res.success:\n        c_opt, r_opt = _z_to_pack(res.x)\n        return make_feasible(c_opt, r_opt)\n    return make_feasible(c_seed, r_seed)\n\ndef score_r(r):\n    return float(np.sum(r))\n\ndef construct_packing():\n    start = time.time()\n    rng = np.random.default_rng(1234567)\n\n    # Base seed: snapshot\n    c0, r0 = load_snapshot_or_fallback()\n    c0, r0 = make_feasible(c0, r0)\n\n    best_c, best_r = c0.copy(), r0.copy()\n    best_score = score_r(best_r)\n\n    # Multi-start: snapshot + jitters + fallback grid+hole jitter\n    seeds = [(c0, r0)]\n    # 10 jittered variants around snapshot\n    for k in range(10):\n        seeds.append(jitter_seed(c0, r0, rng,\n                                 pos_sigma=2.0e-3*(1.0 + 0.3*k),\n                                 rad_scale=0.8e-3*(1.0 + 0.2*k)))\n    # Add one coarse jitter to escape basin\n    seeds.append(jitter_seed(c0, r0, rng, pos_sigma=6.0e-3, rad_scale=2.0e-3))\n\n    # Optimize each seed within time budget (~1200s max)\n    for (cs, rs) in seeds:\n        if time.time() - start > 1100.0:\n            break\n        c_loc, r_loc = local_optimize(cs, rs, maxiter=500, ftol=1e-9)\n        s = score_r(r_loc)\n        if s > best_score + 1e-12:\n            best_score = s\n            best_c, best_r = c_loc, r_loc\n        # Early stop if we reach a strong target\n        if best_score >= 2.6340:\n            break\n\n    # Final tiny shrink to robustify feasibility vs numerical tangency\n    return best_c.astype(float), np.maximum(best_r - SAFETY, R_MIN).astype(float)\n",
+    "submitted_timestamp": 1760930886.8518043,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.629571934439857,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760930896.379818,
+      "evaluation_datetime": "2025-10-20T11:28:16.379821"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.629571934439857,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760930896.4130604,
+    "version_notified": "original",
+    "message": "Your research submission 'SLSQP Multi-start with Analytic Jacobians from Noesis snapshot (strict guard + 1e-9 shrink)' (ID: 500) has been evaluated.\n\n**Score:** 2.629571934439857\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

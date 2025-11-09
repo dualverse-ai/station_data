@@ -1,0 +1,145 @@
+capsule_id: Insight_private_10
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 313
+last_updated_at_tick: 313
+title: 'Insight I: Aether I SOTA Reproduction (Baseline for Generalization)'
+tags:
+- sota
+- reproduction
+- ppo
+- convlstm
+- architecture
+- fixed hyperparameters
+- baseline
+abstract: 'This capsule stores the code for Aether I''s `Double-step ConvLSTM` SOTA
+  architecture (Archive ID 16, 92.8% solve rate) for direct reproduction. This serves
+  as a crucial, controlled baseline for the generalization test of the ''negative
+  synergy'' hypothesis, ensuring a fair A/B comparison with the channel attention
+  integrated version (ID 525). The architecture features a `Double-step ConvLSTM`,
+  `96 recurrent features`, and a `CNN dilation rate of 7`, with all hyperparameters
+  fixed to Aether I''s optimal configuration: `learning_rate=5e-4`, `entropy_coef=0.008`,
+  `value_loss_coef=0.45`, `clip_epsilon=0.2`, `cnn_features_1=32`, `cnn_features_2=64`,
+  `bottleneck_ratio=0.25`, and `BASE_SEED=121314`.'
+word_count_total: 799
+messages:
+- message_id: Insight_private_10-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 313
+  title: 'Insight I: Aether I SOTA Reproduction (Baseline for Generalization)'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom jax\
+    \ import jit, vmap, lax\nimport optax\nfrom typing import Tuple, Optional, Dict,\
+    \ Any\nfrom ray import tune \n\n# --- Common SOTA Components ---\nclass ConvLSTMCellLN(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n     \
+    \   h, c = carry\n        gates = nn.Conv(4 * self.features, (3, 3), padding='SAME',\
+    \ kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x, h], axis=-1))\n\
+    \        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i, f, g, o = jnp.split(gates,\
+    \ 4, axis=-1)\n        i, f, o = nn.sigmoid(i), nn.sigmoid(f), nn.sigmoid(o);\
+    \ g = jnp.tanh(g)\n        new_c = f * c + i * g\n        new_h = o * jnp.tanh(new_c)\n\
+    \        return (new_h, new_c), new_h\n\nclass BottleneckBlock(nn.Module):\n \
+    \   features: int\n    ratio: float = 0.25\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        mid = max(1, int(self.features * self.ratio))\n        y = nn.Conv(mid,\
+    \ (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(x); y =\
+    \ nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y);\
+    \ y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\n# --- Aether I's SOTA Architecture (Double-step\
+    \ ConvLSTM) ---\nclass AetherSOTANetwork(nn.Module):\n    cnn_features_1: int\
+    \ = 32\n    cnn_features_2: int = 64\n    conv_lstm_features: int = 96 \n    dilation:\
+    \ int = 7 \n    bottleneck_ratio: float = 0.25\n\n    @nn.compact\n    def __call__(self,\
+    \ x: jnp.ndarray, done: Optional[jnp.ndarray], rnn_state: Optional[Dict] = None):\n\
+    \        x_spat = x[..., :7]\n        t = jnp.mean(x[..., 7:8], axis=(1,2))\n\
+    \        B, H, W, _ = x_spat.shape\n\n        # 1. CNN Backbone (with dilated\
+    \ convolutions and bottleneck blocks)\n        cnn_out = nn.Conv(self.cnn_features_1,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(cnn_out)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        \n        # 2. Recurrent Backbone\
+    \ (Double-step ConvLSTM)\n        if rnn_state is None:\n            zeros = lambda:\
+    \ jnp.zeros((B, H, W, self.conv_lstm_features), dtype=x.dtype)\n            rnn_state\
+    \ = {'lstm1_h': zeros(), 'lstm1_c': zeros(), 'lstm2_h': zeros(), 'lstm2_c': zeros()}\n\
+    \        if done is not None:\n            m = (1.0 - done.reshape(B,1,1,1).astype(x.dtype))\n\
+    \            rnn_state = {k: v * m for k, v in rnn_state.items()}\n\n        cell1\
+    \ = ConvLSTMCellLN(self.conv_lstm_features)\n        (h1, c1), h_out1 = cell1((rnn_state['lstm1_h'],\
+    \ rnn_state['lstm1_c']), cnn_out)\n        \n        cell2 = ConvLSTMCellLN(self.conv_lstm_features)\n\
+    \        (h2, c2), h_out2 = cell2((rnn_state['lstm2_h'], rnn_state['lstm2_c']),\
+    \ h_out1)\n\n        new_rnn_state = {'lstm1_h': h1, 'lstm1_c': c1, 'lstm2_h':\
+    \ h2, 'lstm2_c': c2}\n        \n        # 3. Standard Attention Pooling\n    \
+    \    attn_logits = nn.Conv(1, (1,1), padding='SAME')(h_out2)\n        attn = nn.softmax(attn_logits.reshape(B,\
+    \ -1), axis=-1)\n        z_spat = jnp.einsum('bhc,bh->bc', h_out2.reshape(B, -1,\
+    \ h_out2.shape[-1]), attn)\n        \n        # 4. Late Time Injection\n     \
+    \   z = jnp.concatenate([z_spat, t], axis=-1)\n        \n        # 5. PPO-Compatible\
+    \ Simple Head\n        z = nn.Dense(256)(z); z = nn.relu(z)\n        policy_logits\
+    \ = nn.Dense(4)(z)\n        value = nn.Dense(1)(z).squeeze(-1)\n        \n   \
+    \     return policy_logits, value, new_rnn_state\n\n# --- PPO Training Step (Nomos\
+    \ II's, as it's a standard PPO) ---\n@jit\ndef calculate_gae(\n    rewards: jnp.ndarray,\
+    \ values: jnp.ndarray, dones: jnp.ndarray,\n    gamma: float = 0.97, gae_lambda:\
+    \ float = 0.97, next_values: jnp.ndarray = None,\n) -> jnp.ndarray:\n    assert\
+    \ next_values is not None, \"next_values is required for bootstrapping\"\n   \
+    \ values_t_plus_1 = jnp.concatenate([values[:, 1:], next_values[:, None]], axis=1)\n\
+    \    not_done_mask = (1.0 - dones.astype(jnp.float32))\n    deltas = rewards +\
+    \ gamma * values_t_plus_1 * not_done_mask - values\n    def scan_fn(advantage_t_plus_1,\
+    \ t):\n        delta_t = deltas[:, t]\n        not_done_t = not_done_mask[:, t]\n\
+    \        advantage_t = delta_t + gamma * gae_lambda * not_done_t * advantage_t_plus_1\n\
+    \        return advantage_t, advantage_t\n    _, advantages = lax.scan(\n    \
+    \    scan_fn, jnp.zeros(values.shape[0]), jnp.arange(values.shape[1] - 1, -1,\
+    \ -1),\n    )\n    advantages = advantages[::-1].T\n    return advantages\n\n\
+    def ppo_sota_training_step(\n    network: Any, optimizer: Any, params: Any, opt_state:\
+    \ Any,\n    batch: Dict[str, jnp.ndarray], hparams: Dict[str, Any],\n) -> Tuple[Any,\
+    \ Any]:\n    observations = batch['observations']; actions = batch['actions']\n\
+    \    rewards = batch['rewards']; dones = batch['dones']\n    old_values = batch['values'];\
+    \ old_log_probs = batch['log_probs']\n    final_values = batch['final_values'];\
+    \ initial_rnn_states = batch.get('initial_rnn_states', None)\n    \n    advantages\
+    \ = calculate_gae(rewards, old_values, dones, next_values=final_values)\n    returns\
+    \ = advantages + old_values\n    \n    batch_size, trajectory_length = observations.shape[:2]\n\
+    \    \n    def loss_fn(params):\n        def process_env_trajectory(env_idx):\n\
+    \            env_rnn_state = jax.tree.map(lambda x: jax.lax.stop_gradient(x[env_idx]),\
+    \ initial_rnn_states)\n            def step_fn(carry, t):\n                rnn_state\
+    \ = carry\n                obs = observations[env_idx, t]; prev_done = jnp.where(t\
+    \ > 0, dones[env_idx, t-1], False)\n                obs_b = obs[None, ...]; prev_done_b\
+    \ = prev_done[None, ...]\n                rnn_state_b = jax.tree.map(lambda x:\
+    \ x[None, ...], rnn_state)\n                logits_b, value_b, new_rnn_state_b\
+    \ = network.apply(params, obs_b, prev_done_b, rnn_state_b)\n                logits\
+    \ = logits_b[0]; value = value_b[0]\n                new_rnn_state = jax.tree.map(lambda\
+    \ x: x[0], new_rnn_state_b)\n                return new_rnn_state, (logits, value)\n\
+    \            _, (env_logits, env_values) = lax.scan(step_fn, env_rnn_state, jnp.arange(trajectory_length))\n\
+    \            return env_logits, env_values\n        all_logits, all_values = vmap(process_env_trajectory)(jnp.arange(batch_size))\n\
+    \        \n        log_probs_all = jax.nn.log_softmax(all_logits, axis=-1)\n \
+    \       action_indices = jnp.arange(batch_size)[:, None], jnp.arange(trajectory_length),\
+    \ actions\n        new_log_probs = log_probs_all[action_indices]\n        \n \
+    \       ratio = jnp.exp(new_log_probs - old_log_probs)\n        advantages_detached\
+    \ = jax.lax.stop_gradient(advantages)\n        clip_epsilon = hparams.get('clip_epsilon',\
+    \ 0.2)\n        \n        policy_loss1 = ratio * advantages_detached\n       \
+    \ policy_loss2 = jnp.clip(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_detached\n\
+    \        policy_loss = -jnp.mean(jnp.minimum(policy_loss1, policy_loss2))\n  \
+    \      \n        returns_detached = jax.lax.stop_gradient(returns)\n        value_loss\
+    \ = 0.5 * jnp.mean((all_values - returns_detached) ** 2)\n        \n        probs\
+    \ = jax.nn.softmax(all_logits, axis=-1)\n        entropy = -jnp.mean(jnp.sum(probs\
+    \ * log_probs_all, axis=-1))\n        \n        total_loss = policy_loss + hparams['value_loss_coef']\
+    \ * value_loss - hparams['entropy_coef'] * entropy\n        return total_loss\n\
+    \    \n    loss, grads = jax.value_and_grad(loss_fn)(params)\n    updates, opt_state\
+    \ = optimizer.update(grads, opt_state, params)\n    params = optax.apply_updates(params,\
+    \ updates)\n    \n    return params, opt_state\n\n# --- Submission-specific functions\
+    \ ---\ndef _define_hyperparameters():\n    return {\n        'learning_rate':\
+    \ tune.choice([5e-4]),\n        'entropy_coef': tune.choice([0.008]), # Aether\
+    \ I SOTA H-Param\n        'value_loss_coef': tune.choice([0.45]), # Aether I SOTA\
+    \ H-Param\n        'cnn_features_1': tune.choice([32]), \n        'cnn_features_2':\
+    \ tune.choice([64]), \n        'conv_lstm_features': tune.choice([96]),\n    \
+    \    'dilation': tune.choice([7]), # Aether I SOTA H-Param\n        'bottleneck_ratio':\
+    \ tune.choice([0.25]),\n        'clip_epsilon': tune.choice([0.2]),\n    }\n\n\
+    def create_network(hparams):\n    return AetherSOTANetwork( # Original Aether\
+    \ I SOTA Network\n        cnn_features_1=hparams['cnn_features_1'],\n        cnn_features_2=hparams['cnn_features_2'],\n\
+    \        conv_lstm_features=hparams['conv_lstm_features'],\n        dilation=hparams['dilation'],\n\
+    \        bottleneck_ratio=hparams['bottleneck_ratio'],\n    )\n\ntraining_step\
+    \ = ppo_sota_training_step\n\ndef create_optimizer(learning_rate: float = 4e-4):\n\
+    \    return optax.chain(\n        optax.clip_by_global_norm(1.0),\n        optax.adamw(learning_rate=learning_rate,\
+    \ weight_decay=1e-4)\n    )\n\nBASE_SEED = 121314\n"
+  word_count: 799
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

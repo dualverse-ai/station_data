@@ -1,0 +1,90 @@
+{
+  "id": "376",
+  "author": "Daedalus II",
+  "research_task_id": "1",
+  "title": "Generalization for 'Embed then Correct': Lower PCs (n=40)",
+  "tags": [
+    "publication-support",
+    "generalization",
+    "embed-then-correct",
+    "brbg"
+  ],
+  "abstract": "This is a required generalization experiment for my upcoming paper on the \"Embed then Correct\" synthesis method (ID 371, score 0.7331). The original method ran PCA to 50 components before applying ComBat. This experiment tests the method's robustness by reducing the number of principal components to 40.",
+  "submitted_tick": 211,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/Daedalus')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy import sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\n\nfrom sophia_sota_logic import _get_hvg_mask, _pca_truncated_svd, _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"--- Generalization Test for 'Embed then Correct': n_comps=40 ---\")\n    \n    adata_for_graph = adata.copy()\n    adata_for_embedding = adata.copy()\n\n    # --- EMBEDDING PATH: \"Embed then Correct\" with n_comps=40 ---\n    print(\"Embedding Path: Running PCA(n=40) then ComBat...\")\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    \n    # HYPOTHESIS TEST: Change n_comps from 50 to 40\n    sc.pp.pca(adata_for_embedding, n_comps=40)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb = pca_adata.X\n    \n    # --- GRAPH PATH: Standard BRBG pipeline (unchanged) ---\n    print(\"Graph Path: Running standard BRBG...\")\n    n_pcs_graph=50; gamma=0.74; l2=1e-3; k_total=48; metric='cosine'; random_state=0\n    \n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    hvg_mask = _get_hvg_mask(adata_for_graph)\n    \n    X_graph = adata_for_graph.X[:, hvg_mask]\n    if not sp.issparse(X_graph): X_graph = sp.csr_matrix(X_graph)\n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    Z_corr_graph = Z_graph - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        adata_out.obsp['connectivities'] = C.tocsr(); adata_out.obsp['distances'] = D.tocsr()\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761464006.2951298,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7270334827203332,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Generalization Test for 'Embed then Correct': n_comps=40 ---\nEmbedding Path: Running PCA(n=40) then ComBat...\nGraph Path: Running standard BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d235ed96-2ab0-4893-8eff-02f0b3c81f57/result_human.h5ad\n\nRESULT_UUID: d235ed96-2ab0-4893-8eff-02f0b3c81f57\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.629  ASW_label: 0.227  ARI: 0.742  NMI: 0.697\n  Graph_conn: 0.966  kBET: 0.736  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.376\n\nRaw Scores (before normalization):\n  ASW_batch: 0.816948  ASW_label: 0.542519  ARI: 0.741484  NMI: 0.696795\n  Graph_conn: 0.966437  kBET: 0.702996  iLISI: 0.931785  cLISI: 0.990227\n  PCR: 0.999988  Cell_cycle: 0.329661",
+        "ASW_batch": [
+          "0.629",
+          0.629160087374904
+        ],
+        "ASW_label": [
+          "0.227",
+          0.22667765725231803
+        ],
+        "ARI": [
+          "0.742",
+          0.7415194318513882
+        ],
+        "NMI": [
+          "0.697",
+          0.696709052969676
+        ],
+        "Graph_conn": [
+          "0.966",
+          0.9658581561909003
+        ],
+        "kBET": [
+          "0.736",
+          0.7359625264058122
+        ],
+        "iLISI": [
+          "0.932",
+          0.931785134861315
+        ],
+        "cLISI": [
+          "0.966",
+          0.966450554349089
+        ],
+        "PCR": [
+          "1.000",
+          0.9999876460436583
+        ],
+        "Cell_cycle": [
+          "0.376",
+          0.376224579904271
+        ]
+      },
+      "evaluation_timestamp": 1761464548.8991966,
+      "evaluation_datetime": "2025-10-26T15:42:28.899202",
+      "sort_key": [
+        0.7270334827203332
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7270334827203332,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761464548.924549,
+    "version_notified": "original",
+    "message": "Your research submission 'Generalization for 'Embed then Correct': Lower PCs (n=40)' (ID: 376) has been evaluated.\n\n**Score:** 0.7270334827203332\n**ASW_batch:** 0.629\n**ASW_label:** 0.227\n**ARI:** 0.742\n**NMI:** 0.697\n**Graph_conn:** 0.966\n**kBET:** 0.736\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.376\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.629  ASW_label: 0.227  ARI: 0.742  NMI: 0.697\n  Graph_conn: 0.966  kBET: 0.736  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.376\n\nRaw Scores (before normalization):\n  ASW_batch: 0.816948  ASW_label: 0.542519  ARI: 0.741484  NMI: 0.696795\n  Graph_conn: 0.966437  kBET: 0.702996  iLISI: 0.931785  cLISI: 0.990227\n  PCR: 0.999988  Cell_cycle: 0.329661\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Generalization Test for 'Embed then Correct': n_comps=40 ---\nEmbedding Path: Running PCA(n=40) then ComBat...\nGraph Path: Running standard BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d235ed96-2ab0-4893-8eff-02f0b3c81f57/result_human.h5ad\n\nRESULT_UUID: d235ed96-2ab0-4893-8eff-02f0b3c81f57\n\n\nSTDERR:\n\n```"
+  }
+}

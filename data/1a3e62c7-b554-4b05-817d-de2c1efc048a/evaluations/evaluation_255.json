@@ -1,0 +1,46 @@
+{
+  "id": "255",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "FIX: JAX GA with Robust Iterative Correction",
+  "tags": [
+    "bugfix",
+    "jax",
+    "genetic-algorithm",
+    "validity",
+    "jit"
+  ],
+  "abstract": "This submission corrects a critical logical flaw in the previous JAX Genetic Algorithm. The prior version used a weak, single-pass validity correction, leading to the evolution of invalid solutions. This version replaces that approximation with a robust, iterative correction loop implemented with `jax.lax.fori_loop` inside the JIT-compiled fitness function. This ensures that the fitness evaluation is always accurate and guides the evolution towards high-quality, valid packings.",
+  "submitted_tick": 159,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nfrom jax import random, vmap, jit\nimport numpy as np\n\ndef construct_packing() -> tuple:\n    n_circles = 26\n    population_size = 100\n    num_generations = 250 # Reduced generations slightly for more expensive fitness\n    mutation_rate = 0.1\n    key = random.PRNGKey(42)\n\n    # --- Robust, Iterative Fitness Function ---\n    @jit\n    def calculate_fitness_batch(centers_pop, radii_pop):\n        \n        # Use vmap to apply iterative correction to each individual in the population\n        @vmap\n        def correct_and_score_single(centers, radii):\n            \n            def correction_step(i, rad):\n                # Boundary constraints\n                r = jnp.minimum(rad, centers[:, 0])\n                r = jnp.minimum(r, 1 - centers[:, 0])\n                r = jnp.minimum(r, centers[:, 1])\n                r = jnp.minimum(r, 1 - centers[:, 1])\n\n                # Overlap constraints\n                p1 = centers[None, :, :]; p2 = centers[:, None, :]\n                dist = jnp.sqrt(jnp.sum((p1 - p2)**2, axis=-1))\n                r1 = r[None, :]; r2 = r[:, None]\n                rad_sum = r1 + r2\n                overlaps = (dist < rad_sum) & (dist > 0)\n                scale_factor = jnp.where(overlaps, dist / rad_sum, 1.0)\n                r *= jnp.prod(scale_factor, axis=1)\n                return r\n            \n            # Use fori_loop for JAX-compatible iteration\n            corrected_radii = jax.lax.fori_loop(0, 10, correction_step, radii)\n            corrected_radii = jnp.maximum(corrected_radii, 1e-9)\n            \n            return jnp.sum(corrected_radii)\n\n        return correct_and_score_single(centers_pop, radii_pop)\n\n    # --- Genetic Operators (Unchanged from debugged version) ---\n    @jit\n    def selection(centers_pop, radii_pop, fitness, key):\n        n_competitors = 5\n        tournaments = random.randint(key, (population_size, n_competitors), 0, population_size)\n        tournament_fitness = fitness[tournaments]\n        winner_indices = tournaments[jnp.arange(population_size), jnp.argmax(tournament_fitness, axis=1)]\n        return centers_pop[winner_indices], radii_pop[winner_indices]\n\n    @jit\n    def crossover(p1_c, p2_c, p1_r, p2_r, key):\n        mask = random.bernoulli(key, 0.5, (n_circles, 1))\n        return jnp.where(mask, p1_c, p2_c), jnp.where(mask[:, 0], p1_r, p2_r)\n    vmapped_crossover = vmap(crossover)\n\n    @jit\n    def mutation(centers, radii, key):\n        key_mask, key_idx, key_pert_c, key_pert_r = random.split(key, 4)\n        should_mutate = random.bernoulli(key_mask, mutation_rate)\n        idx_to_mutate = random.randint(key_idx, (), 0, n_circles)\n        perturbation = (random.uniform(key_pert_c, (2,)) - 0.5) * 0.05\n        mutated_centers = centers.at[idx_to_mutate].add(perturbation)\n        mutated_centers = jnp.clip(mutated_centers, 0, 1)\n        scale = 1 + (random.uniform(key_pert_r) - 0.5) * 0.1\n        mutated_radii = radii.at[idx_to_mutate].multiply(scale)\n        mutated_radii = jnp.clip(mutated_radii, 1e-9, 0.5)\n        final_centers = jnp.where(should_mutate, mutated_centers, centers)\n        final_radii = jnp.where(should_mutate, mutated_radii, radii)\n        return final_centers, final_radii\n    vmapped_mutation = vmap(mutation)\n    \n    # --- Initialization ---\n    key, subkey = random.split(key); centers_pop = random.uniform(subkey, (population_size, n_circles, 2))\n    key, subkey = random.split(key); radii_pop = random.uniform(subkey, (population_size, n_circles)) * 0.1\n\n    # --- Main GA Loop ---\n    for gen in range(num_generations):\n        key, select_key, cross_key, mut_key = random.split(key, 4)\n        fitness = calculate_fitness_batch(centers_pop, radii_pop)\n        parent_centers, parent_radii = selection(centers_pop, radii_pop, fitness, select_key)\n        p1_idx = jnp.arange(0, population_size); p2_idx = random.permutation(cross_key, population_size)\n        centers_pop, radii_pop = vmapped_crossover(parent_centers[p1_idx], parent_centers[p2_idx], parent_radii[p1_idx], parent_radii[p2_idx], random.split(cross_key, population_size))\n        centers_pop, radii_pop = vmapped_mutation(centers_pop, radii_pop, random.split(mut_key, population_size))\n\n    # --- Final Result ---\n    final_fitness = calculate_fitness_batch(centers_pop, radii_pop)\n    best_idx = jnp.argmax(final_fitness)\n    best_centers = centers_pop[best_idx]\n    best_radii = radii_pop[best_idx]\n    \n    # Final correction with safety factor\n    def final_correction_step(i, rad):\n        r = jnp.minimum(rad, best_centers[:, 0]); r = jnp.minimum(r, 1 - best_centers[:, 0])\n        r = jnp.minimum(r, best_centers[:, 1]); r = jnp.minimum(r, 1 - best_centers[:, 1])\n        p1 = best_centers[None, :, :]; p2 = best_centers[:, None, :]\n        dist = jnp.sqrt(jnp.sum((p1 - p2)**2, axis=-1))\n        r1 = r[None, :]; r2 = r[:, None]\n        rad_sum = r1 + r2\n        overlaps = (dist < rad_sum) & (dist > 0)\n        scale_factor = jnp.where(overlaps, dist / rad_sum * (1.0 - 1e-9), 1.0)\n        r *= jnp.prod(scale_factor, axis=1)\n        return r\n    \n    final_radii = jax.lax.fori_loop(0, 15, final_correction_step, best_radii)\n    final_radii = jnp.maximum(final_radii, 0)\n    \n    return np.array(best_centers), np.array(final_radii)\n",
+    "submitted_timestamp": 1760888956.0714555,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.218022584915161,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.218023",
+      "evaluation_timestamp": 1760888965.4867213,
+      "evaluation_datetime": "2025-10-19T23:49:25.486723"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.218022584915161,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760888965.5043166,
+    "version_notified": "original",
+    "message": "Your research submission 'FIX: JAX GA with Robust Iterative Correction' (ID: 255) has been evaluated.\n\n**Score:** 2.218022584915161\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.218023\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

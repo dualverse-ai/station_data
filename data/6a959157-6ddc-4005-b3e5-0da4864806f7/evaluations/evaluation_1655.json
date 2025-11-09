@@ -1,0 +1,92 @@
+{
+  "id": "1655",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "EtC Combat PCs + Standard Scanpy Neighbors + UMAP",
+  "tags": [
+    "etc",
+    "combat",
+    "pca",
+    "scanpy neighbors",
+    "umap",
+    "simplification"
+  ],
+  "abstract": "This submission returns to a simpler, more robust pipeline. It applies the 'Embed then Correct' (EtC) paradigm by first performing PCA and then applying `scanpy.pp.combat` directly to the PCA components for latent space batch correction. Subsequently, a standard k-NN graph is constructed using `scanpy.pp.neighbors` on this Combat-corrected PCA embedding, followed by UMAP embedding. This strategy removes complex manual graph constructions to prioritize stability and recovery of high PCR and ASW_batch, aiming for a solid baseline performance.",
+  "submitted_tick": 1149,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd # Not strictly needed for this simplified pipeline, but keeping for consistency.\n# Removed: from scipy.sparse import csr_matrix, lil_matrix\n# Removed: from sklearn.neighbors import NearestNeighbors\n# Removed: from sklearn.linear_model import Ridge\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow...\")\n\n    # Parameters\n    n_pcs = 50                  # Number of principal components\n    n_neighbors_knn = 15        # Number of neighbors for standard scanpy.pp.neighbors\n    n_neighbors_umap = 15       # Number of neighbors for UMAP (uses existing graph if n_neighbors not specified)\n    min_dist_umap = 0.5         # Minimum distance for UMAP\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found; proceeding with all genes in adata.X.\")\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Initial PCA (EtC step 1)\n    print(f\"  Computing initial PCA (n_comps={n_pcs})...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    \n    # Prepare a temporary AnnData object for Combat on PCA, as sc.pp.combat expects adata.X\n    temp_adata_for_combat_on_pca = ad.AnnData(X=adata.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    \n    # 4. Combat Batch Correction on PCs (EtC step 2)\n    print(\"  Applying scanpy.pp.combat directly to PCA components...\")\n    sc.pp.combat(temp_adata_for_combat_on_pca, key='batch')\n    \n    # Transfer corrected PCA back to original adata\n    adata.obsm['X_pca'] = temp_adata_for_combat_on_pca.X\n    print(f\"  Combat-corrected PCA embedding shape: {adata.obsm['X_pca'].shape}\")\n\n    # 5. Standard Scanpy Neighbors Graph Construction\n    print(f\"  Building standard Scanpy neighbors graph (n_neighbors={n_neighbors_knn})...\")\n    sc.pp.neighbors(adata, n_neighbors=n_neighbors_knn, use_rep='X_pca')\n\n    # 6. UMAP Embedding from the final graph\n    print(f\"  Computing UMAP embedding from the graph (min_dist={min_dist_umap})...\")\n    adata.uns['neighbors'] = { # UMAP requires this info\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': n_neighbors_umap, # UMAP will use this in adata.uns['neighbors']['params']\n            'method': 'umap',\n            'metric': 'euclidean'\n        }\n    }\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']  # Assign X_umap to X_emb\n\n    # Create output AnnData with required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_etc_combat_scanpy_neighbors_umap_simplified',\n            'params': {\n                'n_pcs': n_pcs,\n                'n_neighbors_knn': n_neighbors_knn,\n                'n_neighbors_umap': n_neighbors_umap,\n                'min_dist_umap': min_dist_umap,\n                'etc_combat_on_pca': True,\n                'graph_type': 'standard_scanpy_knn'\n            }\n        }\n    )\n\n    print(\"\u2713 EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761783307.2318845,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.49522182341006227,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Building standard Scanpy neighbors graph (n_neighbors=15)...\n  Computing UMAP embedding from the graph (min_dist=0.5)...\n\u2713 EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1f0d741f-d7e7-4290-bcaa-a3d3238172f8/result_human.h5ad\n\nRESULT_UUID: 1f0d741f-d7e7-4290-bcaa-a3d3238172f8\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.093  ASW_label: 0.252  ARI: 0.290  NMI: 0.596\n  Graph_conn: 0.704  kBET: 0.759  iLISI: 0.015  cLISI: 0.990\n  PCR: 0.794  Cell_cycle: 0.458\n\nRaw Scores (before normalization):\n  ASW_batch: 0.575215  ASW_label: 0.557315  ARI: 0.290222  NMI: 0.596202\n  Graph_conn: 0.709496  kBET: 0.724315  iLISI: 0.015245  cLISI: 0.997051\n  PCR: 0.794388  Cell_cycle: 0.399626",
+        "ASW_batch": [
+          "0.093",
+          0.09253794476793993
+        ],
+        "ASW_label": [
+          "0.252",
+          0.2522641614904108
+        ],
+        "ARI": [
+          "0.290",
+          0.2903177927397149
+        ],
+        "NMI": [
+          "0.596",
+          0.5960878334134599
+        ],
+        "Graph_conn": [
+          "0.704",
+          0.7044830861461541
+        ],
+        "kBET": [
+          "0.759",
+          0.7586478693007709
+        ],
+        "iLISI": [
+          "0.015",
+          0.015244736049765025
+        ],
+        "cLISI": [
+          "0.990",
+          0.9898760815784052
+        ],
+        "PCR": [
+          "0.794",
+          0.7943883608892064
+        ],
+        "Cell_cycle": [
+          "0.458",
+          0.45837036772479584
+        ]
+      },
+      "evaluation_timestamp": 1761783659.1884918,
+      "evaluation_datetime": "2025-10-30T08:20:59.188493",
+      "sort_key": [
+        0.49522182341006227
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.49522182341006227,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761783659.202963,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC Combat PCs + Standard Scanpy Neighbors + UMAP' (ID: 1655) has been evaluated.\n\n**Score:** 0.49522182341006227\n**ASW_batch:** 0.093\n**ASW_label:** 0.252\n**ARI:** 0.290\n**NMI:** 0.596\n**Graph_conn:** 0.704\n**kBET:** 0.759\n**iLISI:** 0.015\n**cLISI:** 0.990\n**PCR:** 0.794\n**Cell_cycle:** 0.458\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.093  ASW_label: 0.252  ARI: 0.290  NMI: 0.596\n  Graph_conn: 0.704  kBET: 0.759  iLISI: 0.015  cLISI: 0.990\n  PCR: 0.794  Cell_cycle: 0.458\n\nRaw Scores (before normalization):\n  ASW_batch: 0.575215  ASW_label: 0.557315  ARI: 0.290222  NMI: 0.596202\n  Graph_conn: 0.709496  kBET: 0.724315  iLISI: 0.015245  cLISI: 0.997051\n  PCR: 0.794388  Cell_cycle: 0.399626\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Building standard Scanpy neighbors graph (n_neighbors=15)...\n  Computing UMAP embedding from the graph (min_dist=0.5)...\n\u2713 EtC Combat PCs + Standard Scanpy Neighbors + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1f0d741f-d7e7-4290-bcaa-a3d3238172f8/result_human.h5ad\n\nRESULT_UUID: 1f0d741f-d7e7-4290-bcaa-a3d3238172f8\n\n\nSTDERR:\n\n```"
+  }
+}

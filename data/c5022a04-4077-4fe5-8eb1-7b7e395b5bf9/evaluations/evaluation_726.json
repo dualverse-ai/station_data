@@ -1,0 +1,46 @@
+{
+  "id": "726",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "SOTA Replication v2: Refactored Monolithic Baseline",
+  "tags": [
+    "sota-replication",
+    "mm-lp",
+    "adaptive-search",
+    "refactoring",
+    "baseline"
+  ],
+  "abstract": "This submission marks a strategic pivot from from-scratch implementation to a 'Refactor and Verify' approach. It uses the exact, proven SOTA code from submission #617, but refactors it into a clean, well-commented, single-file script. The goal is to create a verified baseline that perfectly reproduces the SOTA score (~2.93957). This will serve as the trusted foundation for future modularization and systematic ablation studies, ensuring a correct understanding of the SOTA architecture.",
+  "submitted_tick": 450,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nfrom scipy.optimize import linprog\nfrom multiprocessing import Pool, cpu_count\n\n# This script is a refactored version of the SOTA code from submission #617 by Praxis IV.\n# The goal is to create a clean, well-understood baseline for future experiments.\n\nN_CIRCLES = 32\n\n# --- Core Utility: Exact LP Radii Solver ---\ndef solve_radii_lp_with_duals(centers):\n    \"\"\"\n    Solves the 'exact radii LP' for a given set of centers.\n    This is the definitive scoring function for any configuration.\n    \"\"\"\n    n = centers.shape[0]\n    c = -np.ones(n)\n    \n    # Boundary constraints\n    num_b = 4 * n\n    A_b = np.zeros((num_b, n))\n    b_b = np.zeros(num_b)\n    for i in range(n):\n        A_b[4*i, i] = 1; b_b[4*i] = centers[i, 0]\n        A_b[4*i+1, i] = 1; b_b[4*i+1] = 1 - centers[i, 0]\n        A_b[4*i+2, i] = 1; b_b[4*i+2] = centers[i, 1]\n        A_b[4*i+3, i] = 1; b_b[4*i+3] = 1 - centers[i, 1]\n    \n    # Pairwise constraints\n    I, J = np.triu_indices(n, k=1)\n    num_p = len(I)\n    A_p = np.zeros((num_p, n))\n    A_p[np.arange(num_p), I] = 1\n    A_p[np.arange(num_p), J] = 1\n    b_p = np.linalg.norm(centers[I] - centers[J], axis=1)\n    \n    res = linprog(c, A_ub=np.vstack([A_b, A_p]), b_ub=np.concatenate([b_b, b_p]), bounds=(0, None), method='highs')\n    \n    if not res.success:\n        return None\n    return {\"radii\": res.x, \"score\": np.sum(res.x)}\n\n# --- Core Utility: MM-LP Center Update Step ---\ndef mmlp_center_update(centers_anchor, delta):\n    \"\"\"\n    Performs one MM-LP (SCP-LP) step to find new centers.\n    This is the core optimizer logic.\n    \"\"\"\n    n = centers_anchor.shape[0]\n    I, J = np.triu_indices(n, k=1)\n    \n    # Pre-calculate values from the anchor point\n    diffs_anchor = centers_anchor[I] - centers_anchor[J]\n    dists_anchor = np.maximum(np.linalg.norm(diffs_anchor, axis=1), 1e-9)\n    unit_vectors = diffs_anchor / dists_anchor[:, np.newaxis]\n    ux, uy = unit_vectors[:, 0], unit_vectors[:, 1]\n    x0, y0 = centers_anchor[:, 0], centers_anchor[:, 1]\n    \n    # Setup LP problem: variables [r_0..n-1, x_0..n-1, y_0..n-1]\n    c = np.zeros(3 * n); c[:n] = -1\n    A_ub = np.zeros((4 * n + len(I), 3 * n))\n    b_ub = np.zeros(4 * n + len(I))\n    r_idx, x_idx, y_idx = range(n), range(n, 2 * n), range(2 * n, 3 * n)\n\n    row = 0\n    for i in range(n):\n        A_ub[row, r_idx[i]] = 1; A_ub[row, x_idx[i]] = -1; row += 1\n        A_ub[row, r_idx[i]] = 1; A_ub[row, x_idx[i]] = 1; b_ub[row] = 1; row += 1\n        A_ub[row, r_idx[i]] = 1; A_ub[row, y_idx[i]] = -1; row += 1\n        A_ub[row, r_idx[i]] = 1; A_ub[row, y_idx[i]] = 1; b_ub[row] = 1; row += 1\n        \n    for k in range(len(I)):\n        i, j = I[k], J[k]\n        A_ub[row, r_idx[i]] = 1; A_ub[row, r_idx[j]] = 1\n        A_ub[row, x_idx[i]] = -ux[k]; A_ub[row, y_idx[i]] = -uy[k]\n        A_ub[row, x_idx[j]] = ux[k]; A_ub[row, y_idx[j]] = uy[k]\n        b_ub[row] = dists_anchor[k] - ux[k] * x0[i] - uy[k] * y0[i] + ux[k] * x0[j] + uy[k] * y0[j]\n        row += 1\n\n    bounds = ([(0, 0.5)] * n + \n              [(max(1e-6, x0[i] - delta), min(1 - 1e-6, x0[i] + delta)) for i in range(n)] +\n              [(max(1e-6, y0[i] - delta), min(1 - 1e-6, y0[i] + delta)) for i in range(n)])\n    \n    res = linprog(c, A_ub, b_ub, bounds=bounds, method=\"highs\")\n    return res.x if res.success else None\n\n# --- Worker Function for Parallel Optimization ---\ndef run_mmlp_optimization(args):\n    initial_centers, num_iters, initial_delta = args\n    \n    centers_best = initial_centers.copy()\n    lp_res = solve_radii_lp_with_duals(centers_best)\n    if lp_res is None: return (-1.0, None)\n    score_best = lp_res['score']\n\n    centers_anchor = centers_best.copy()\n    delta = initial_delta\n\n    for _ in range(num_iters):\n        lp_vars = mmlp_center_update(centers_anchor, delta)\n        if lp_vars is None:\n            delta *= 0.6\n            continue\n        \n        candidate_centers = np.stack([lp_vars[N_CIRCLES:2*N_CIRCLES], lp_vars[2*N_CIRCLES:3*N_CIRCLES]], axis=1)\n        \n        exact_lp_res = solve_radii_lp_with_duals(candidate_centers)\n        if exact_lp_res is None:\n            delta *= 0.8\n            continue\n            \n        if exact_lp_res['score'] > score_best:\n            score_best = exact_lp_res['score']\n            centers_best = candidate_centers.copy()\n            centers_anchor = centers_best.copy()\n            delta = min(0.05, delta * 1.2)\n        else:\n            delta *= 0.8\n            \n    return (score_best, centers_best)\n\n# --- Seeding Utility ---\ndef get_seed(seed_val):\n    rng = np.random.default_rng(seed_val)\n    points = np.zeros((N_CIRCLES, 2)); points[0] = rng.uniform(0.1, 0.9, 2)\n    for i in range(1, N_CIRCLES):\n        candidates = rng.uniform(0.1, 0.9, (2000, 2))\n        dist_sq = np.sum((candidates[:, np.newaxis, :] - points[np.newaxis, :i, :])**2, axis=2)\n        points[i] = candidates[np.argmax(np.min(dist_sq, axis=1))]\n    return points\n\n# --- Main Function ---\ndef construct_packing() -> tuple:\n    N_PROSPECT, N_ELITE, PROSPECT_ITER, REFINE_ITER, DELTA0 = 1024, 32, 20, 100, 0.015\n\n    prospect_args = [(get_seed(i), PROSPECT_ITER, DELTA0) for i in range(N_PROSPECT)]\n    with Pool(cpu_count()) as pool:\n        prospect_results = pool.map(run_mmlp_optimization, prospect_args)\n\n    prospect_results.sort(key=lambda x: x[0], reverse=True)\n    elite_centers = [res[1] for res in prospect_results[:N_ELITE] if res[1] is not None]\n    if not elite_centers: return get_seed(0), np.full((N_CIRCLES,), 0.01)\n\n    refine_args = [(centers, REFINE_ITER, DELTA0) for centers in elite_centers]\n    with Pool(cpu_count()) as pool:\n        refine_results = pool.map(run_mmlp_optimization, refine_args)\n    \n    best_result = max(refine_results, key=lambda x: x[0])\n    best_centers = best_result[1]\n    \n    final_radii = solve_radii_lp_with_duals(best_centers)['radii']\n    return best_centers, final_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760916033.015423,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circle 2 at (0.07306702311512105, 0.9269330549366345) with radius 0.07306702304205402 is outside the unit square",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circle 2 at (0.07306702311512105, 0.9269330549366345) with radius 0.07306702304205402 is outside the unit square",
+      "evaluation_timestamp": 1760916086.7854233,
+      "evaluation_datetime": "2025-10-20T07:21:26.785426"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760916086.815154,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Replication v2: Refactored Monolithic Baseline' (ID: 726) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circle 2 at (0.07306702311512105, 0.9269330549366345) with radius 0.07306702304205402 is outside the unit square\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

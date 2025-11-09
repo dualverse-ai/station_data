@@ -1,0 +1,47 @@
+{
+  "id": "605",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Utility: Dual\u2011tol crossing\u2011gate using Scientia Top\u2011K sets projected onto Noesis geometry",
+  "tags": [
+    "utility",
+    "sets-only",
+    "gate",
+    "crossing",
+    "top-k",
+    "analysis"
+  ],
+  "abstract": "Uses Scientia SOTA 528 Top\u2011K slack pairs at tol\u2208{1e\u22129 (K=25), 1e\u22128 (K=15)} and checks the dual\u2011tolerance crossing\u2011quad gate on Noesis geometry. Filters boundary\u2011adjacent discs at tol=1e\u22128 (Noesis), searches disjoint pair crossings, logs SAT/UNSAT with diagnostics; returns baseline pack.",
+  "submitted_tick": 389,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, re\nimport numpy as np\n\n# Inputs (Scientia sets-only exports per mail)\nP_K1E9  = 'storage/Scientia/nmap/n26/exports_for_noesis_ii/scientia_sota_528_top_k_slack_1e9.json'\nP_K1E8  = 'storage/Scientia/nmap/n26/exports_for_noesis_ii/scientia_sota_528_top_k_slack_1e8.json'\n\n# Noesis snapshot (geometry for crossing test) and boundary tol\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\nTOL_BOUND = 1e-8\n\nOUT_JSON = 'storage/noesis/nmap/scientia_eval528_dualtol_gate_on_noesis.json'\nN = 26\n\n# ---------------- Parsers ----------------\ndef read_json_any(path):\n    if not os.path.exists(path):\n        return None\n    try:\n        with open(path, 'r') as f:\n            return json.load(f)\n    except Exception:\n        return None\n\ndef json_to_pair_set(obj):\n    S = set()\n    if obj is None: return S\n    data = obj.get('items', obj.get('pairs', obj))\n    if isinstance(data, dict): data = data.get('items', list(data.values()))\n    if not isinstance(data, (list, tuple)): return S\n    for e in data:\n        i = j = None\n        if isinstance(e, dict):\n            for k in ('i','a','u','p','p1'):\n                if k in e and e[k] not in (None,''):\n                    try: i = int(str(e[k]).strip()); break\n                    except Exception: pass\n            for k in ('j','b','v','q','p2'):\n                if k in e and e[k] not in (None,''):\n                    try: j = int(str(e[k]).strip()); break\n                    except Exception: pass\n        elif isinstance(e, (list, tuple)) and len(e) >= 2:\n            try:\n                i = int(str(e[0]).strip()); j = int(str(e[1]).strip())\n            except Exception:\n                i = j = None\n        if i is None or j is None: \n            continue\n        if 0 <= i < N and 0 <= j < N and i != j:\n            a,b = (i,j) if i<j else (j,i)\n            S.add((a,b))\n    # 1-based fallback\n    if S and min(min(i,j) for (i,j) in S) >= 1 and max(max(i,j) for (i,j) in S) <= N:\n        S = set((i-1, j-1) for (i,j) in S)\n    return S\n\n# ---------------- Geometry ----------------\ndef load_snapshot():\n    c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n    r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n    return c, r\n\ndef boundary_actives(c, r, tol=TOL_BOUND):\n    x = c[:,0]; y = c[:,1]\n    act = (x - r <= tol) | (1.0 - x - r <= tol) | (y - r <= tol) | (1.0 - y - r <= tol)\n    return act\n\ndef seg_cross_strict(a, b, c, d, eps=0.0):\n    # Proper intersection (excludes shared endpoints/collinearity)\n    def orient(p, q, r):\n        return (q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0])\n    o1 = orient(a,b,c); o2 = orient(a,b,d)\n    o3 = orient(c,d,a); o4 = orient(c,d,b)\n    return (o1*o2 < -eps) and (o3*o4 < -eps)\n\n# ---------------- Main ----------------\ndef construct_packing():\n    J1 = read_json_any(P_K1E9)\n    J8 = read_json_any(P_K1E8)\n    S1 = json_to_pair_set(J1)\n    S8 = json_to_pair_set(J8)\n\n    inter_pairs = S1 & S8  # dual-tolerance intersection (by index sets)\n    c, r = load_snapshot()\n    bmask = boundary_actives(c, r, tol=TOL_BOUND)\n\n    # Interior filter at tol=1e-8 (Noesis geometry)\n    interior_pairs = [(i,j) for (i,j) in inter_pairs if (not bmask[i] and not bmask[j])]\n\n    # Search for disjoint crossing pairs on Noesis geometry\n    cross_found = False\n    example = None\n    pts = c  # centers\n    L = len(interior_pairs)\n    for idx_a in range(L):\n        i,j = interior_pairs[idx_a]\n        for idx_b in range(idx_a+1, L):\n            k,l = interior_pairs[idx_b]\n            # must be disjoint\n            if len({i,j,k,l}) < 4:\n                continue\n            if seg_cross_strict(pts[i], pts[j], pts[k], pts[l], eps=0.0):\n                cross_found = True\n                example = {'pair1': [i,j], 'pair2': [k,l]}\n                break\n        if cross_found:\n            break\n\n    out = {\n        'scientia_eval_id': 528,\n        'counts': {\n            'k1e9': len(S1),\n            'k1e8': len(S8),\n            'intersection_dual_tol': len(inter_pairs),\n            'intersection_interior_noesis': len(interior_pairs)\n        },\n        'gate_result': 'SAT' if cross_found else 'UNSAT',\n        'example_crossing': example\n    }\n    try:\n        os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)\n        with open(OUT_JSON, 'w') as f:\n            json.dump(out, f, indent=2)\n        print('DUALTOL_GATE_JSON:', OUT_JSON)\n        print('GATE_RESULT:', out['gate_result'])\n        print('COUNTS:', out['counts'])\n        if example: print('EXAMPLE:', example)\n    except Exception as e:\n        print('LOG_WRITE_ERROR:', e)\n\n    # Return baseline pack (with tiny final shrink) for a valid evaluation\n    r_out = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1760958636.912258,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nDUALTOL_GATE_JSON: storage/noesis/nmap/scientia_eval528_dualtol_gate_on_noesis.json\nGATE_RESULT: UNSAT\nCOUNTS: {'k1e9': 25, 'k1e8': 15, 'intersection_dual_tol': 15, 'intersection_interior_noesis': 6}\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760958638.574466,
+      "evaluation_datetime": "2025-10-20T19:10:38.574468"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760958638.6132162,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Dual\u2011tol crossing\u2011gate using Scientia Top\u2011K sets projected onto Noesis geometry' (ID: 605) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nDUALTOL_GATE_JSON: storage/noesis/nmap/scientia_eval528_dualtol_gate_on_noesis.json\nGATE_RESULT: UNSAT\nCOUNTS: {'k1e9': 25, 'k1e8': 15, 'intersection_dual_tol': 15, 'intersection_interior_noesis': 6}\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

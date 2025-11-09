@@ -1,0 +1,91 @@
+{
+  "id": "114",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Hybrid Replication: My Code + Praxis's Graph Module",
+  "tags": [
+    "replication",
+    "residualization",
+    "balanced-knn",
+    "praxis-method",
+    "debugging"
+  ],
+  "abstract": "This submission is a controlled experiment to isolate the bug in my previous SOTA replication attempts (ID 110, 111). My re-implementations of the `build_balanced_knn` function have repeatedly failed to reproduce the high iLISI score. This version uses my own code for preprocessing and PCA residualization but directly imports and uses Praxis I's `build_balanced_knn` module from their lineage storage. If this successfully replicates the SOTA score, it will confirm that my graph implementation is the only flawed component.",
+  "submitted_tick": 59,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\n# Import Praxis I's verified module\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom balanced_graph import build_balanced_knn\n\ndef _my_residualize(Z, batches, gamma=0.75, l2=1e-3):\n    \"\"\"My implementation of Praxis I's residualization, which appears correct.\"\"\"\n    Z_centered = Z - Z.mean(axis=0)\n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices]\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    Z_resid = Z_centered - gamma * (B @ W)\n    return Z_resid + Z.mean(axis=0)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    \n    # Using the robust HVG selection logic from the debugger\n    hvg_key = 'batch_hvg' if 'batch_hvg' in adata.var else 'highly_variable'\n    if hvg_key not in adata.var:\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch', subset=True)\n        adata_hvg = adata\n    else:\n        adata_hvg = adata[:, adata.var[hvg_key]].copy()\n        \n    sc.pp.pca(adata_hvg, n_comps=50)\n    Z = adata_hvg.obsm['X_pca']\n    batches = adata.obs['batch'].values\n    \n    # Use my residualization function\n    print(\"Using Daedalus's residualization implementation...\")\n    Z_resid = _my_residualize(Z, batches, gamma=0.75, l2=1e-3)\n    \n    # Use Praxis I's balanced_knn function\n    print(\"Using Praxis I's balanced_graph implementation...\")\n    C, D = build_balanced_knn(\n        Z_resid, batches, n_neighbors_total=42, metric='cosine',\n        weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n    \n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = Z_resid\n    if C is not None and D is not None:\n        output.obsp['connectivities'] = C\n        output.obsp['distances'] = D\n    \n    return output\n",
+    "submitted_timestamp": 1761411797.2180452,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5891614336399775,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nUsing Daedalus's residualization implementation...\nUsing Praxis I's balanced_graph implementation...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b8551429-bba6-4b11-b476-a054f1c4bfcf/result_human.h5ad\n\nRESULT_UUID: b8551429-bba6-4b11-b476-a054f1c4bfcf\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.225  ARI: 0.577  NMI: 0.686\n  Graph_conn: 0.881  kBET: 0.632  iLISI: 0.030  cLISI: 0.989\n  PCR: 0.931  Cell_cycle: 0.304\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820490  ASW_label: 0.541304  ARI: 0.577208  NMI: 0.686496\n  Graph_conn: 0.883307  kBET: 0.605232  iLISI: 0.029761  cLISI: 0.996674\n  PCR: 0.930799  Cell_cycle: 0.268120",
+        "ASW_batch": [
+          "0.637",
+          0.637022960120507
+        ],
+        "ASW_label": [
+          "0.225",
+          0.22457502833606338
+        ],
+        "ARI": [
+          "0.577",
+          0.5772654155296241
+        ],
+        "NMI": [
+          "0.686",
+          0.6864074148019261
+        ],
+        "Graph_conn": [
+          "0.881",
+          0.8812933039288875
+        ],
+        "kBET": [
+          "0.632",
+          0.6319354366167397
+        ],
+        "iLISI": [
+          "0.030",
+          0.02976129670243995
+        ],
+        "cLISI": [
+          "0.989",
+          0.9885830133199716
+        ],
+        "PCR": [
+          "0.931",
+          0.9307993786196915
+        ],
+        "Cell_cycle": [
+          "0.304",
+          0.303971088423925
+        ]
+      },
+      "evaluation_timestamp": 1761411993.77482,
+      "evaluation_datetime": "2025-10-26T01:06:33.774820",
+      "sort_key": [
+        0.5891614336399775
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5891614336399775,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761411993.7861145,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Replication: My Code + Praxis's Graph Module' (ID: 114) has been evaluated.\n\n**Score:** 0.5891614336399775\n**ASW_batch:** 0.637\n**ASW_label:** 0.225\n**ARI:** 0.577\n**NMI:** 0.686\n**Graph_conn:** 0.881\n**kBET:** 0.632\n**iLISI:** 0.030\n**cLISI:** 0.989\n**PCR:** 0.931\n**Cell_cycle:** 0.304\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.225  ARI: 0.577  NMI: 0.686\n  Graph_conn: 0.881  kBET: 0.632  iLISI: 0.030  cLISI: 0.989\n  PCR: 0.931  Cell_cycle: 0.304\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820490  ASW_label: 0.541304  ARI: 0.577208  NMI: 0.686496\n  Graph_conn: 0.883307  kBET: 0.605232  iLISI: 0.029761  cLISI: 0.996674\n  PCR: 0.930799  Cell_cycle: 0.268120\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nUsing Daedalus's residualization implementation...\nUsing Praxis I's balanced_graph implementation...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b8551429-bba6-4b11-b476-a054f1c4bfcf/result_human.h5ad\n\nRESULT_UUID: b8551429-bba6-4b11-b476-a054f1c4bfcf\n\n\nSTDERR:\n\n```"
+  }
+}

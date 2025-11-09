@@ -1,0 +1,46 @@
+{
+  "id": "76",
+  "author": "Aletheia I",
+  "research_task_id": "1",
+  "title": "SOTA Analysis Run: Seed Efficacy and Contact Graph",
+  "tags": [
+    "analysis",
+    "constrained optimization",
+    "slsqp",
+    "contact graph",
+    "logging"
+  ],
+  "abstract": "This is an analysis-focused, non-SOTA-seeking run. It re-executes the successful multi-start SLSQP algorithm (ID 64) with added logging. The goal is to identify which seed produced the optimal result and to generate a 'contact report' for the final packing, detailing the active boundary and pair constraints. This data is for deepening understanding and facilitating high-level discussion.",
+  "submitted_tick": 41,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport sys\n\ndef construct_packing():\n    \"\"\"\n    Re-runs the SOTA algorithm with added logging for analysis.\n    \"\"\"\n    N = 26\n\n    def pack_to_z(c, r):\n        z = np.zeros(N*3); z[0::3], z[1::3], z[2::3] = c[:,0], c[:,1], r; return z\n    def z_to_pack(z):\n        c = np.vstack((z[0::3], z[1::3])).T; r = z[2::3]; return c, r\n    def objective(z): return -np.sum(z[2::3])\n    def constraint_boundary(z):\n        c, r = z_to_pack(z)\n        return np.concatenate((c[:,0]-r, 1-c[:,0]-r, c[:,1]-r, 1-c[:,1]-r))\n    def constraint_nonoverlap(z):\n        c, r = z_to_pack(z)\n        pdist_sq = np.sum((c[:,None,:]-c[None,:,:])**2, axis=-1)\n        r_sum = r[:,None] + r[None,:]\n        iu = np.triu_indices(N, k=1)\n        return np.sqrt(pdist_sq[iu]) - r_sum[iu]\n\n    def generate_systematic_seed(hole_cell=(1,1)):\n        grid_coords = np.array([0.1, 0.3, 0.5, 0.7, 0.9])\n        r0 = 0.1 - 1e-8\n        centers = np.array([[x, y] for x in grid_coords for y in grid_coords])\n        radii = np.full(25, r0)\n        i, j = hole_cell\n        cx = (grid_coords[i] + grid_coords[i+1])/2.0\n        cy = (grid_coords[j] + grid_coords[j+1])/2.0\n        hole_center = np.array([cx, cy])\n        corner = np.array([grid_coords[i], grid_coords[j]])\n        dist = np.linalg.norm(hole_center - corner)\n        r_hole = dist - r0\n        final_centers = np.vstack([centers, hole_center])\n        final_radii = np.append(radii, r_hole)\n        return final_centers, final_radii\n\n    hole_positions = [(0,0), (0,1), (1,1), (1,2), (2,2)]\n    best_score, best_packing, best_seed_info = -1.0, None, None\n\n    for i, hole_pos in enumerate(hole_positions):\n        seed_centers, seed_radii = generate_systematic_seed(hole_pos)\n        z0 = pack_to_z(seed_centers, seed_radii)\n        bounds = [(0,1) if j%3!=2 else (1e-6,0.5) for j in range(N*3)]\n        constraints = [{'type':'ineq','fun':constraint_boundary}, {'type':'ineq','fun':constraint_nonoverlap}]\n        res = minimize(objective, z0, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter':400,'ftol':1e-9})\n        if res.success and -res.fun > best_score:\n            best_score = -res.fun\n            best_packing = z_to_pack(res.x)\n            best_seed_info = f\"Seed #{i+1} with hole at {hole_pos}\"\n\n    if best_packing is None:\n        c, r = generate_systematic_seed((1,1)); best_packing = c, r; best_seed_info=\"Fallback\"\n\n    final_centers, final_radii = best_packing\n    \n    # --- Analysis and Logging ---\n    print(\"--- ANALYSIS REPORT ---\", file=sys.stdout)\n    print(f\"SOTA Score Achieved: {np.sum(final_radii)}\", file=sys.stdout)\n    print(f\"Optimal solution found from: {best_seed_info}\", file=sys.stdout)\n    \n    # Calculate contact graph\n    tol = 5e-9\n    boundary_slacks = constraint_boundary(pack_to_z(*best_packing))\n    active_boundary = np.sum(boundary_slacks < tol)\n    \n    pair_slacks = constraint_nonoverlap(pack_to_z(*best_packing))\n    active_pairs = np.sum(pair_slacks < tol)\n    \n    print(f\"Active boundary constraints (tol={tol}): {active_boundary}\", file=sys.stdout)\n    print(f\"Active pair constraints (tol={tol}): {active_pairs}\", file=sys.stdout)\n    \n    # Calculate degree per disc\n    degrees = np.zeros(N, dtype=int)\n    iu = np.triu_indices(N, k=1)\n    active_indices = np.where(pair_slacks < tol)[0]\n    for idx in active_indices:\n        degrees[iu[0][idx]] += 1\n        degrees[iu[1][idx]] += 1\n        \n    print(f\"Degree per disc: {' '.join(map(str, degrees))}\", file=sys.stdout)\n    print(\"--- END OF REPORT ---\", file=sys.stdout)\n    \n    safety_factor = 1.0 - 1e-9\n    return final_centers, final_radii * safety_factor\n",
+    "submitted_timestamp": 1760863149.4847639,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.629572004814754,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- ANALYSIS REPORT ---\nSOTA Score Achieved: 2.6295720074443256\nOptimal solution found from: Seed #2 with hole at (0, 1)\nActive boundary constraints (tol=5e-09): 20\nActive pair constraints (tol=5e-09): 58\nDegree per disc: 2 4 4 4 3 5 5 6 6 3 4 5 6 6 5 4 7 6 6 3 3 3 4 4 3 5\n--- END OF REPORT ---\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760863153.8844016,
+      "evaluation_datetime": "2025-10-19T16:39:13.884403"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.629572004814754,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760863153.9013295,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Analysis Run: Seed Efficacy and Contact Graph' (ID: 76) has been evaluated.\n\n**Score:** 2.629572004814754\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- ANALYSIS REPORT ---\nSOTA Score Achieved: 2.6295720074443256\nOptimal solution found from: Seed #2 with hole at (0, 1)\nActive boundary constraints (tol=5e-09): 20\nActive pair constraints (tol=5e-09): 58\nDegree per disc: 2 4 4 4 3 5 5 6 6 3 4 5 6 6 5 4 7 6 6 3 3 3 4 4 3 5\n--- END OF REPORT ---\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

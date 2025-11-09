@@ -1,0 +1,91 @@
+{
+  "id": "1237",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "Mixing Shortfall H3: Symmetrically Normalized Graph",
+  "tags": [
+    "sota",
+    "graph-theory",
+    "symmetrization",
+    "mixing-shortfall",
+    "graph-normalization"
+  ],
+  "abstract": "After two failed hypotheses (H1, H2) that involved pruning edges, this experiment tests a fundamentally different approach. It abandons edge pruning and instead aims to preserve all connectivity information from the directed graph. It creates a symmetric weighted matrix (A + A.T) and then applies symmetric normalization (D^-1/2 * W * D^-1/2). This method produces a weighted, non-binary connectivity graph. The hypothesis is that this normalization will control the influence of high-degree nodes and prevent graph collapse without losing critical edge information.",
+  "submitted_tick": 879,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Inlined SOTA Code ---\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\n# --- H3: Symmetrically Normalized Symmetrizer ---\ndef symmetrize_normalized(rows, cols, dists, n):\n    print(\"--- Running Symmetrically Normalized Symmetrizer ---\")\n    # 1. Create the directed graph\n    A_directed = sp.coo_matrix((np.ones_like(dists), (rows, cols)), shape=(n, n)).tocsr()\n    D_directed = sp.coo_matrix((dists, (rows, cols)), shape=(n, n)).tocsr()\n    \n    # 2. Create symmetric weighted matrix W = A + A.T\n    W = A_directed + A_directed.T\n    W.setdiag(0) # No self-loops\n    \n    # 3. Calculate Degree matrix D\n    degree = W.sum(axis=1).A.flatten()\n    degree_inv_sqrt = 1.0 / np.sqrt(np.maximum(degree, 1e-12))\n    D_inv_sqrt = sp.diags(degree_inv_sqrt)\n    \n    # 4. Compute D^(-1/2) * W * D^(-1/2)\n    W_norm = D_inv_sqrt @ W @ D_inv_sqrt\n    \n    # Distances\n    D_final = D_directed.maximum(D_directed.T)\n    D_final = D_final.multiply(W_norm > 0)\n\n    print(\"Finished. Final graph is weighted and normalized.\")\n    return W_norm.astype(np.float32), D_final.astype(np.float32)\n\n# --- Inlined BBSG function, modified for H3 ---\ndef build_density_adaptive_bbsg_H3(Zcorr, batches, k_total, metric, delta, k_density, rng_seed):\n    # ... (Full BBSG logic is identical to previous submissions) ...\n    n = Zcorr.shape[0]; cats = np.unique(batches); B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute').fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr); d_k = d_all[:, -1]\n    d_min, d_max = np.min(d_k), np.max(d_k); inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    base_cross = (len(cats) - 1) / float(len(cats)); mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other)); max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    batch_to_indices, nn_models = {}, {};\n    for j, c in enumerate(cats):\n        mask = (batches == c); batch_to_indices[j] = np.where(mask)[0]\n        nn_models[j] = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute').fit(Zcorr[mask])\n    nn_dists, nn_idx_local = {}, {};\n    for j in range(len(cats)): d, ii = nn_models[j].kneighbors(Zcorr); nn_dists[j], nn_idx_local[j] = d, ii\n    rows, cols, dvals = [], [], []; batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i]); q_cross_total = int(round(f_cross[i] * k_total)); q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        other_batches = [j for j in range(len(cats)) if j != bi]; d_i, ii = nn_dists[bi][i], nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0; sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0: cols.extend(batch_to_indices[bi][ii[start:start + sel]]); rows.extend([i] * sel); dvals.extend(d_i[start:start + sel])\n        q_per_other = q_cross_total // B_other if B_other > 0 else 0; rem = q_cross_total - q_per_other * B_other\n        batch_scores = sorted([(j, nn_dists[j][i][0]) for j in other_batches], key=lambda t: t[1]); q_map = {j: q_per_other for j in other_batches}\n        if other_batches:\n            for k in range(rem): q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij, ii_j = nn_dists[j][i], nn_idx_local[j][i]; sel_j = min(q_map.get(j, 0), d_ij.shape[0])\n            if sel_j > 0: cols.extend(batch_to_indices[j][ii_j[:sel_j]]); rows.extend([i] * sel_j); dvals.extend(d_ij[:sel_j])\n    return symmetrize_normalized(np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(dvals, dtype=np.float32), n)\n\n# --- Main Experiment Logic ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    alpha_g, n_pcs_graph, lam_override = 0.5, 50, 0.605\n    k_total, kdensity, delta = 50, 22, 0.10\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]; Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32)\n    adata.obsm['X_emb'] = sc.pp.pca(Xd, n_comps=50) # Dummy\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    Xw_graph = Xd * np.power(var_g, -0.5 * alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n    B = one_hot_batches(batches); Zhat = ridge_batch_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(0.74, float(lam_override) * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = build_density_adaptive_bbsg_H3(Zcorr.astype(np.float32), batches, k_total, 'cosine', delta, kdensity, 0)\n    adata.obsp['connectivities'] = Cg; adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761682581.4919934,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4581501525758053,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Symmetrically Normalized Symmetrizer ---\nFinished. Final graph is weighted and normalized.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6efe1098-6bb5-4ea9-92d1-51c0ac2f9dee/result_human.h5ad\n\nRESULT_UUID: 6efe1098-6bb5-4ea9-92d1-51c0ac2f9dee\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.425  NMI: 0.645\n  Graph_conn: 0.894  kBET: 0.553  iLISI: 0.002  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.425167  NMI: 0.644817\n  Graph_conn: 0.895329  kBET: 0.530994  iLISI: 0.002455  cLISI: 0.997459\n  PCR: 0.000000  Cell_cycle: 0.305354",
+        "ASW_batch": [
+          "0.516",
+          0.5158370728664765
+        ],
+        "ASW_label": [
+          "0.208",
+          0.20782040493934487
+        ],
+        "ARI": [
+          "0.425",
+          0.4252448323891743
+        ],
+        "NMI": [
+          "0.645",
+          0.6447166666735439
+        ],
+        "Graph_conn": [
+          "0.894",
+          0.8935234108886432
+        ],
+        "kBET": [
+          "0.553",
+          0.5529408838144141
+        ],
+        "iLISI": [
+          "0.002",
+          0.0024549330640567155
+        ],
+        "cLISI": [
+          "0.991",
+          0.991276309298796
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.34768701182360406
+        ]
+      },
+      "evaluation_timestamp": 1761683031.4078014,
+      "evaluation_datetime": "2025-10-29T04:23:51.407801",
+      "sort_key": [
+        0.4581501525758053
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4581501525758053,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761683031.4218364,
+    "version_notified": "original",
+    "message": "Your research submission 'Mixing Shortfall H3: Symmetrically Normalized Graph' (ID: 1237) has been evaluated.\n\n**Score:** 0.4581501525758053\n**ASW_batch:** 0.516\n**ASW_label:** 0.208\n**ARI:** 0.425\n**NMI:** 0.645\n**Graph_conn:** 0.894\n**kBET:** 0.553\n**iLISI:** 0.002\n**cLISI:** 0.991\n**PCR:** 0.000\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.425  NMI: 0.645\n  Graph_conn: 0.894  kBET: 0.553  iLISI: 0.002  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.425167  NMI: 0.644817\n  Graph_conn: 0.895329  kBET: 0.530994  iLISI: 0.002455  cLISI: 0.997459\n  PCR: 0.000000  Cell_cycle: 0.305354\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Symmetrically Normalized Symmetrizer ---\nFinished. Final graph is weighted and normalized.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6efe1098-6bb5-4ea9-92d1-51c0ac2f9dee/result_human.h5ad\n\nRESULT_UUID: 6efe1098-6bb5-4ea9-92d1-51c0ac2f9dee\n\n\nSTDERR:\n\n```"
+  }
+}

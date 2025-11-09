@@ -1,0 +1,92 @@
+{
+  "id": "1828",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Baseline: ComBat (log1p) \u2192 PCA60 \u2192 scanpy.neighbors (k=50, cosine)",
+  "tags": [
+    "baseline",
+    "combat",
+    "pca",
+    "knn",
+    "scanpy",
+    "cosine"
+  ],
+  "abstract": "Self-run ComBat baseline: normalize_total(1e4)+log1p, apply ComBat on genes by batch, PCA(60) for X_emb, and scanpy.neighbors (k=50, cosine) to produce graph. Provides a distinct, simple reference alongside PCA-only.",
+  "submitted_tick": 1322,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport numpy as np\nimport scanpy as sc\nfrom sklearn.decomposition import TruncatedSVD\nimport scipy.sparse as sp\n\ndef _normalize_log1p_from_counts(adata: ad.AnnData) -> ad.AnnData:\n    A = adata.copy()\n    if 'counts' in A.layers:\n        A.X = A.layers['counts'].copy()\n    sc.pp.normalize_total(A, target_sum=1e4)\n    sc.pp.log1p(A)\n    return A\n\ndef _maybe_hvg_mask(adata, X):\n    if 'batch_hvg' in adata.var.columns:\n        m = adata.var['batch_hvg'].values.astype(bool)\n        if m.any() and m.sum() < X.shape[1]:\n            return X[:, m], m\n    return X, None\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # 1) Normalize (log1p from counts)\n    A = _normalize_log1p_from_counts(adata)\n\n    # 2) Optional HVG subset for linear steps\n    X = A.X\n    X, mask = _maybe_hvg_mask(A, X)\n\n    # 3) Build working AnnData for ComBat on (possibly) subset genes\n    if mask is not None:\n        Aw = ad.AnnData(X=X.copy(), obs=A.obs.copy(), var=A.var.loc[mask].copy())\n    else:\n        Aw = ad.AnnData(X=X.copy(), obs=A.obs.copy(), var=A.var.copy())\n\n    # Ensure dense float matrix for ComBat\n    if sp.issparse(Aw.X):\n        Aw.X = Aw.X.toarray()\n    Aw.X = Aw.X.astype(np.float32)\n\n    # 4) ComBat by batch\n    sc.pp.combat(Aw, key='batch')\n\n    # 5) PCA(60) on ComBat-corrected expression\n    svd = TruncatedSVD(n_components=min(60, max(2, min(Aw.n_obs - 1, Aw.n_vars))), random_state=0)\n    Z = svd.fit_transform(Aw.X).astype(np.float32)\n\n    # 6) Embed and kNN graph on original adata\n    adata.obsm['X_emb'] = Z\n    sc.pp.neighbors(adata, n_neighbors=50, use_rep='X_emb', metric='cosine')\n    adata.obsp['connectivities'] = adata.obsp['connectivities'].tocsr().astype(np.float64)\n    adata.obsp['distances'] = adata.obsp['distances'].tocsr().astype(np.float64)\n    adata.uns['neighbors']['connectivities_key'] = 'connectivities'\n    adata.uns['neighbors']['distances_key'] = 'distances'\n    return adata\n",
+    "submitted_timestamp": 1761839271.4286277,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6495534531948464,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 1 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/19cfbcd8-a6f3-4c84-96bc-2e1acedfef51/result_human.h5ad\n\nRESULT_UUID: 19cfbcd8-a6f3-4c84-96bc-2e1acedfef51\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.695  ASW_label: 0.219  ARI: 0.761  NMI: 0.722\n  Graph_conn: 0.988  kBET: 0.681  iLISI: 0.168  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.287\n\nRaw Scores (before normalization):\n  ASW_batch: 0.846686  ASW_label: 0.538235  ARI: 0.760958  NMI: 0.722241\n  Graph_conn: 0.987964  kBET: 0.650912  iLISI: 0.167843  cLISI: 0.992690\n  PCR: 0.999829  Cell_cycle: 0.253720",
+        "ASW_batch": [
+          "0.695",
+          0.6951747244830734
+        ],
+        "ASW_label": [
+          "0.219",
+          0.2192678901516732
+        ],
+        "ARI": [
+          "0.761",
+          0.7609902075430113
+        ],
+        "NMI": [
+          "0.722",
+          0.7221625271898753
+        ],
+        "Graph_conn": [
+          "0.988",
+          0.9877558242051522
+        ],
+        "kBET": [
+          "0.681",
+          0.6805424356575953
+        ],
+        "iLISI": [
+          "0.168",
+          0.1678430821039414
+        ],
+        "cLISI": [
+          "0.975",
+          0.9749046183786896
+        ],
+        "PCR": [
+          "1.000",
+          0.999829370471491
+        ],
+        "Cell_cycle": [
+          "0.287",
+          0.2870638517639614
+        ]
+      },
+      "evaluation_timestamp": 1761839801.1252513,
+      "evaluation_datetime": "2025-10-30T23:56:41.125253",
+      "sort_key": [
+        0.6495534531948464
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6495534531948464,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761839801.2045639,
+    "version_notified": "original",
+    "message": "Your research submission 'Baseline: ComBat (log1p) \u2192 PCA60 \u2192 scanpy.neighbors (k=50, cosine)' (ID: 1828) has been evaluated.\n\n**Score:** 0.6495534531948464\n**ASW_batch:** 0.695\n**ASW_label:** 0.219\n**ARI:** 0.761\n**NMI:** 0.722\n**Graph_conn:** 0.988\n**kBET:** 0.681\n**iLISI:** 0.168\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.287\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.695  ASW_label: 0.219  ARI: 0.761  NMI: 0.722\n  Graph_conn: 0.988  kBET: 0.681  iLISI: 0.168  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.287\n\nRaw Scores (before normalization):\n  ASW_batch: 0.846686  ASW_label: 0.538235  ARI: 0.760958  NMI: 0.722241\n  Graph_conn: 0.987964  kBET: 0.650912  iLISI: 0.167843  cLISI: 0.992690\n  PCR: 0.999829  Cell_cycle: 0.253720\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 1 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/19cfbcd8-a6f3-4c84-96bc-2e1acedfef51/result_human.h5ad\n\nRESULT_UUID: 19cfbcd8-a6f3-4c84-96bc-2e1acedfef51\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

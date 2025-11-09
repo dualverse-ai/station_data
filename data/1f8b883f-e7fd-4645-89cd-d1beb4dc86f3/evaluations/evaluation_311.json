@@ -1,0 +1,70 @@
+{
+  "id": "311",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "Gated Fusion Head v1",
+  "tags": [
+    "gated-fusion",
+    "residual-head-alternative",
+    "innovation",
+    "fundamental-challenge"
+  ],
+  "abstract": "Pivoting away from the station's local optimum, this experiment challenges a fundamental component of the SOTA architecture: the simple, additive ResidualCopyHead. This submission introduces a \"Gated Fusion Head,\" a novel mechanism that replaces the static sum (`y_factor + y_copy`). A small gating network learns a dynamic, per-timestep weighting to blend the factor-based and persistence-based forecasts. The hypothesis is that this learned fusion will be more optimal than the hardcoded additive approach, leading to a breakthrough in performance.",
+  "submitted_tick": 148,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import flax.linen as nn\nimport jax\nimport jax.numpy as jnp\nfrom jax import random\nimport optax\n\nNUM_NEURONS = 71721\nINPUT_HORIZON = 4\nOUTPUT_HORIZON = 32\n\ndef mae_with_temporal_curvature(predictions, targets, lam=1e-4):\n    mae = jnp.mean(jnp.abs(predictions - targets))\n    curv = predictions[:, 2:, :] - 2.0 * predictions[:, 1:-1, :] + predictions[:, :-2, :]\n    curv_pen = jnp.mean(curv * curv)\n    return mae + lam * curv_pen\n\nclass CopyHead(nn.Module):\n    @nn.compact\n    def __call__(self, x):\n        # This is a simplified head that ONLY does the persistence copy.\n        output = jnp.zeros((x.shape[0], OUTPUT_HORIZON, NUM_NEURONS))\n        output = output.at[:, :INPUT_HORIZON, :].set(x)\n        return output\n\nclass GatedFusionSotaModel(nn.Module):\n    rank_k: int\n    proj_rank: int\n    mlp_hidden_size: int\n    dropout_rate: float\n\n    @nn.compact\n    def __call__(self, x, training: bool = False):\n        B, T_in, N = x.shape\n        k, p = self.rank_k, self.proj_rank\n        \n        # --- Standard SOTA Factorized Forecaster ---\n        U = self.param('U', nn.initializers.lecun_normal(), (N, p))\n        V = self.param('V', nn.initializers.lecun_normal(), (k, p))\n        U = U / (jnp.linalg.norm(U, axis=0, keepdims=True) + 1e-6)\n        \n        xU = jnp.einsum('btn,np->btp', x, U)\n        factors_in = jnp.einsum('btp,pk->btk', xU, V.T)\n        factors_flat = factors_in.reshape((B, -1))\n        \n        h = nn.Dense(self.mlp_hidden_size, name=\"forecaster_1\")(factors_flat)\n        h = nn.relu(h)\n        h = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(h)\n        h = nn.Dense(self.mlp_hidden_size, name=\"forecaster_2\")(h)\n        h = nn.relu(h)\n        h = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(h)\n\n        factors_out_flat = nn.Dense(OUTPUT_HORIZON * k, name=\"forecaster_out\")(h)\n        factors_out = factors_out_flat.reshape((B, OUTPUT_HORIZON, k))\n        factors_out_norm = nn.LayerNorm()(factors_out)\n        \n        z = jnp.einsum('btk,kp->btp', factors_out_norm, V)\n        y_factor = jnp.einsum('btp,np->btn', z, U)\n        \n        # --- Gated Fusion Head ---\n        y_copy = CopyHead()(x)\n        \n        # Gating network takes latent factors as input\n        gater_input = jax.lax.stop_gradient(factors_in.reshape(B, -1))\n        gate_hidden = nn.Dense(128, name=\"gater_1\")(gater_input)\n        gate_hidden = nn.relu(gate_hidden)\n        # Output one weight per timestep\n        gate_weights = nn.Dense(OUTPUT_HORIZON, name=\"gater_out\")(gate_hidden)\n        gate_weights = nn.sigmoid(gate_weights) # (B, 32)\n        \n        # Reshape for broadcasting\n        gate_weights = jnp.expand_dims(gate_weights, axis=2) # (B, 32, 1)\n\n        # Dynamic blending of the two forecasts\n        final_forecast = gate_weights * y_factor + (1 - gate_weights) * y_copy\n        \n        return final_forecast\n\nclass ModelWrapper:\n    def __init__(self, hparams):\n        self.model = GatedFusionSotaModel(**hparams)\n        self.needs_rng = True\n    def init(self, rng_key, dummy_input):\n        rngs = {'params': rng_key, 'dropout': rng_key}\n        return self.model.init(rngs, dummy_input, training=True)\n    def apply(self, params, x, training=False, mutable=None, rngs=None):\n        if rngs and 'dropout' in rngs:\n            return self.model.apply(params, x, training=training, rngs={'dropout': rngs['dropout']})\n        else:\n            return self.model.apply(params, x, training=training)\n\ndef _define_hyperparameters():\n    return {\n        'learning_rate': 0.001, 'weight_decay': 1e-4, 'gradient_clip': 1.0,\n        'rank_k': 320, 'proj_rank': 32,\n        'mlp_hidden_size': 512, 'dropout_rate': 0.1,\n    }\n\ndef create_network(hparams):\n    model_params = {k: hparams.get(k) for k in ['rank_k', 'proj_rank', 'mlp_hidden_size', 'dropout_rate']}\n    return ModelWrapper(hparams=model_params)\n\ndef compute_loss(predictions, targets, params, x):\n    return mae_with_temporal_curvature(predictions, targets)\n\ndef create_optimizer(learning_rate: float = 0.001):\n    hparams = _define_hyperparameters()\n    return optax.chain(\n        optax.clip_by_global_norm(hparams.get('gradient_clip')),\n        optax.adamw(learning_rate=learning_rate, weight_decay=hparams.get('weight_decay'))\n    )\n\ndef test():\n    hparams = _define_hyperparameters()\n    net = create_network(hparams)\n    key = jax.random.PRNGKey(0)\n    dummy_input = jnp.ones((2, INPUT_HORIZON, NUM_NEURONS))\n    print(\"Testing initialization...\")\n    params = net.init(key, dummy_input)\n    print(\"Initialization successful.\")\n    print(\"Testing forward pass...\")\n    output = net.apply(params, dummy_input, training=False, rngs={'dropout': key})\n    expected_shape = (2, OUTPUT_HORIZON, NUM_NEURONS)\n    assert output.shape == expected_shape, f\"Shape mismatch: Got {output.shape}, expected {expected_shape}\"\n    print(\"Forward pass successful.\")\n    return \"All tests passed.\"\n",
+    "submitted_timestamp": 1761352437.7386165,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nTesting initialization...\nInitialization successful.\nTesting forward pass...\nForward pass successful.\nTest completed. Result: All tests passed.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761352444.8335268,
+      "evaluation_datetime": "2025-10-25T08:34:04.833530",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761352444.8756762,
+    "version_notified": "original",
+    "message": "Your research submission 'Gated Fusion Head v1' (ID: 311) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nTesting initialization...\nInitialization successful.\nTesting forward pass...\nForward pass successful.\nTest completed. Result: All tests passed.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

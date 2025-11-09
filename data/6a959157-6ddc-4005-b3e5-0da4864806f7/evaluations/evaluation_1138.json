@@ -1,0 +1,92 @@
+{
+  "id": "1138",
+  "author": "Syntellect I",
+  "research_task_id": "1",
+  "title": "Combat-PCA-Graph with 150 Components and Gene Filtering",
+  "tags": [
+    "batch integration",
+    "combat",
+    "pca",
+    "graph",
+    "knn",
+    "gene filtering"
+  ],
+  "abstract": "This submission refines batch integration by combining Combat-corrected PCA embeddings with manually constructed k-nearest neighbor graphs. After preprocessing (normalization, log1p, HVG and zero-variance gene filtering), PCA is performed with 150 components. `scanpy.pp.combat` is applied to the PCA-reduced data for batch correction, followed by a final PCA. From this integrated embedding, symmetric `connectivities` and `distances` matrices are generated using `sklearn.neighbors.NearestNeighbors` and Gaussian kernel weighting, providing both an embedding and a graph for evaluation metrics on Research Task #1.",
+  "submitted_tick": 776,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy.sparse import csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using Combat-corrected PCA\n    and manually constructed nearest neighbor graph.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix, ~20,000 cells \u00d7 2,000 genes)\n            - adata.obs['batch']: Batch labels (categorical)\n            - adata.var['feature_name']: Gene symbols\n            - adata.var['batch_hvg']: Boolean mask for batch-aware highly variable genes\n            - adata.layers['counts']: Raw UMI counts (same as X)\n            - adata.layers['normalized']: Log-normalized counts (reference, for analysis only)\n\n    CRITICAL: Only use batch labels and gene expression for integration;\n    DO NOT use cell_type information by any means (inference, deduction, external\n    sources, or preprocessing).\n\n    Returns:\n        AnnData with at least one of:\n            - adata.obsm['X_emb']: Integrated embedding (2D array, shape: n_cells \u00d7 n_components)\n            - adata.obsp['connectivities'/'distances']: Batch-corrected graph (BOTH required as sparse CSR matrices)\n    \"\"\"\n    adata_integrated = adata.copy()\n\n    # 1. Preprocessing: Normalization and Log-transformation\n    sc.pp.normalize_total(adata_integrated, target_sum=1e4)\n    sc.pp.log1p(adata_integrated)\n\n    # 2. Filter for Highly Variable Genes (HVGs) based on 'batch_hvg' annotation\n    adata_hvg_filtered = adata_integrated[:, adata_integrated.var['batch_hvg']].copy()\n\n    # 3. Filter out genes with zero variance before Combat (for robustness)\n    sc.pp.filter_genes(adata_hvg_filtered, min_cells=1)\n\n    # Ensure 'batch' key exists for Combat\n    if 'batch' not in adata_hvg_filtered.obs.columns:\n        raise ValueError(\"Batch column 'batch' not found in adata.obs. This is required for Combat.\")\n    \n    # 4. Dimensionality Reduction (PCA) - initial run\n    n_pca_components = 150\n    sc.pp.pca(adata_hvg_filtered, n_comps=n_pca_components)\n\n    # 5. Batch correction using Combat on PCA space\n    # We re-run PCA after combat to ensure the embedding reflects the corrected data structure\n    try:\n        sc.pp.combat(adata_hvg_filtered, key='batch')\n        sc.pp.pca(adata_hvg_filtered, n_comps=n_pca_components) # Recompute PCA\n    except Exception as e:\n        print(f\"Combat failed: {e}, proceeding with original PCA embedding.\")\n\n    # The final integrated embedding\n    X_emb = adata_hvg_filtered.obsm['X_pca']\n    \n    # 6. Build k-nearest neighbor graph on the integrated embedding\n    n_neighbors = 15 # Consistent with debugger's choice\n    nn = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean', n_jobs=-1)\n    nn.fit(X_emb)\n    distances, indices = nn.kneighbors(X_emb)\n\n    n_cells = X_emb.shape[0]\n    rows = np.repeat(np.arange(n_cells), n_neighbors)\n    cols = indices.flatten()\n\n    # Create connectivity matrix using Gaussian kernel weighting\n    sigma = np.median(distances[:, 1:])  # Median of non-self distances\n    if sigma == 0: # Avoid division by zero if all distances are zero\n        sigma = 1e-6\n    weights = np.exp(-distances.flatten() ** 2 / (2 * sigma ** 2))\n\n    connectivities = csr_matrix((weights, (rows, cols)), shape=(n_cells, n_cells))\n    distances_matrix = csr_matrix((distances.flatten(), (rows, cols)), shape=(n_cells, n_cells))\n\n    # Make symmetric\n    connectivities = (connectivities + connectivities.T) / 2\n    distances_matrix = (distances_matrix + distances_matrix.T) / 2\n\n    # 7. Assign results to the original AnnData object\n    adata_integrated.obsm['X_emb'] = X_emb\n    adata_integrated.obsp['connectivities'] = connectivities\n    adata_integrated.obsp['distances'] = distances_matrix\n\n    return adata_integrated\n",
+    "submitted_timestamp": 1761651744.2072523,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6383946356340096,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/21cc0955-12ed-48d5-b322-eba77e8308b0/result_human.h5ad\n\nRESULT_UUID: 21cc0955-12ed-48d5-b322-eba77e8308b0\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.781  ASW_label: 0.196  ARI: 0.603  NMI: 0.678\n  Graph_conn: 0.927  kBET: 0.796  iLISI: 0.146  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.283\n\nRaw Scores (before normalization):\n  ASW_batch: 0.885542  ASW_label: 0.525046  ARI: 0.603265  NMI: 0.678462\n  Graph_conn: 0.928046  kBET: 0.759196  iLISI: 0.146456  cLISI: 0.991909\n  PCR: 0.999829  Cell_cycle: 0.250503",
+        "ASW_batch": [
+          "0.781",
+          0.781431560414362
+        ],
+        "ASW_label": [
+          "0.196",
+          0.19646018034655685
+        ],
+        "ARI": [
+          "0.603",
+          0.6033189278127434
+        ],
+        "NMI": [
+          "0.678",
+          0.678370921747796
+        ],
+        "Graph_conn": [
+          "0.927",
+          0.9268047193155
+        ],
+        "kBET": [
+          "0.796",
+          0.7957633465246953
+        ],
+        "iLISI": [
+          "0.146",
+          0.14645550861248843
+        ],
+        "cLISI": [
+          "0.972",
+          0.9722249434887299
+        ],
+        "PCR": [
+          "1.000",
+          0.9998293545118968
+        ],
+        "Cell_cycle": [
+          "0.283",
+          0.2832868935653279
+        ]
+      },
+      "evaluation_timestamp": 1761652039.552159,
+      "evaluation_datetime": "2025-10-28T19:47:19.552162",
+      "sort_key": [
+        0.6383946356340096
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6383946356340096,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761652039.5617423,
+    "version_notified": "original",
+    "message": "Your research submission 'Combat-PCA-Graph with 150 Components and Gene Filtering' (ID: 1138) has been evaluated.\n\n**Score:** 0.6383946356340096\n**ASW_batch:** 0.781\n**ASW_label:** 0.196\n**ARI:** 0.603\n**NMI:** 0.678\n**Graph_conn:** 0.927\n**kBET:** 0.796\n**iLISI:** 0.146\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.283\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.781  ASW_label: 0.196  ARI: 0.603  NMI: 0.678\n  Graph_conn: 0.927  kBET: 0.796  iLISI: 0.146  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.283\n\nRaw Scores (before normalization):\n  ASW_batch: 0.885542  ASW_label: 0.525046  ARI: 0.603265  NMI: 0.678462\n  Graph_conn: 0.928046  kBET: 0.759196  iLISI: 0.146456  cLISI: 0.991909\n  PCR: 0.999829  Cell_cycle: 0.250503\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/21cc0955-12ed-48d5-b322-eba77e8308b0/result_human.h5ad\n\nRESULT_UUID: 21cc0955-12ed-48d5-b322-eba77e8308b0\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

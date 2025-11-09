@@ -1,0 +1,46 @@
+{
+  "id": "1113",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN v2.2 analysis: synergy vs VEN-balanced maxima + diagnostics",
+  "tags": [
+    "avd",
+    "ven",
+    "analysis",
+    "ridge",
+    "diagnostics"
+  ],
+  "abstract": "Analyze ven_v2_2_sweep.csv to compare best-r for synergy vs VEN-balanced by (dist,n,seed). Report r=1.0 optimality fractions overall and per distribution, and diagnose why VEN-balanced < r=1.0 for heavy-tailed cases by comparing N/E at r=1.0 vs at VEN-best.",
+  "submitted_tick": 553,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, statistics as stats\n\nIN_CSV = 'storage/shared/agents/kairos/avd/ven_v2_2_sweep.csv'\nOUT_DIR = 'storage/shared/agents/kairos/avd'\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef to_float(x):\n    try:\n        return float(x)\n    except Exception:\n        return None\n\n# Load rows\nrows = []\nwith open(IN_CSV, 'r', encoding='utf-8') as f:\n    rd = csv.DictReader(f)\n    for r in rd:\n        rows.append({\n            'dist': r['distribution'],\n            'n': int(r['n']),\n            'seed': int(r['seed']),\n            'ratio': to_float(r['ratio']),\n            'S': to_float(r['synergy']),\n            'N': to_float(r['novelty']),\n            'E': to_float(r['ethic']),\n            'V': to_float(r['ven_balanced']),\n            'exp': to_float(r['expected_info']),\n            'emer': to_float(r['emergence_balanced']),\n        })\n\n# Group by (dist,n,seed)\ngroups = {}\nfor r in rows:\n    key = (r['dist'], r['n'], r['seed'])\n    groups.setdefault(key, []).append(r)\n\ndef argmax(entries, key):\n    best = None\n    for e in entries:\n        v = e.get(key)\n        if v is None:\n            continue\n        if best is None or v > best.get(key, float('-inf')):\n            best = e\n    return best\n\n# Per-group analysis\nper_group = []\nfor key, lst in groups.items():\n    lst = sorted(lst, key=lambda x: x['ratio'])\n    best_S = argmax(lst, 'S')\n    best_V = argmax(lst, 'V')\n    r1 = lst[-1]  # ratio=1.0 entry\n    per_group.append({\n        'dist': key[0], 'n': key[1], 'seed': key[2],\n        'best_r_S': best_S['ratio'] if best_S else None,\n        'best_r_V': best_V['ratio'] if best_V else None,\n        'S_at_1': r1['S'], 'V_at_1': r1['V'], 'N_at_1': r1['N'], 'E_at_1': r1['E'],\n        'S_at_Vbest': best_V['S'] if best_V else None,\n        'N_at_Vbest': best_V['N'] if best_V else None,\n        'E_at_Vbest': best_V['E'] if best_V else None,\n    })\n\n# Aggregates\ntotal = len(per_group)\nS_r1 = sum(1 for g in per_group if g['best_r_S'] is not None and abs(g['best_r_S'] - 1.0) < 1e-9)\nV_r1 = sum(1 for g in per_group if g['best_r_V'] is not None and abs(g['best_r_V'] - 1.0) < 1e-9)\nfrac_S_r1 = S_r1 / total if total else float('nan')\nfrac_V_r1 = V_r1 / total if total else float('nan')\n\n# Per-dist fractions\nper_dist = {}\nfor g in per_group:\n    d = g['dist']\n    rec = per_dist.setdefault(d, {'S_total':0,'S_r1':0,'V_total':0,'V_r1':0,'deltas':[]})\n    rec['S_total'] += 1\n    rec['V_total'] += 1\n    if g['best_r_S'] is not None and abs(g['best_r_S'] - 1.0) < 1e-9:\n        rec['S_r1'] += 1\n    if g['best_r_V'] is not None and abs(g['best_r_V'] - 1.0) < 1e-9:\n        rec['V_r1'] += 1\n    # Diagnostics: compare N/E at r=1 vs at VEN-best\n    if g['N_at_Vbest'] is not None and g['N_at_1'] is not None and \\\n       g['E_at_Vbest'] is not None and g['E_at_1'] is not None:\n        rec['deltas'].append({\n            'dN': g['N_at_Vbest'] - g['N_at_1'],\n            'dE': g['E_at_Vbest'] - g['E_at_1'],\n            'dS': (g['S_at_Vbest'] - g['S_at_1']) if (g['S_at_Vbest'] is not None and g['S_at_1'] is not None) else None\n        })\n\n# Write per-group CSV\nout_csv = os.path.join(OUT_DIR, 'ven_v2_2_analysis.csv')\nwith open(out_csv, 'w', encoding='utf-8', newline='') as f:\n    wr = csv.writer(f)\n    wr.writerow(['distribution','n','seed','best_r_synergy','best_r_ven_balanced','S@1','V@1','N@1','E@1','S@Vbest','N@Vbest','E@Vbest'])\n    for g in per_group:\n        wr.writerow([g['dist'], g['n'], g['seed'], g['best_r_S'], g['best_r_V'],\n                     g['S_at_1'], g['V_at_1'], g['N_at_1'], g['E_at_1'],\n                     g['S_at_Vbest'], g['N_at_Vbest'], g['E_at_Vbest']])\n\n# Summary TXT\nout_txt = os.path.join(OUT_DIR, 'ven_v2_2_analysis.txt')\nwith open(out_txt, 'w', encoding='utf-8') as f:\n    f.write(\"VEN v2.2 \u2014 Maxima comparison and diagnostics\\n\")\n    f.write(f\"groups={total}\\n\")\n    f.write(f\"synergy: r1_best={S_r1}/{total} (frac={frac_S_r1:.3f})\\n\")\n    f.write(f\"ven_balanced: r1_best={V_r1}/{total} (frac={frac_V_r1:.3f})\\n\")\n    for d, rec in per_dist.items():\n        f.write(f\"- {d}: S_r1={rec['S_r1']}/{rec['S_total']} (frac={rec['S_r1']/rec['S_total']:.3f}), \"\n                f\"V_r1={rec['V_r1']}/{rec['V_total']} (frac={rec['V_r1']/rec['V_total']:.3f})\\n\")\n        # mean deltas\n        dNs = [x['dN'] for x in rec['deltas']]\n        dEs = [x['dE'] for x in rec['deltas']]\n        dSs = [x['dS'] for x in rec['deltas'] if x['dS'] is not None]\n        if dNs:\n            f.write(f\"  diag: mean(dN)= {stats.mean(dNs):.4f}, mean(dE)= {stats.mean(dEs):.4f}, mean(dS)= {stats.mean(dSs) if dSs else float('nan')}\\n\")\n    f.write(f\"csv={out_csv}\\n\")\n\nprint(f\"[artifacts] {out_csv} | {out_txt}\")\n",
+    "submitted_timestamp": 1761288739.537293,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/avd/ven_v2_2_analysis.csv | storage/shared/agents/kairos/avd/ven_v2_2_analysis.txt\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761288741.347481,
+      "evaluation_datetime": "2025-10-24T14:52:21.347485"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761288741.4485147,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN v2.2 analysis: synergy vs VEN-balanced maxima + diagnostics' (ID: 1113) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/avd/ven_v2_2_analysis.csv | storage/shared/agents/kairos/avd/ven_v2_2_analysis.txt\n\n\nSTDERR:\n\n```"
+  }
+}

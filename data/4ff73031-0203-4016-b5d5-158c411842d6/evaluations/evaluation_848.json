@@ -1,0 +1,47 @@
+{
+  "id": "848",
+  "author": "Krono IV",
+  "research_task_id": "1",
+  "title": "Mechanistic Probe: Initial Feature Variance in Normalization Synergy (v3 - Bugfix)",
+  "tags": [
+    "probe",
+    "test-only",
+    "normalization",
+    "variance",
+    "initialization",
+    "bugfix"
+  ],
+  "abstract": "This is a resubmission of the failed probe (ID 843). The previous attempt failed due to a simple `NameError` because `jit` was not imported. This version corrects the import statement. The probe analyzes the initial feature variance of four architectural configurations (no LN, internal LN, external LN, and both) to understand the mechanism behind their synergistic performance.",
+  "submitted_tick": 487,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom jax import jit # CRITICAL FIX: Added this import\nfrom typing import Tuple, Optional, Dict\n\n# --- SELF-CONTAINED SUBMISSION ---\n\n# ===== Cells =====\nclass ConvLSTMCellLN(nn.Module):\n    features: int; kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size, padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i,f,g,o = jnp.split(gates, 4, axis=-1); i=nn.sigmoid(i);f=nn.sigmoid(f);o=nn.sigmoid(o);g=jnp.tanh(g)\n        c = f*c+i*g; h = o*jnp.tanh(c); return (h,c),h\n\nclass ConvLSTMCellNoLN(nn.Module):\n    features: int; kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size, padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        i,f,g,o = jnp.split(gates, 4, axis=-1); i=nn.sigmoid(i);f=nn.sigmoid(f);o=nn.sigmoid(o);g=jnp.tanh(g)\n        c = f*c+i*g; h = o*jnp.tanh(c); return (h,c),h\n\n# ===== Bottleneck Block =====\nclass BottleneckBlock(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features//4, (1,1))(x); y=nn.relu(y)\n        y = nn.Conv(self.features//4, (3,3), padding='SAME')(y); y=nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y); return nn.relu(x+y)\n\n# ===== Probe Network =====\nclass KronoNetV4_Probe(nn.Module):\n    cnn_features_1: int; cnn_features_2: int; conv_lstm_features: int; dilation_rate: int\n    num_heads: int=2; steps: int=2; use_input_ln: bool=False; use_gate_ln: bool=True\n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: Optional[jnp.ndarray], rnn_state=None) -> Dict[str, jnp.ndarray]:\n        B,H,W,_ = x.shape\n        cnn_out = nn.Conv(self.cnn_features_1,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(x); cnn_out=nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(cnn_out); cnn_out=nn.relu(cnn_out)\n        s1_raw_cnn = BottleneckBlock(self.cnn_features_2)(cnn_out)\n        \n        s2_normed_cnn = s1_raw_cnn\n        if self.use_input_ln:\n            s2_normed_cnn = nn.LayerNorm(name=\"convlstm_input_layernorm\")(s1_raw_cnn)\n        \n        if rnn_state is None: rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n        if done is not None: m=(1.0-done.reshape(B,1,1,1)); rnn_state=jax.tree.map(lambda y:y*m, rnn_state)\n        \n        h, c = rnn_state\n        lstm_cell = ConvLSTMCellLN(self.conv_lstm_features) if self.use_gate_ln else ConvLSTMCellNoLN(self.conv_lstm_features)\n        for _ in range(self.steps): (h,c), h_out = lstm_cell((h,c), s2_normed_cnn)\n        s3_recurrent = h_out\n        \n        return {'s1_raw_cnn':s1_raw_cnn, 's2_normed_cnn':s2_normed_cnn, 's3_recurrent':s3_recurrent}\n\n# ===== Test Function =====\ndef test():\n    key = jax.random.PRNGKey(42)\n    batch_size = 128\n    dummy_obs = jax.random.normal(key, (batch_size, 8, 8, 8))\n    dummy_done = jnp.zeros(batch_size, dtype=bool)\n\n    hparams = {\n        'cnn_features_1': 32, 'cnn_features_2': 64, 'conv_lstm_features': 96,\n        'dilation_rate': 6, 'num_heads': 2, 'steps': 2\n    }\n\n    configs = {\n        \"No LN\":        {'use_input_ln': False, 'use_gate_ln': False},\n        \"Internal LN\":  {'use_input_ln': False, 'use_gate_ln': True},\n        \"External LN\":  {'use_input_ln': True,  'use_gate_ln': False},\n        \"Both LNs\":     {'use_input_ln': True,  'use_gate_ln': True},\n    }\n    \n    print(\"--- Initial Feature Variance Probe ---\")\n    results = {}\n    for name, config in configs.items():\n        network = KronoNetV4_Probe(**hparams, **config)\n        key, init_key = jax.random.split(key)\n        params = network.init(init_key, dummy_obs, dummy_done)['params']\n        \n        @jit\n        def run_probe(p, obs, done):\n            return network.apply({'params': p}, obs, done)\n            \n        features = run_probe(params, dummy_obs, dummy_done)\n        \n        variances = {k: jnp.mean(jnp.var(v, axis=0)) for k, v in features.items()}\n        results[name] = variances\n        print(f\"[{name}]\")\n        print(f\"  - s1_raw_cnn:   {variances['s1_raw_cnn']:.6f}\")\n        print(f\"  - s2_normed_cnn:{variances['s2_normed_cnn']:.6f}\")\n        print(f\"  - s3_recurrent: {variances['s3_recurrent']:.6f}\")\n        \n    return \"Probe complete. Results printed to STDOUT.\"\n",
+    "submitted_timestamp": 1758250765.3024588,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Initial Feature Variance Probe ---\n[No LN]\n  - s1_raw_cnn:   0.009364\n  - s2_normed_cnn:0.009364\n  - s3_recurrent: 0.000397\n[Internal LN]\n  - s1_raw_cnn:   0.008224\n  - s2_normed_cnn:0.008224\n  - s3_recurrent: 0.021438\n[External LN]\n  - s1_raw_cnn:   0.010545\n  - s2_normed_cnn:0.602617\n  - s3_recurrent: 0.017574\n[Both LNs]\n  - s1_raw_cnn:   0.010224\n  - s2_normed_cnn:0.551356\n  - s3_recurrent: 0.034749\nTest completed. Result: Probe complete. Results printed to STDOUT.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758250775.4934275,
+      "evaluation_datetime": "2025-09-19T10:59:35.493432"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758250775.5209715,
+    "version_notified": "original",
+    "message": "Your research submission 'Mechanistic Probe: Initial Feature Variance in Normalization Synergy (v3 - Bugfix)' (ID: 848) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Initial Feature Variance Probe ---\n[No LN]\n  - s1_raw_cnn:   0.009364\n  - s2_normed_cnn:0.009364\n  - s3_recurrent: 0.000397\n[Internal LN]\n  - s1_raw_cnn:   0.008224\n  - s2_normed_cnn:0.008224\n  - s3_recurrent: 0.021438\n[External LN]\n  - s1_raw_cnn:   0.010545\n  - s2_normed_cnn:0.602617\n  - s3_recurrent: 0.017574\n[Both LNs]\n  - s1_raw_cnn:   0.010224\n  - s2_normed_cnn:0.551356\n  - s3_recurrent: 0.034749\nTest completed. Result: Probe complete. Results printed to STDOUT.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

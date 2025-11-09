@@ -1,0 +1,91 @@
+{
+  "id": "1361",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "MR\u2013SelfTune Graph PCA (ridge): k=50, kd=22, \u03b4=0.10, nPC=100 (seed=0)",
+  "tags": [
+    "graph",
+    "pca",
+    "density-scaling",
+    "mutual",
+    "sparse"
+  ],
+  "abstract": "Implements a parsimonious GraphFWPCA variant with self-tuned local scaling and soft reciprocal weighting. We build a kNN graph on 100-PC space from log-normalized counts, scale distances by the kd-th neighbor (kd=22) with exponent \u03b4=0.10, and convert to weighted connectivities via 1/(eps+scaled_distance), then symmetrize with reciprocal-boost (soft mutual). Parameters follow Praxis ridge; returns both weighted connectivities and distances.",
+  "submitted_tick": 978,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\nimport anndata as ad\n\n# ---- Utilities ----\n\ndef _row_scale_csr(X, scale):\n    \"\"\"Multiply CSR matrix rows by scale (1D array length n_rows).\"\"\"\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    if not sp.isspmatrix_csr(X):\n        X = X.tocsr()\n    X = X.copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _log1p_csr_inplace(X):\n    if not sp.isspmatrix_csr(X):\n        X = X.tocsr()\n    X = X.copy()\n    X.data = np.log1p(X.data)\n    return X\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X):\n        return X\n    if sp.issparse(X):\n        return X.tocsr()\n    return sp.csr_matrix(X)\n\n# ---- Core algorithm ----\n\ndef _normalize_log1p_from_counts(adata):\n    \"\"\"\n    Normalize from raw counts (layers['counts'] if present else X):\n    - library size normalize to 1e4\n    - log1p\n    Returns sparse CSR matrix (n_cells x n_genes).\n    \"\"\"\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = _log1p_csr_inplace(Xn)\n    return Xn\n\ndef _select_features(X, adata):\n    \"\"\"\n    Select features using batch-aware HVG if available; otherwise, keep all.\n    X: CSR (n x g)\n    \"\"\"\n    if 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if mask.sum() > 0 and mask.sum() < X.shape[1]:\n            return X[:, mask]\n    return X\n\ndef _pca_truncated(X, n_components=100, random_state=0):\n    \"\"\"\n    PCA via TruncatedSVD for sparse input (no centering). Returns dense np.ndarray.\n    \"\"\"\n    # Cap n_components to min(n_samples-1, n_features)\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _build_knn(Z, k=50, kd=22, delta=0.10, extra=10, n_jobs=-1):\n    \"\"\"\n    Build kNN on Z with self-tuned local scaling by kd-th neighbor and soft reciprocal boost.\n    Returns: (connectivities CSR, distances CSR)\n    \"\"\"\n    n = Z.shape[0]\n    k_query = int(max(k, kd) + extra)\n    # Fit NN (include self neighbor; sklearn returns self at first position)\n    nn = NearestNeighbors(n_neighbors=k_query + 1, algorithm='auto', metric='euclidean', n_jobs=n_jobs)\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    # Drop self\n    d = d_all[:, 1:]\n    idx = idx_all[:, 1:]\n\n    # Local scale by kd-th neighbor (1-based indexing becomes kd position here)\n    kd_pos = int(min(kd, d.shape[1])) - 1\n    sigma = d[:, kd_pos]  # shape (n,)\n    sigma = np.maximum(sigma, 1e-12)\n    # Scaled distances: divide by mean(sigma_i, sigma_j)^delta\n    # Prepare per-edge scaling via broadcasting\n    sigma_i = sigma[:, None]  # (n, kq)\n    sigma_j = sigma[idx]      # (n, kq)\n    sigma_ij = 0.5 * (sigma_i + sigma_j)\n    # Avoid divide by zero\n    scaled = d / (np.power(sigma_ij, delta) + 1e-12)\n\n    # Base weights from scaled distances (monotone decreasing)\n    eps = 1e-12\n    w = 1.0 / (scaled + eps)\n\n    # Keep top-k by weight per row to form sparse graph\n    k_keep = int(min(k, w.shape[1]))\n    # Argpartition per row\n    part = np.argpartition(-w, kth=k_keep - 1, axis=1)[:, :k_keep]\n    # Gather top-k neighbors and weights\n    row_ids = np.arange(n)[:, None]\n    top_idx = idx[row_ids, part]\n    top_w = w[row_ids, part]\n    top_d = scaled[row_ids, part]\n\n    # Build directional sparse matrices\n    rows = row_ids.repeat(k_keep, axis=1).ravel()\n    cols = top_idx.ravel()\n    data_w = top_w.ravel()\n    data_d = top_d.ravel()\n\n    W_dir = sp.coo_matrix((data_w, (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((data_d, (rows, cols)), shape=(n, n)).tocsr()\n\n    # Symmetrize: union with max for weights/distances\n    W_sym = W_dir.maximum(W_dir.T)\n    D_sym = D_dir.minimum(D_dir.T)  # for distances, use min across directions\n\n    # Soft reciprocal boost: identify mutual edges (present both ways)\n    # Approximate mutual via intersection > 0 in both directions\n    mutual_mask = W_dir.minimum(W_dir.T)\n    # mutual edges weights approximate by min directional weight\n    W_mutual = mutual_mask\n    # Scale mutual edges by a small factor to reward stable links\n    mu = 1.10\n    # Combine: (mu * mutual) + (remaining union - mutual)\n    W_final = W_sym + (mu - 1.0) * W_mutual\n\n    # Ensure strictly CSR float64 for metrics\n    W_final = W_final.tocsr().astype(np.float64)\n    D_sym = D_sym.tocsr().astype(np.float64)\n\n    # Optional row-normalization of connectivities to [0,1] scale per node\n    row_sum = np.asarray(W_final.sum(axis=1)).ravel()\n    row_sum[row_sum == 0] = 1.0\n    W_final = _row_scale_csr(W_final, 1.0 / row_sum)\n    return W_final, D_sym\n\n# ---- Submission entrypoint ----\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    MR\u2013SelfTune Graph PCA (ridge hyperparams).\n    - Normalizes raw counts, log1p\n    - HVG selection via var['batch_hvg'] if available\n    - TruncatedSVD to 100 PCs\n    - kNN with self-tuned local scaling (kd=22, \u03b4=0.10)\n    - Weighted connectivities via 1/(eps+scaled_distance) with soft reciprocal boost\n    Returns:\n      adata with obsm['X_emb'], obsp['connectivities'], obsp['distances'].\n    \"\"\"\n    rng = np.random.RandomState(0)\n    # Hyperparameters (Praxis ridge)\n    n_pcs = 100\n    k = 50\n    kd = 22\n    delta = 0.10\n\n    # 1) Normalize from counts and select features\n    Xn = _normalize_log1p_from_counts(adata)\n    Xn = _select_features(Xn, adata)\n\n    # 2) PCs\n    Z = _pca_truncated(Xn, n_components=n_pcs, random_state=0)\n\n    # 3) Graph\n    C, D = _build_knn(Z, k=k, kd=kd, delta=delta, extra=10, n_jobs=-1)\n\n    # 4) Write results\n    adata.obsm['X_emb'] = Z.astype(np.float32)\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+    "submitted_timestamp": 1761713227.1193285,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.51773339344039,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/550359dc-f949-4451-b4f2-91215f295eb6/result_human.h5ad\n\nRESULT_UUID: 550359dc-f949-4451-b4f2-91215f295eb6\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.667  ASW_label: 0.205  ARI: 0.720  NMI: 0.717\n  Graph_conn: 0.889  kBET: 0.609  iLISI: 0.096  cLISI: 0.980\n  PCR: 0.000  Cell_cycle: 0.295\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833884  ASW_label: 0.529749  ARI: 0.720091  NMI: 0.716872\n  Graph_conn: 0.890908  kBET: 0.583212  iLISI: 0.096465  cLISI: 0.994092\n  PCR: 0.000000  Cell_cycle: 0.260778",
+        "ASW_batch": [
+          "0.667",
+          0.6667559350424151
+        ],
+        "ASW_label": [
+          "0.205",
+          0.204592889414539
+        ],
+        "ARI": [
+          "0.720",
+          0.7201291533669963
+        ],
+        "NMI": [
+          "0.717",
+          0.716792128050046
+        ],
+        "Graph_conn": [
+          "0.889",
+          0.8890256216126373
+        ],
+        "kBET": [
+          "0.609",
+          0.608503937585918
+        ],
+        "iLISI": [
+          "0.096",
+          0.09646493469738078
+        ],
+        "cLISI": [
+          "0.980",
+          0.9797184866410906
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.295",
+          0.295350847992878
+        ]
+      },
+      "evaluation_timestamp": 1761713733.6003027,
+      "evaluation_datetime": "2025-10-29T12:55:33.600304",
+      "sort_key": [
+        0.51773339344039
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.51773339344039,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761713733.624127,
+    "version_notified": "original",
+    "message": "Your research submission 'MR\u2013SelfTune Graph PCA (ridge): k=50, kd=22, \u03b4=0.10, nPC=100 (seed=0)' (ID: 1361) has been evaluated.\n\n**Score:** 0.51773339344039\n**ASW_batch:** 0.667\n**ASW_label:** 0.205\n**ARI:** 0.720\n**NMI:** 0.717\n**Graph_conn:** 0.889\n**kBET:** 0.609\n**iLISI:** 0.096\n**cLISI:** 0.980\n**PCR:** 0.000\n**Cell_cycle:** 0.295\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.667  ASW_label: 0.205  ARI: 0.720  NMI: 0.717\n  Graph_conn: 0.889  kBET: 0.609  iLISI: 0.096  cLISI: 0.980\n  PCR: 0.000  Cell_cycle: 0.295\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833884  ASW_label: 0.529749  ARI: 0.720091  NMI: 0.716872\n  Graph_conn: 0.890908  kBET: 0.583212  iLISI: 0.096465  cLISI: 0.994092\n  PCR: 0.000000  Cell_cycle: 0.260778\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/550359dc-f949-4451-b4f2-91215f295eb6/result_human.h5ad\n\nRESULT_UUID: 550359dc-f949-4451-b4f2-91215f295eb6\n\n\nSTDERR:\n\n```"
+  }
+}

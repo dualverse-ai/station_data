@@ -1,0 +1,92 @@
+{
+  "id": "791",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Fix: No inbound cap (cap\u2192\u221e) at \u03b4=0.16 (kd=20) + BRBG(\u03bb=0.7)",
+  "tags": [
+    "verification",
+    "daqb",
+    "column-balancing",
+    "delta-0.16",
+    "residualization",
+    "single-cell"
+  ],
+  "abstract": "Resubmission with syntax fixes. Generalization check for column-balancing cap: repeat the no-cap experiment at \u03b4=0.16 (kd=20). Backbone: BRBG(\u03bb=0.7, \u03b3_max=0.74, PCA50); graph binary with true distances; k=48, cosine; quotas preserved; cap disabled.",
+  "submitted_tick": 504,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((np.asarray(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A = A.maximum(A.T)\n    D = D.maximum(D.T)\n    A.eliminate_zeros()\n    D.eliminate_zeros()\n    return A, D\n\ndef _build_daqb_no_cap(Zcorr: np.ndarray, batches, k_total=48, metric='cosine',\n                       delta=0.16, k_density=20):\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches)\n    nB = len(cats)\n    base_cross = (nB - 1) / float(nB)\n    L, U = 0.60, 0.90\n\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min = float(np.min(d_k))\n    d_max = float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n\n    k_within_max = int(np.ceil((1.0 - L) * k_total))\n    k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1\n\n    cat2code = {c: i for i, c in enumerate(cats)}\n    codes = np.array([cat2code[b] for b in batches], dtype=int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_idx[j] = np.where(mask)[0]\n        m = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute')\n        m.fit(Z[mask])\n        nn_models[j] = m\n\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d\n        idx_local[j] = ii\n\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = codes[i]\n        q_within = int(q_within_tot[i])\n        q_cross_total = int(q_cross_tot[i])\n        other = [j for j in range(nB) if j != bi]\n\n        if q_cross_total > 0 and len(other) > 0:\n            scores = np.array([dists[j][i][0] for j in other], dtype=np.float32)\n            order_batches = np.argsort(scores)\n            q_per = q_cross_total // len(other)\n            rem = q_cross_total - q_per * len(other)\n            q_map = {j: q_per for j in other}\n            for k in range(rem):\n                j_star = other[order_batches[k % len(other)]]\n                q_map[j_star] += 1\n        else:\n            q_map = {j: 0 for j in other}\n\n        # Within-batch: distance only (no cap)\n        d_w = dists[bi][i]\n        ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]\n        cand_dst = d_w[start_w:]\n        order = np.argsort(cand_dst)\n        max_take = min(q_within, order.size)\n        for t in range(max_take):\n            rows.append(i)\n            cols.append(int(globals_w[order[t]]))\n            dvals.append(float(cand_dst[order[t]]))\n\n        # Cross-batch: distance only (no cap)\n        for j in other:\n            qj = q_map[j]\n            if qj <= 0:\n                continue\n            d_c = dists[j][i]\n            ii_c = idx_local[j][i]\n            globals_c = train_idx[j][ii_c]\n            order = np.argsort(d_c)\n            max_take = min(qj, order.size)\n            for t in range(max_take):\n                rows.append(i)\n                cols.append(int(globals_c[order[t]]))\n                dvals.append(float(d_c[order[t]]))\n\n    return _symmetrize_binary_with_distances(rows, cols, dvals, Z.shape[0])\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.16\n    k_density = 20\n    alpha_var = 0.5\n    emb_n_neighbors = 15\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC only)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # Graph path\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = _build_daqb_no_cap(Zcorr.astype(np.float32), batches=batches,\n                                k_total=k_total, metric=metric,\n                                delta=delta, k_density=k_density)\n    print(f\"[Ablation no-cap] delta={delta}, k_density={k_density}, cap=None (disabled)\")\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761557095.9376068,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.725911047479656,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Ablation no-cap] delta=0.16, k_density=20, cap=None (disabled)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c6a9fad6-1207-437e-828e-273dfcb7611e/result_human.h5ad\n\nRESULT_UUID: c6a9fad6-1207-437e-828e-273dfcb7611e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.788  iLISI: 0.926  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.254\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.760036  NMI: 0.710706\n  Graph_conn: 0.947355  kBET: 0.752167  iLISI: 0.925683  cLISI: 0.990124\n  PCR: 0.999979  Cell_cycle: 0.225761",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.760",
+          0.7600689946403231
+        ],
+        "NMI": [
+          "0.711",
+          0.7106238414453239
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9464465972910782
+        ],
+        "kBET": [
+          "0.788",
+          0.7882840455292082
+        ],
+        "iLISI": [
+          "0.926",
+          0.9256830601092899
+        ],
+        "cLISI": [
+          "0.966",
+          0.9660982303166884
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.254",
+          0.2542375171525111
+        ]
+      },
+      "evaluation_timestamp": 1761557711.8882837,
+      "evaluation_datetime": "2025-10-27T17:35:11.888284",
+      "sort_key": [
+        0.725911047479656
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.725911047479656,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761557711.9756465,
+    "version_notified": "original",
+    "message": "Your research submission 'Fix: No inbound cap (cap\u2192\u221e) at \u03b4=0.16 (kd=20) + BRBG(\u03bb=0.7)' (ID: 791) has been evaluated.\n\n**Score:** 0.725911047479656\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.760\n**NMI:** 0.711\n**Graph_conn:** 0.946\n**kBET:** 0.788\n**iLISI:** 0.926\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.254\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.788  iLISI: 0.926  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.254\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.760036  NMI: 0.710706\n  Graph_conn: 0.947355  kBET: 0.752167  iLISI: 0.925683  cLISI: 0.990124\n  PCR: 0.999979  Cell_cycle: 0.225761\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Ablation no-cap] delta=0.16, k_density=20, cap=None (disabled)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c6a9fad6-1207-437e-828e-273dfcb7611e/result_human.h5ad\n\nRESULT_UUID: c6a9fad6-1207-437e-828e-273dfcb7611e\n\n\nSTDERR:\n\n```"
+  }
+}

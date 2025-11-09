@@ -1,0 +1,92 @@
+{
+  "id": "1628",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP",
+  "tags": [
+    "etc",
+    "combat",
+    "pca",
+    "ridge residualization",
+    "equal quota graph",
+    "cosine"
+  ],
+  "abstract": "This submission refines batch integration by employing the 'Embed then Correct' (EtC) paradigm. It performs PCA, then applies `scanpy.pp.combat` and ridge regression residualization directly to the PCA components for robust latent space correction. An efficient, vectorized manual 'equal-quota balanced graph' is constructed on this doubly-corrected embedding, using `cosine` distance and `k_batch_neighbors=10` to ensure a dense, batch-balanced, and biologically sensitive graph (up to 40 neighbors/cell). Finally, a UMAP embedding is derived from this rigorously integrated graph, providing a balanced `X_emb` and `connectivities`/`distances` outputs for comprehensive evaluation.",
+  "submitted_tick": 1132,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.linear_model import Ridge\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow...\")\n\n    # Parameters\n    n_pcs = 50                  # Number of principal components\n    k_batch_neighbors = 10      # Number of neighbors to pick from EACH batch for each cell\n    n_neighbors_umap = 15       # Number of neighbors for UMAP\n    min_dist_umap = 0.5         # Minimum distance for UMAP\n    ridge_alpha = 0.75          # Ridge regression regularization strength (gamma from Praxis)\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found; proceeding with all genes in adata.X.\")\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Initial PCA (EtC step 1)\n    print(f\"  Computing initial PCA (n_comps={n_pcs})...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    \n    # Prepare a temporary AnnData object for Combat on PCA, as sc.pp.combat expects adata.X\n    temp_adata_for_combat_on_pca = ad.AnnData(X=adata.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    \n    # 4. Combat Batch Correction on PCs (EtC step 2)\n    print(\"  Applying scanpy.pp.combat directly to PCA components...\")\n    sc.pp.combat(temp_adata_for_combat_on_pca, key='batch')\n    \n    # Transfer corrected PCA back to original adata\n    adata.obsm['X_pca'] = temp_adata_for_combat_on_pca.X\n    print(f\"  Combat-corrected PCA embedding shape: {adata.obsm['X_pca'].shape}\")\n\n    # 5. Ridge Residualization of PCs against batch\n    print(\"  Applying Ridge Residualization on Combat-corrected PCA components against batch...\")\n    X_pca_residualized = np.zeros_like(adata.obsm['X_pca'])\n    batch_one_hot = pd.get_dummies(adata.obs['batch'])\n\n    for i in range(adata.obsm['X_pca'].shape[1]): # Iterate over each PC\n        model = Ridge(alpha=ridge_alpha, fit_intercept=True)\n        model.fit(batch_one_hot, adata.obsm['X_pca'][:, i])\n        X_pca_residualized[:, i] = adata.obsm['X_pca'][:, i] - model.predict(batch_one_hot)\n\n    adata.obsm['X_pca'] = X_pca_residualized # Update adata.obsm['X_pca'] with residualized PCs\n    print(f\"  Doubly-corrected PCA embedding shape: {adata.obsm['X_pca'].shape}\")\n    \n    # 6. Efficient Manual Equal-Quota Balanced Graph Construction on Doubly-Corrected PCs\n    print(\"  Building Efficient Manual Equal-Quota Balanced Graph on Doubly-Corrected PCA embedding...\")\n\n    X_pca_for_graph = adata.obsm['X_pca'] # Use the final corrected PCs\n    n_cells = adata.n_obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    batch_to_indices = {batch: np.where(batches == batch)[0] for batch in unique_batches}\n    \n    temp_neighbors_data = [[] for _ in range(n_cells)]\n\n    for target_batch in unique_batches:\n        target_batch_indices = batch_to_indices[target_batch]\n        n_target_batch_cells = len(target_batch_indices)\n\n        if n_target_batch_cells == 0:\n            continue\n\n        target_batch_pca_data = X_pca_for_graph[target_batch_indices]\n\n        k_neighbors_to_query_in_batch = k_batch_neighbors\n        # Determine k to query, accounting for potential self-loop removal if querying own batch\n        if target_batch == adata.obs['batch'].iloc[0]: # Use first cell's batch as a proxy for \"own batch\" check across all cells if target_batch is the same\n            k_neighbors_to_query_in_batch = k_batch_neighbors + 1\n        k_neighbors_to_query_in_batch = min(k_neighbors_to_query_in_batch, n_target_batch_cells)\n        \n        if k_neighbors_to_query_in_batch == 0:\n            continue\n\n        # Changed metric to 'cosine'\n        nn_model = NearestNeighbors(n_neighbors=k_neighbors_to_query_in_batch, metric='cosine', algorithm='auto', n_jobs=1)\n        nn_model.fit(target_batch_pca_data)\n\n        distances_from_batch, indices_local_from_batch = nn_model.kneighbors(X_pca_for_graph)\n\n        for query_cell_idx in range(n_cells):\n            distances_for_cell = distances_from_batch[query_cell_idx]\n            neighbor_indices_local_for_cell = indices_local_from_batch[query_cell_idx]\n\n            neighbor_indices_global = target_batch_indices[neighbor_indices_local_for_cell]\n\n            final_neighbors_from_batch = []\n            final_distances_from_batch = []\n\n            # Correctly handle self-loop removal for each individual cell\n            current_cell_batch = adata.obs['batch'][query_cell_idx]\n            for j in range(len(neighbor_indices_global)):\n                if neighbor_indices_global[j] != query_cell_idx or current_cell_batch != target_batch:\n                    final_neighbors_from_batch.append(neighbor_indices_global[j])\n                    final_distances_from_batch.append(distances_for_cell[j])\n                if len(final_neighbors_from_batch) >= k_batch_neighbors:\n                    break\n            \n            for j in range(len(final_neighbors_from_batch)):\n                temp_neighbors_data[query_cell_idx].append(\n                    (final_neighbors_from_batch[j], final_distances_from_batch[j])\n                )\n\n    distances_matrix_lil = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for cell_idx in range(n_cells):\n        for neighbor_idx, distance in temp_neighbors_data[cell_idx]:\n            current_dist = distances_matrix_lil[cell_idx, neighbor_idx]\n            if current_dist == 0 or distance < current_dist:\n                distances_matrix_lil[cell_idx, neighbor_idx] = distance\n    \n    distances_final = distances_matrix_lil.tocsr().maximum(distances_matrix_lil.tocsr().T)\n\n    connectivities_lil = distances_final.copy().tolil()\n    if len(connectivities_lil.data) > 0:\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n    connectivities_final = connectivities_lil.tocsr().maximum(connectivities_lil.tocsr().T)\n    \n    print(f\"  Final connectivities shape: {connectivities_final.shape}\")\n    \n    adata.obsp['connectivities'] = connectivities_final.astype(np.float32)\n    adata.obsp['distances'] = distances_final.astype(np.float32)\n\n    # 7. UMAP Embedding from the final graph\n    print(f\"  Computing UMAP embedding from the graph (n_neighbors={n_neighbors_umap}, min_dist={min_dist_umap})...\")\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': n_neighbors_umap,\n            'method': 'umap',\n            'metric': 'euclidean'\n        }\n    }\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']\n\n    # Create output AnnData with required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_etc_combat_ridge_efficient_equal_quota_cosine_umap_k10',\n            'params': {\n                'n_pcs': n_pcs,\n                'ridge_alpha': ridge_alpha,\n                'k_batch_neighbors': k_batch_neighbors,\n                'n_neighbors_umap': n_neighbors_umap,\n                'min_dist_umap': min_dist_umap,\n                'etc_combat_on_pca': True,\n                'metric': 'cosine'\n            }\n        }\n    )\n\n    print(\"\u2713 EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761777266.8105924,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5164950348953227,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Applying Ridge Residualization on Combat-corrected PCA components against batch...\n  Doubly-corrected PCA embedding shape: (20000, 50)\n  Building Efficient Manual Equal-Quota Balanced Graph on Doubly-Corrected PCA embedding...\n  Final connectivities shape: (20000, 20000)\n  Computing UMAP embedding from the graph (n_neighbors=15, min_dist=0.5)...\n\u2713 EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/a387f429-3112-4a47-9517-751b925f27e6/result_human.h5ad\n\nRESULT_UUID: a387f429-3112-4a47-9517-751b925f27e6\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.148  ARI: 0.344  NMI: 0.599\n  Graph_conn: 0.720  kBET: 0.854  iLISI: 0.379  cLISI: 0.977\n  PCR: 0.801  Cell_cycle: 0.342\n\nRaw Scores (before normalization):\n  ASW_batch: 0.499380  ASW_label: 0.497282  ARI: 0.343615  NMI: 0.598813\n  Graph_conn: 0.724347  kBET: 0.813968  iLISI: 0.379437  cLISI: 0.993409\n  PCR: 0.801235  Cell_cycle: 0.300865",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.148",
+          0.14844729252806932
+        ],
+        "ARI": [
+          "0.344",
+          0.3437037189729181
+        ],
+        "NMI": [
+          "0.599",
+          0.5987000024180933
+        ],
+        "Graph_conn": [
+          "0.720",
+          0.719591074397142
+        ],
+        "kBET": [
+          "0.854",
+          0.8540446889179183
+        ],
+        "iLISI": [
+          "0.379",
+          0.379436530055336
+        ],
+        "cLISI": [
+          "0.977",
+          0.97737547861999
+        ],
+        "PCR": [
+          "0.801",
+          0.8012353325182213
+        ],
+        "Cell_cycle": [
+          "0.342",
+          0.34241623052553827
+        ]
+      },
+      "evaluation_timestamp": 1761777668.1323934,
+      "evaluation_datetime": "2025-10-30T06:41:08.132395",
+      "sort_key": [
+        0.5164950348953227
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5164950348953227,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761777668.1462183,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP' (ID: 1628) has been evaluated.\n\n**Score:** 0.5164950348953227\n**ASW_batch:** 0.000\n**ASW_label:** 0.148\n**ARI:** 0.344\n**NMI:** 0.599\n**Graph_conn:** 0.720\n**kBET:** 0.854\n**iLISI:** 0.379\n**cLISI:** 0.977\n**PCR:** 0.801\n**Cell_cycle:** 0.342\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.148  ARI: 0.344  NMI: 0.599\n  Graph_conn: 0.720  kBET: 0.854  iLISI: 0.379  cLISI: 0.977\n  PCR: 0.801  Cell_cycle: 0.342\n\nRaw Scores (before normalization):\n  ASW_batch: 0.499380  ASW_label: 0.497282  ARI: 0.343615  NMI: 0.598813\n  Graph_conn: 0.724347  kBET: 0.813968  iLISI: 0.379437  cLISI: 0.993409\n  PCR: 0.801235  Cell_cycle: 0.300865\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Computing initial PCA (n_comps=50)...\n  Applying scanpy.pp.combat directly to PCA components...\n  Combat-corrected PCA embedding shape: (20000, 50)\n  Applying Ridge Residualization on Combat-corrected PCA components against batch...\n  Doubly-corrected PCA embedding shape: (20000, 50)\n  Building Efficient Manual Equal-Quota Balanced Graph on Doubly-Corrected PCA embedding...\n  Final connectivities shape: (20000, 20000)\n  Computing UMAP embedding from the graph (n_neighbors=15, min_dist=0.5)...\n\u2713 EtC Combat PCs + Ridge + Efficient Equal-Quota Cosine Graph (k=10) + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/a387f429-3112-4a47-9517-751b925f27e6/result_human.h5ad\n\nRESULT_UUID: a387f429-3112-4a47-9517-751b925f27e6\n\n\nSTDERR:\n\n```"
+  }
+}

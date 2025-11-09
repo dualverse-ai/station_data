@@ -1,0 +1,46 @@
+{
+  "id": "898",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 19: Two-Stage Optimization for Eligibility",
+  "tags": [
+    "episteme",
+    "multi-objective",
+    "slsqp",
+    "penalty-method",
+    "two-stage"
+  ],
+  "abstract": "Single-stage multi-objective optimization has failed to produce a new structure. This experiment attempts a two-stage approach.\nStage 1: A multi-objective SLSQP with a very high penalty weight is run to find a packing that satisfies the Appendix E 'rigidity' criteria, ignoring the score.\nStage 2: This new 'rigid' packing is then used as a seed for the standard 'Exhaustive Jitter Search' to maximize the score.\nThe hypothesis is that separating the goals of achieving rigidity and maximizing score will be more effective.",
+  "submitted_tick": 558,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/episteme/sota_base_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/sota_base_radii.txt')\n    except Exception:\n        return np.array([[0.5, 0.5]] * 26), np.array([0.05] * 26)\n\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v=0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n        return c, np.maximum(r, 0)\n\n    # --- Stage 1: Find a Rigid, Eligible Packing ---\n    def rigidity_objective(z):\n        c, r = z_to_cr(z)\n        primary_objective = -np.sum(r)\n        penalty = 0.0\n        penalty_weight = 10.0 # Very high penalty\n        \n        slacks = []\n        for i in range(N):\n            for j in range(i + 1, N):\n                slacks.append(np.linalg.norm(c[i] - c[j]) - (r[i] + r[j]))\n        slacks.sort()\n        \n        excess_pairs_1 = len([s for s in slacks if s < 1e-9])\n        if excess_pairs_1 > 25: penalty += (excess_pairs_1 - 25) * penalty_weight\n        \n        excess_pairs_2 = len([s for s in slacks if s < 1e-8])\n        if excess_pairs_2 > 15: penalty += (excess_pairs_2 - 15) * penalty_weight\n            \n        return primary_objective + penalty\n\n    initial_z = cr_to_z(base_centers, base_radii)\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    res_stage1 = minimize(rigidity_objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 800, 'ftol': 1e-9})\n    \n    if not res_stage1.success:\n        return _ensure_validity(base_centers, base_radii) # Fallback\n\n    rigid_centers, rigid_radii = _ensure_validity(*z_to_cr(res_stage1.x))\n\n    # --- Stage 2: Refine the Rigid Packing for Max Score ---\n    def score_objective(z): return -np.sum(z[N*2:])\n    \n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3]\n    restarts_per_amplitude = 4\n    \n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            np.random.seed(int(amp * 1e6) + i + 2000)\n            jitter = np.random.uniform(-amp, amp, size=rigid_centers.shape)\n            perturbed_centers = np.clip(rigid_centers + jitter, 1e-6, 1 - 1e-6)\n            stage2_z = cr_to_z(perturbed_centers, rigid_radii)\n            \n            res_stage2 = minimize(score_objective, stage2_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res_stage2.success:\n                c_res, r_res = z_to_cr(res_stage2.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                final_score = np.sum(r_final)\n                if final_score > best_score:\n                    best_score = final_score\n                    best_centers, best_radii = c_final, r_final\n\n    if best_centers is None:\n        return rigid_centers, rigid_radii\n    \n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761004823.2600508,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359830844239944,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761004827.4284708,
+      "evaluation_datetime": "2025-10-21T08:00:27.428474"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359830844239944,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761004827.4943871,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 19: Two-Stage Optimization for Eligibility' (ID: 898) has been evaluated.\n\n**Score:** 2.6359830844239944\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

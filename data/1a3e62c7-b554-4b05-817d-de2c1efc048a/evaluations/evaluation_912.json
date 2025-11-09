@@ -1,0 +1,47 @@
+{
+  "id": "912",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Noesis Snapshot KKT Top\u2011K (v2.1 sets-only writer: 1e\u22129 K=25, 1e\u22128 K=15)",
+  "tags": [
+    "analysis",
+    "sets-only",
+    "kkt",
+    "audit",
+    "reproducibility",
+    "utilities"
+  ],
+  "abstract": "Computes KKT\u2011proxy (NNLS) interior pair rankings on the Noesis snapshot and writes sets-only Top\u2011K JSONs into shared/appxE_contribs: noesis_snapshot_kkt_top_k_1e_9.json (K=25) and noesis_snapshot_kkt_top_k_1e_8.json (K=15). Falls back to slack\u2011based ranking if NNLS is ill\u2011posed. Returns baseline packing with 1e\u22129 shrink.",
+  "submitted_tick": 577,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\n\nN = 26\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\nOUT_DIR = 'storage/shared/appxE_contribs'\nEVAL_REF = 525  # Noesis SOTA reproduction reference\n\ntry:\n    from scipy.optimize import nnls\nexcept Exception:\n    nnls = None\n\ndef load_snapshot():\n    try:\n        c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n        r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        # conservative fallback grid\n        centers = []\n        rad = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < 26:\n                    centers.append([0.1 + 0.2*i, 0.1 + 0.15*j])\n        return np.array(centers, float), np.full(26, rad, float)\n\ndef slacks(c, r):\n    x, y = c[:,0], c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef boundary_active_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    return (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n\ndef grad_row_boundary(i, kind):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi+1; ri = xi+2\n    if kind == 'xL':\n        row[xi] = 1.0;  row[ri] = -1.0\n    elif kind == 'xR':\n        row[xi] = -1.0; row[ri] = -1.0\n    elif kind == 'yB':\n        row[yi] = 1.0;  row[ri] = -1.0\n    elif kind == 'yT':\n        row[yi] = -1.0; row[ri] = -1.0\n    return row\n\ndef grad_row_pair(c, i, j):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi+1; ri = xi+2\n    xj = 3*j; yj = xj+1; rj = xj+2\n    dx = c[i,0] - c[j,0]; dy = c[i,1] - c[j,1]\n    d = float(np.hypot(dx, dy))\n    if d > 1e-15:\n        invd = 1.0/d\n        row[xi] = dx*invd; row[yi] = dy*invd\n        row[xj] = -dx*invd; row[yj] = -dy*invd\n    row[ri] = -1.0; row[rj] = -1.0\n    return row\n\ndef build_active_J(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), sp = slacks(c, r)\n    rows = []; tags = []\n    for i in range(N):\n        if s_xL[i] <= tol: rows.append(grad_row_boundary(i,'xL')); tags.append(('b',i,'xL'))\n        if s_xR[i] <= tol: rows.append(grad_row_boundary(i,'xR')); tags.append(('b',i,'xR'))\n        if s_yB[i] <= tol: rows.append(grad_row_boundary(i,'yB')); tags.append(('b',i,'yB'))\n        if s_yT[i] <= tol: rows.append(grad_row_boundary(i,'yT')); tags.append(('b',i,'yT'))\n    for i in range(N):\n        for j in range(i+1, N):\n            if sp[i,j] <= tol:\n                rows.append(grad_row_pair(c, i, j)); tags.append(('p',i,j))\n    if rows:\n        J = np.vstack(rows)\n    else:\n        J = np.zeros((0,3*N), dtype=float)\n    return J, tags\n\ndef solve_kkt_lambda(J):\n    # We want J^T lambda \u2248 e_r where e_r has 1 on radius coords\n    if J.size == 0:\n        return np.zeros((0,), dtype=float)\n    A = J.T  # (3N, M)\n    b = np.zeros(3*N, dtype=float)\n    b[2::3] = 1.0\n    if nnls is not None:\n        lam, _ = nnls(A, b)\n    else:\n        lam = np.linalg.lstsq(A, b, rcond=None)[0]\n        lam = np.maximum(lam, 0.0)\n    return lam\n\ndef topk_kkt(c, r, tol, K):\n    J, tags = build_active_J(c, r, tol)\n    lam = solve_kkt_lambda(J)\n    bmask = boundary_active_mask(c, r, tol)\n    scored = []\n    for idx, tag in enumerate(tags):\n        if tag[0] != 'p':\n            continue\n        i, j = int(tag[1]), int(tag[2])\n        # interior filter at tol\n        if bmask[i] or bmask[j]:\n            continue\n        scored.append((float(lam[idx]), min(i,j), max(i,j)))\n    scored.sort(key=lambda t: t[0], reverse=True)\n    pairs = []\n    seen = set()\n    for val, i, j in scored:\n        if (i,j) in seen:\n            continue\n        pairs.append([i,j]); seen.add((i,j))\n        if len(pairs) >= K:\n            break\n    # Fallback to slack if insufficient pairs\n    if len(pairs) < K:\n        (_, _ , _, _), sp = slacks(c, r)\n        cand = []\n        for i in range(N):\n            for j in range(i+1, N):\n                if not (bmask[i] or bmask[j]):\n                    cand.append((float(sp[i,j]), i, j))\n        cand.sort(key=lambda t: t[0])  # smallest slack first\n        for _, i, j in cand:\n            if (i,j) in seen:\n                continue\n            pairs.append([i,j]); seen.add((i,j))\n            if len(pairs) >= K:\n                break\n    return pairs\n\ndef write_json(path, tol_str, K, pairs):\n    os.makedirs(OUT_DIR, exist_ok=True)\n    payload = {\n        \"schema_version\": \"1.1\",\n        \"description\": \"Sets-only KKT Top-K interior-pair ranking for Appendix E v2.1 (Noesis snapshot).\",\n        \"eval_id\": EVAL_REF,\n        \"method\": \"kkt\",\n        \"tol\": tol_str,\n        \"K\": int(K),\n        \"pairs\": pairs,\n        \"notes\": \"0-based indices; interior at tol; computed via NNLS KKT proxy with slack fallback.\"\n    }\n    with open(path, 'w') as f:\n        json.dump(payload, f, indent=2)\n\ndef construct_packing():\n    c, r = load_snapshot()\n    # Generate and write KKT Top-K lists\n    pairs_1e9 = topk_kkt(c, r, tol=1e-9, K=25)\n    write_json(os.path.join(OUT_DIR, 'noesis_snapshot_kkt_top_k_1e_9.json'), \"1e-9\", 25, pairs_1e9)\n    pairs_1e8 = topk_kkt(c, r, tol=1e-8, K=15)\n    write_json(os.path.join(OUT_DIR, 'noesis_snapshot_kkt_top_k_1e_8.json'), \"1e-8\", 15, pairs_1e8)\n    # Return baseline with tiny shrink for robust eval\n    r_out = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1761008744.4203107,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1761008746.7450686,
+      "evaluation_datetime": "2025-10-21T09:05:46.745076"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761008747.0591664,
+    "version_notified": "original",
+    "message": "Your research submission 'Noesis Snapshot KKT Top\u2011K (v2.1 sets-only writer: 1e\u22129 K=25, 1e\u22128 K=15)' (ID: 912) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

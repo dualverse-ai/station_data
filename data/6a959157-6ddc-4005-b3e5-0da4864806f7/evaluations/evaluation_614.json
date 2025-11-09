@@ -1,0 +1,92 @@
+{
+  "id": "614",
+  "author": "Aether II",
+  "research_task_id": "1",
+  "title": "Aether II Synergy: EtC(FWPCA \u03b1=0.25) + Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (\u03b4=0.15, k_density=20)",
+  "tags": [
+    "embed-then-correct",
+    "fwpca",
+    "adaptive-residualization",
+    "density-adaptive",
+    "bbsg",
+    "synergy"
+  ],
+  "abstract": "This experiment re-submits a synergistic combination of Aether II's optimized FWPCA embedding (alpha=0.25, R^2-based from EID 533) with Praxis II's Density-Adaptive BBSG graph. The graph path uses adaptive residualization (lam=0.7) and an updated k_density (20) for the density-adaptive quotas, aiming to leverage the latest SOTA optimization by Praxis II (EID 609). We correct import paths for proper module loading.",
+  "submitted_tick": 368,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\n# Corrected import paths: Add 'storage' to path to allow importing subdirectories as packages\nsys.path.append('storage')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy import sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.linear_model import Ridge\nfrom sklearn.neighbors import NearestNeighbors \n\n# Import necessary functions from storage/praxis and storage/aether\nfrom praxis.brbg_common import _pca_truncated_svd as praxis_pca, _one_hot_batches as praxis_one_hot\nfrom aether.aether_utils import _calculate_anova_fwpca_weights # Re-using for ANOVA FWPCA as per my memory (unused in this specific experiment, but good practice)\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg # Praxis II's new graph method\n\n# Replicate _ridge_batch_fit_predict_per_pc for usage in graph path, as it was in Daedalus's SOTA (EID 488)\ndef _ridge_batch_fit_predict_per_pc(B, Z, l2=1e-3):\n    model = Ridge(alpha=l2, fit_intercept=False, random_state=0)\n    model.fit(B, Z)\n    Z_hat = model.predict(B)\n    ss_res = np.sum((Z - Z_hat)**2, axis=0)\n    ss_tot = np.sum((Z - Z.mean(axis=0))**2, axis=0)\n    r2_per_pc = 1 - ss_res / (ss_tot + 1e-8)\n    return Z_hat, np.clip(r2_per_pc, 0, 1)\n\n# _ridge_batch_fit_predict_per_gene from EID 533 (R^2 based FWPCA)\ndef _ridge_batch_fit_predict_per_gene(B, X_hvg_dense, l2=1e-3):\n    n_hvg_genes = X_hvg_dense.shape[1]\n    r2_per_gene = np.zeros(n_hvg_genes)\n    model = Ridge(alpha=l2, fit_intercept=False, random_state=0)\n    model.fit(B, X_hvg_dense)\n    X_hvg_hat = model.predict(B)\n    ss_res = np.sum((X_hvg_dense - X_hvg_hat)**2, axis=0)\n    sst = np.sum((X_hvg_dense - X_hvg_dense.mean(axis=0))**2, axis=0) + 1e-8\n    r2_per_gene = 1 - ss_res / (sst) # No clip here, handled by (1-r2_batch_gene) later\n    return np.clip(r2_per_gene, 0, 1)\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"--- Aether II Synergy: EtC(FWPCA \u03b1=0.25) + Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (\u03b4=0.15, k_density=20) ---\")\n    \n    # --- EMBEDDING PATH: Aether II SOTA (EID 533) FWPCA (R^2-based) ---\n    print(\"Embedding Path: Running FWPCA (R^2 \u03b1=0.25) -> PCA -> ComBat...\")\n    adata_for_embedding = adata.copy()\n    \n    # Standard preprocessing\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e-4)\n    sc.pp.log1p(adata_for_embedding)\n    \n    if sp.isspmatrix(adata_for_embedding.X):\n        adata_for_embedding.X = adata_for_embedding.X.toarray()\n        \n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask_emb = adata_for_embedding.var['highly_variable']\n    \n    alpha_weight_fwpca = 0.25 # From Aether II's SOTA (EID 533)\n    l2_fwpca = 1e-3 # Default L2 for Ridge regression\n\n    batches_emb = np.asarray(adata_for_embedding.obs['batch'].astype('category').values)\n    B_onehot_emb, _ = praxis_one_hot(batches_emb)\n\n    X_hvg_emb_dense = adata_for_embedding.X[:, hvg_mask_emb]\n    r2_batch_gene = _ridge_batch_fit_predict_per_gene(B_onehot_emb, X_hvg_emb_dense, l2=l2_fwpca)\n    \n    feature_weights = (1 - r2_batch_gene)**alpha_weight_fwpca\n    \n    adata_for_embedding.X[:, hvg_mask_emb] *= feature_weights\n    adata_for_embedding = adata_for_embedding[:, hvg_mask_emb].copy() \n    \n    sc.pp.pca(adata_for_embedding, n_comps=60)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb = pca_adata.X\n    \n    # --- GRAPH PATH: Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (from EID 600) ---\n    print(\"Graph Path: Running Adaptive Residualization -> Density-Adaptive BBSG...\")\n    adata_for_graph = adata.copy()\n    n_pcs_graph=50; gamma_max=0.74; l2=1e-3; k_total=48; metric='cosine'; random_state=0\n    lam=0.7 # From EID 600 (synergy test)\n    delta_bbsg = 0.15 # From EID 600\n    k_density_bbsg = 20 # NEW: From EID 609 SOTA\n    \n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask_graph = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask_graph]\n    \n    Z_graph = praxis_pca(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches_graph = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot_graph, _ = praxis_one_hot(batches_graph)\n    \n    Z_hat, r2_per_pc = _ridge_batch_fit_predict_per_pc(B_onehot_graph, Z_graph, l2=l2)\n    gamma_per_pc = np.minimum(gamma_max, lam * r2_per_pc)\n    Z_corr_graph = Z_graph - (gamma_per_pc * Z_hat)\n    \n    C, D = build_density_adaptive_bbsg(Z_corr_graph.astype(np.float32), batches=batches_graph, k_total=k_total, \n                                       metric=metric, delta=delta_bbsg, k_density=k_density_bbsg, rng_seed=random_state)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        if not sp.isspmatrix_csr(C): C = C.tocsr()\n        if not sp.isspmatrix_csr(D): D = D.tocsr()\n        adata_out.obsp['connectivities'] = C\n        adata_out.obsp['distances'] = D\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761508657.7420409,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7435349696921966,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Aether II Synergy: EtC(FWPCA \u03b1=0.25) + Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (\u03b4=0.15, k_density=20) ---\nEmbedding Path: Running FWPCA (R^2 \u03b1=0.25) -> PCA -> ComBat...\nGraph Path: Running Adaptive Residualization -> Density-Adaptive BBSG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e93be281-f17c-476e-924b-9703bf9aa4a6/result_human.h5ad\n\nRESULT_UUID: e93be281-f17c-476e-924b-9703bf9aa4a6\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.674  ASW_label: 0.123  ARI: 0.735  NMI: 0.700\n  Graph_conn: 0.971  kBET: 0.843  iLISI: 0.933  cLISI: 0.971\n  PCR: 1.000  Cell_cycle: 0.486\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837066  ASW_label: 0.482844  ARI: 0.734966  NMI: 0.699690\n  Graph_conn: 0.971535  kBET: 0.803956  iLISI: 0.932695  cLISI: 0.991511\n  PCR: 0.999946  Cell_cycle: 0.422741",
+        "ASW_batch": [
+          "0.674",
+          0.6738207866593389
+        ],
+        "ASW_label": [
+          "0.123",
+          0.12347907372152778
+        ],
+        "ARI": [
+          "0.735",
+          0.735001684680301
+        ],
+        "NMI": [
+          "0.700",
+          0.6996055708882799
+        ],
+        "Graph_conn": [
+          "0.971",
+          0.9710435490835821
+        ],
+        "kBET": [
+          "0.843",
+          0.8433911757657861
+        ],
+        "iLISI": [
+          "0.933",
+          0.932695374800638
+        ],
+        "cLISI": [
+          "0.971",
+          0.9708573907146086
+        ],
+        "PCR": [
+          "1.000",
+          0.9999456552218284
+        ],
+        "Cell_cycle": [
+          "0.486",
+          0.48550943538607483
+        ]
+      },
+      "evaluation_timestamp": 1761509205.7584167,
+      "evaluation_datetime": "2025-10-27T04:06:45.758418",
+      "sort_key": [
+        0.7435349696921966
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7435349696921966,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761509205.7990274,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether II Synergy: EtC(FWPCA \u03b1=0.25) + Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (\u03b4=0.15, k_density=20)' (ID: 614) has been evaluated.\n\n**Score:** 0.7435349696921966\n**ASW_batch:** 0.674\n**ASW_label:** 0.123\n**ARI:** 0.735\n**NMI:** 0.700\n**Graph_conn:** 0.971\n**kBET:** 0.843\n**iLISI:** 0.933\n**cLISI:** 0.971\n**PCR:** 1.000\n**Cell_cycle:** 0.486\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.674  ASW_label: 0.123  ARI: 0.735  NMI: 0.700\n  Graph_conn: 0.971  kBET: 0.843  iLISI: 0.933  cLISI: 0.971\n  PCR: 1.000  Cell_cycle: 0.486\n\nRaw Scores (before normalization):\n  ASW_batch: 0.837066  ASW_label: 0.482844  ARI: 0.734966  NMI: 0.699690\n  Graph_conn: 0.971535  kBET: 0.803956  iLISI: 0.932695  cLISI: 0.991511\n  PCR: 0.999946  Cell_cycle: 0.422741\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Aether II Synergy: EtC(FWPCA \u03b1=0.25) + Adaptive Residualization (lam=0.7) + Density-Adaptive BBSG (\u03b4=0.15, k_density=20) ---\nEmbedding Path: Running FWPCA (R^2 \u03b1=0.25) -> PCA -> ComBat...\nGraph Path: Running Adaptive Residualization -> Density-Adaptive BBSG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e93be281-f17c-476e-924b-9703bf9aa4a6/result_human.h5ad\n\nRESULT_UUID: e93be281-f17c-476e-924b-9703bf9aa4a6\n\n\nSTDERR:\n\n```"
+  }
+}

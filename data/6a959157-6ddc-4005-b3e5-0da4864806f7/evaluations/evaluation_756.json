@@ -1,0 +1,92 @@
+{
+  "id": "756",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Auto\u2011CLIP v1b: \u03b1=0.5 (Leiden\u2011silhouette \u00d7 batch\u2011entropy) + fixed EtC embedding; BRBG(\u03bb=0.7)",
+  "tags": [
+    "auto-tuning",
+    "daqb",
+    "label-free",
+    "clip",
+    "silhouette",
+    "entropy"
+  ],
+  "abstract": "Fixes missing embedding by adding the standard EtC path (FWPCA \u03b1=0.5 \u2192 PCA60 \u2192 ComBat) for metrics, while Auto\u2011CLIP (\u03b1=0.5) selects DAQB (\u03b4,k_density) using Leiden\u2011silhouette and batch entropy with a cap regularizer. BRBG(\u03bb=0.7, \u03b3_max=0.74, PCA50); graphs are binary + true distances with strict column balancing.",
+  "submitted_tick": 485,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\nsys.path.append('storage/shared/diagnostics')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom clip_auto import auto_clip_select\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb, n_pcs_graph = 60, 50\n    l2, gamma_max, lam = 1e-3, 0.74, 0.7\n    k_total, metric, alpha_var, emb_n_neighbors, cap = 48, 'cosine', 0.5, 15, 2.0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Preprocess + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    # EtC embedding (for metrics/QC)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(emb_n_neighbors, k_total), metric=metric)\n\n    # BRBG graph representation (unweighted HVGs for PCA)\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Auto-CLIP selection (\u03b1=0.5)\n    best_delta, best_kd, C_best, D_best, info = auto_clip_select(\n        Zcorr, batches, deltas=(0.14, 0.15, 0.16), kd_list=(18, 20, 22),\n        k_total=k_total, metric=metric, alpha=0.5, cap_regularizer=True\n    )\n    print(f\"[Auto-CLIP v1b] Selected delta={best_delta}, kd={best_kd}, info={info}\")\n    adata.obsp['connectivities'] = C_best\n    adata.obsp['distances'] = D_best\n    return adata\n",
+    "submitted_timestamp": 1761547487.068079,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7235573132023303,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-CLIP v1b] Selected delta=0.16, kd=18, info={'clip': 0.3723598978324186, 'delta': 0.16, 'k_density': 18}\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d5a54649-3da0-4c63-8627-5827c10fcf73/result_human.h5ad\n\nRESULT_UUID: d5a54649-3da0-4c63-8627-5827c10fcf73\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.724  NMI: 0.676\n  Graph_conn: 0.961  kBET: 0.791  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.303\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.724172  NMI: 0.675613\n  Graph_conn: 0.961285  kBET: 0.754434  iLISI: 0.917918  cLISI: 0.987101\n  PCR: 0.999979  Cell_cycle: 0.267483",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.724",
+          0.7242089616250073
+        ],
+        "NMI": [
+          "0.676",
+          0.6755217134053506
+        ],
+        "Graph_conn": [
+          "0.961",
+          0.960616531218824
+        ],
+        "kBET": [
+          "0.791",
+          0.7906965930766691
+        ],
+        "iLISI": [
+          "0.918",
+          0.9179179179179174
+        ],
+        "cLISI": [
+          "0.956",
+          0.9557204966958356
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.303",
+          0.3032227297715622
+        ]
+      },
+      "evaluation_timestamp": 1761548211.608983,
+      "evaluation_datetime": "2025-10-27T14:56:51.608985",
+      "sort_key": [
+        0.7235573132023303
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7235573132023303,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761548211.8398602,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011CLIP v1b: \u03b1=0.5 (Leiden\u2011silhouette \u00d7 batch\u2011entropy) + fixed EtC embedding; BRBG(\u03bb=0.7)' (ID: 756) has been evaluated.\n\n**Score:** 0.7235573132023303\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.724\n**NMI:** 0.676\n**Graph_conn:** 0.961\n**kBET:** 0.791\n**iLISI:** 0.918\n**cLISI:** 0.956\n**PCR:** 1.000\n**Cell_cycle:** 0.303\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.724  NMI: 0.676\n  Graph_conn: 0.961  kBET: 0.791  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.303\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.724172  NMI: 0.675613\n  Graph_conn: 0.961285  kBET: 0.754434  iLISI: 0.917918  cLISI: 0.987101\n  PCR: 0.999979  Cell_cycle: 0.267483\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-CLIP v1b] Selected delta=0.16, kd=18, info={'clip': 0.3723598978324186, 'delta': 0.16, 'k_density': 18}\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/d5a54649-3da0-4c63-8627-5827c10fcf73/result_human.h5ad\n\nRESULT_UUID: d5a54649-3da0-4c63-8627-5827c10fcf73\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "301",
+  "author": "Scientia I",
+  "research_task_id": "1",
+  "title": "BPIGO: Quad Diagonal Flip Seed on Inquire I Base with SLSQP Optimization (N=26)",
+  "tags": [
+    "constrained optimization",
+    "slsqp",
+    "bpigo",
+    "qdf",
+    "seed perturbation",
+    "structural exploration"
+  ],
+  "abstract": "This experiment explores alternative structural classes for n=26 circle packing by utilizing Noesis I's Boundary-Preserving Interior-Graph Operator (BPIGO) 'Quad Diagonal Flip'. It perturbs a high-scoring packing from Inquire I (Eval ID 207) and subsequently optimizes the configuration using SLSQP with analytic Jacobians. The objective is to achieve a SOTA score with a distinct contact graph structure.",
+  "submitted_tick": 191,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds\nfrom scipy.spatial.distance import pdist, squareform\nimport sys\n\n# Import Noesis I's operators for seeding\nsys.path.append('storage/noesis')\nfrom operators import quad_diagonal_flip_seed, make_feasible\n\nN_CIRCLES = 26\nR_MIN_CONSTRAINT = 1e-6 \n\ndef _objective(x):\n    radii = x[2::3]\n    return -np.sum(radii)\n\ndef _objective_jacobian(x):\n    grad = np.zeros_like(x)\n    grad[2::3] = -1.0\n    return grad\n\ndef _constraints(x):\n    centers = x.reshape(N_CIRCLES, 3)[:, :2]\n    radii = x[2::3]\n\n    boundary_constraints = np.empty(4 * N_CIRCLES)\n    boundary_constraints[0*N_CIRCLES : 1*N_CIRCLES] = centers[:, 0] - radii  # x - r >= 0\n    boundary_constraints[1*N_CIRCLES : 2*N_CIRCLES] = 1.0 - (centers[:, 0] + radii) # 1 - x - r >= 0\n    boundary_constraints[2*N_CIRCLES : 3*N_CIRCLES] = centers[:, 1] - radii  # y - r >= 0\n    boundary_constraints[3*N_CIRCLES : 4*N_CIRCLES] = 1.0 - (centers[:, 1] + radii) # 1 - y - r >= 0\n\n    dist_matrix = squareform(pdist(centers))\n    overlap_constraints = []\n    for i in range(N_CIRCLES):\n        for j in range(i + 1, N_CIRCLES):\n            overlap_constraints.append(dist_matrix[i, j] - (radii[i] + radii[j]))\n\n    return np.concatenate((boundary_constraints, overlap_constraints))\n\ndef _constraints_jacobian(x):\n    centers = x.reshape(N_CIRCLES, 3)[:, :2]\n    radii = x[2::3]\n    grad = np.zeros((4 * N_CIRCLES + N_CIRCLES * (N_CIRCLES - 1) // 2, N_CIRCLES * 3))\n\n    for i in range(N_CIRCLES):\n        grad[i, 3*i + 0] = 1.0; grad[i, 3*i + 2] = -1.0\n        grad[N_CIRCLES + i, 3*i + 0] = -1.0; grad[N_CIRCLES + i, 3*i + 2] = -1.0\n        grad[2*N_CIRCLES + i, 3*i + 1] = 1.0; grad[2*N_CIRCLES + i, 3*i + 2] = -1.0\n        grad[3*N_CIRCLES + i, 3*i + 1] = -1.0; grad[3*N_CIRCLES + i, 3*i + 2] = -1.0\n\n    k = 4 * N_CIRCLES\n    for i in range(N_CIRCLES):\n        for j in range(i + 1, N_CIRCLES):\n            diff_centers = centers[i] - centers[j]\n            dist_ij = np.linalg.norm(diff_centers)\n            if dist_ij < 1e-10: \n                dist_ij = 1e-10\n            \n            grad[k, 3*i + 0] = diff_centers[0] / dist_ij\n            grad[k, 3*i + 1] = diff_centers[1] / dist_ij\n            grad[k, 3*j + 0] = -diff_centers[0] / dist_ij\n            grad[k, 3*j + 1] = -diff_centers[1] / dist_ij\n            grad[k, 3*i + 2] = -1.0\n            grad[k, 3*j + 2] = -1.0\n            k += 1\n    return grad\n\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/Inquire/nmap/n26/centers.txt')\n        base_radii = np.loadtxt('storage/Inquire/nmap/n26/radii.txt')\n    except Exception as e:\n        print(f\"Error loading Inquire I's data: {e}. Falling back to a simple grid.\")\n        base_centers = []\n        base_radii = []\n        radius = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(base_centers) < N_CIRCLES:\n                    x = 0.1 + i * 0.2\n                    y = 0.1 + j * 0.15\n                    base_centers.append([x, y])\n                    base_radii.append(radius)\n        base_centers = np.array(base_centers)\n        base_radii = np.array(base_radii)\n\n    base_centers, base_radii = make_feasible(base_centers, base_radii, eps=1e-8)\n\n    # Using an educated guess for quad_idxs. Actual contact graph analysis would be better.\n    qdf_quad_idxs = [10, 11, 12, 13] \n\n    try:\n        initial_centers, initial_radii = quad_diagonal_flip_seed(base_centers.copy(), base_radii.copy(), qdf_quad_idxs, theta=1.5e-2)\n    except Exception as e:\n        print(f\"Error applying QDF seed: {e}. Falling back to base packing.\")\n        initial_centers = base_centers\n        initial_radii = base_radii\n\n    initial_guess = np.zeros(N_CIRCLES * 3)\n    initial_guess[0::3] = initial_centers[:, 0]\n    initial_guess[1::3] = initial_centers[:, 1]\n    initial_guess[2::3] = initial_radii\n\n    lower_bounds = np.zeros(N_CIRCLES * 3)\n    upper_bounds = np.ones(N_CIRCLES * 3)\n    lower_bounds[2::3] = R_MIN_CONSTRAINT\n    upper_bounds[2::3] = 0.5\n\n    bounds = Bounds(lower_bounds, upper_bounds)\n    ineq_constraints = {'type': 'ineq', 'fun': _constraints, 'jac': _constraints_jacobian}\n\n    result = minimize(\n        _objective,\n        initial_guess,\n        method='SLSQP',\n        jac=_objective_jacobian,\n        bounds=bounds,\n        constraints=[ineq_constraints],\n        options={'maxiter': 500, 'ftol': 1e-10, 'disp': True}\n    )\n\n    if not result.success:\n        print(f\"Optimization failed: {result.message}\")\n        optimized_x = result.x\n    else:\n        print(\"Optimization successful.\")\n        optimized_x = result.x\n\n    final_centers = optimized_x.reshape(N_CIRCLES, 3)[:, :2]\n    final_radii = optimized_x[2::3]\n    \n    final_centers, final_radii = make_feasible(final_centers, final_radii, eps=1e-8)\n\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760900263.4981496,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.525942629208542,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nError loading Inquire I's data: storage/Inquire/nmap/n26/centers.txt not found.. Falling back to a simple grid.\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.525942834208414\n            Iterations: 15\n            Function evaluations: 36\n            Gradient evaluations: 14\nOptimization successful.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.525943",
+      "evaluation_timestamp": 1760900266.4590542,
+      "evaluation_datetime": "2025-10-20T02:57:46.459057"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.525942629208542,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760900266.5069828,
+    "version_notified": "original",
+    "message": "Your research submission 'BPIGO: Quad Diagonal Flip Seed on Inquire I Base with SLSQP Optimization (N=26)' (ID: 301) has been evaluated.\n\n**Score:** 2.525942629208542\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.525943\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nError loading Inquire I's data: storage/Inquire/nmap/n26/centers.txt not found.. Falling back to a simple grid.\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.525942834208414\n            Iterations: 15\n            Function evaluations: 36\n            Gradient evaluations: 14\nOptimization successful.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

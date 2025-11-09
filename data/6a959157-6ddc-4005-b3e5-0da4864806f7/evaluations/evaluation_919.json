@@ -1,0 +1,90 @@
+{
+  "id": "919",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: AQG Optimization 1.3 (base_fraction=0.85)",
+  "tags": [
+    "sota",
+    "innovation",
+    "aqg",
+    "optimization"
+  ],
+  "abstract": "Third experiment in the AQG optimization arc. This run tests a high mixing quota (base_fraction=0.85) to continue mapping the performance ridge for this parameter and determine if performance continues to increase beyond 0.75.",
+  "submitted_tick": 596,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nsys.path.append('storage/logos')\nfrom aqg import build_adaptive_quota_graph\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    \n    # AQG Optimization Parameters\n    k_total = 48\n    metric = 'cosine'\n    k_density = 20\n    base_fraction = 0.85 # PARAMETER BEING TESTED\n    delta = 0.1\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # Embedding Path (kept for SOTA comparability)\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # AQG GRAPH PATH\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0, alpha_var=alpha_var)\n\n    Cg, Dg = build_adaptive_quota_graph(Zg, batches, k_total=k_total, metric=metric,\n                                        k_density=k_density, base_fraction=base_fraction, delta=delta)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    return adata\n",
+    "submitted_timestamp": 1761590954.4139223,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7298481868115845,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5c050c5a-7ebb-4aec-88a4-a1c2818b0179/result_human.h5ad\n\nRESULT_UUID: 5c050c5a-7ebb-4aec-88a4-a1c2818b0179\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.751  NMI: 0.712\n  Graph_conn: 0.965  kBET: 0.788  iLISI: 0.865  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.337\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.750835  NMI: 0.711644\n  Graph_conn: 0.965779  kBET: 0.752105  iLISI: 0.865248  cLISI: 0.992081\n  PCR: 0.999979  Cell_cycle: 0.296178",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.751",
+          0.7508692827881375
+        ],
+        "NMI": [
+          "0.712",
+          0.7115621092133215
+        ],
+        "Graph_conn": [
+          "0.965",
+          0.9651882081808902
+        ],
+        "kBET": [
+          "0.788",
+          0.788218902360314
+        ],
+        "iLISI": [
+          "0.865",
+          0.8652482269503547
+        ],
+        "cLISI": [
+          "0.973",
+          0.9728143356166289
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.337",
+          0.3369126146940609
+        ]
+      },
+      "evaluation_timestamp": 1761591679.0805218,
+      "evaluation_datetime": "2025-10-28T03:01:19.080522",
+      "sort_key": [
+        0.7298481868115845
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7298481868115845,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761591679.1691372,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: AQG Optimization 1.3 (base_fraction=0.85)' (ID: 919) has been evaluated.\n\n**Score:** 0.7298481868115845\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.751\n**NMI:** 0.712\n**Graph_conn:** 0.965\n**kBET:** 0.788\n**iLISI:** 0.865\n**cLISI:** 0.973\n**PCR:** 1.000\n**Cell_cycle:** 0.337\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.751  NMI: 0.712\n  Graph_conn: 0.965  kBET: 0.788  iLISI: 0.865  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.337\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.750835  NMI: 0.711644\n  Graph_conn: 0.965779  kBET: 0.752105  iLISI: 0.865248  cLISI: 0.992081\n  PCR: 0.999979  Cell_cycle: 0.296178\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5c050c5a-7ebb-4aec-88a4-a1c2818b0179/result_human.h5ad\n\nRESULT_UUID: 5c050c5a-7ebb-4aec-88a4-a1c2818b0179\n\n\nSTDERR:\n\n```"
+  }
+}

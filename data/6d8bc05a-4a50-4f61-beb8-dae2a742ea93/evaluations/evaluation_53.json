@@ -1,0 +1,45 @@
+{
+  "id": "53",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Zephyr v3 Uniform Run (r=0.85, 0.95) + Comparison Doc Update",
+  "tags": [
+    "adaptive",
+    "sampler v3",
+    "uniform",
+    "docs"
+  ],
+  "abstract": "Runs buffered v3 with uniform reliability at r\u2208{0.85,0.95} (servers\u2208{2,3}), selects zero-drop best configs, writes results, and refreshes the v2 vs v3 comparison table using v3 uniform (0.85,0.95) and v3 hetero (0.8,0.9).",
+  "submitted_tick": 54,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, os, types\nfrom pathlib import Path\nsys.path.append('storage/shared')\n\n# Prefer Zephyr v3 sampler; else v2; else reference\ntry:\n    from utilities.zephyr2_sampler_v3 import Zephyr2AdaptiveSamplerV3 as BaseSampler\nexcept Exception:\n    try:\n        from utilities.zephyr2_sampler_v2 import Zephyr2AdaptiveSamplerV2 as BaseSampler\n    except Exception:\n        from utilities.reference_sampler import ReferenceAdaptiveSampler as BaseSampler\n\n# Patch bridge symbol\nzmod = types.ModuleType('utilities.adaptive_sampler')\nzmod.AdaptiveSampler = BaseSampler\nsys.modules['utilities.adaptive_sampler'] = zmod\n\nfrom coord.adaptive_buffered_ring import run_adaptive_buffered\nfrom utilities.seed_tools import seed_from_str, set_seed, make_rng, mix_seed\n\nbase_seed = seed_from_str(\"Zephyr-v3-uniform-085-095\")\nset_seed(base_seed); _, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24, \"max_steps\": 500,\n    \"buffer_size\": 8, \"service_rate\": 2,\n    \"servers\": [2, 3],\n    \"serve_after\": False, \"bidirectional\": True,\n    \"reliabilities\": [0.85, 0.95],\n    \"p0\": 0.6, \"replicates\": 12,\n    \"sampler_cfg\": {\"initial_rate\": 0.6, \"adjustment_factor\": 1.2},\n    \"targets\": {\n        \"p_min\": 0.6, \"p_max\": 1.0,\n        \"target_delta\": 0.12, \"target_dps\": 12,\n        \"target_drop\": 0.02, \"target_queue_load\": 0.5,\n        \"k_cov\": 0.9, \"k_dps\": 0.06, \"k_drop\": 0.6, \"k_q\": 0.35\n    }\n}\n\ndef summarize(items):\n    tf = [x[\"steps_to_full\"] for x in items if x[\"steps_to_full\"] is not None]\n    drops_ps = [x[\"dropped\"] / max(1, x[\"steps\"]) for x in items]\n    def mean(xs): return float(sum(xs)/len(xs)) if xs else None\n    return {\"time_to_full_mean\": mean(tf), \"drops_per_step_mean\": mean(drops_ps)}\n\n# Run v3 uniform for r=0.85, 0.95\nuniform = {}\nfor r in cfg[\"reliabilities\"]:\n    best = None\n    for srv in cfg[\"servers\"]:\n        runs = []\n        for k in range(cfg[\"replicates\"]):\n            seed = mix_seed(base_seed, int(r*1000) + srv*100 + k)\n            runs.append(run_adaptive_buffered(\n                N=cfg[\"N\"], max_steps=cfg[\"max_steps\"], base_seed=seed,\n                buffer_size=cfg[\"buffer_size\"], service_rate=cfg[\"service_rate\"], servers=srv,\n                serve_after=cfg[\"serve_after\"], reliability=r, bidirectional=cfg[\"bidirectional\"],\n                p0=cfg[\"p0\"], sampler_cfg=cfg[\"sampler_cfg\"], targets=cfg[\"targets\"], track_history=False\n            ))\n        met = summarize(runs)\n        drops = met[\"drops_per_step_mean\"] or 0.0\n        time = met[\"time_to_full_mean\"] or 1e9\n        entry = {\"reliability\": r, \"servers\": srv, \"metrics\": met}\n        if (best is None) or (drops < (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0)) or (drops == (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0) and time < (best[\"metrics\"][\"time_to_full_mean\"] or 1e9)):\n            best = entry\n    uniform[str(r)] = best\n\n# Save uniform run results\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nuni_path = out_dir / \"zephyr2_v3_uniform_r085_r095.json\"\nuni_path.write_text(json.dumps({\"config\": cfg, \"best\": uniform}, indent=2, sort_keys=True), encoding=\"utf-8\")\n\n# Update comparison doc using:\n#   v2 uniform best (existing file)\n#   v3 hetero best for r={0.8,0.9} (existing file)\n#   v3 uniform best for r={0.85,0.95} (just computed)\nv2_path = Path(\"storage/shared/coord/results/zephyr2_buffered_integration_v2_ema_floor.json\")\nv3h_path = Path(\"storage/shared/coord/results/zephyr2_v3_hetero_buffered_tuning.json\")\nout_md = Path(\"storage/shared/docs/summaries/zephyr_v2_vs_v3.md\")\n\nv2 = json.loads(v2_path.read_text(encoding=\"utf-8\"))\nv3h = json.loads(v3h_path.read_text(encoding=\"utf-8\"))\n\ndef pick_v3_best_for(rkey):\n    if rkey in {\"0.8\", \"0.9\"}:\n        best = None\n        for vkey, by_srv in v3h[\"results\"][f\"r{rkey}\"].items():\n            for skey, payload in by_srv.items():\n                met = payload[\"best\"][\"metrics\"]; drops = met[\"drops_per_step_mean\"] or 0.0; time = met[\"time_to_full_mean\"] or 1e9\n                if (best is None) or (drops < (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0)) or (drops == (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0) and time < (best[\"metrics\"][\"time_to_full_mean\"] or 1e9)):\n                    best = payload[\"best\"]\n        return best\n    else:\n        # use new uniform results\n        b = uniform.get(rkey)\n        return {\"metrics\": b[\"metrics\"]} if b else None\n\ndef f(x): return \"\" if x is None else f\"{x:.3g}\"\n\nlines = []\nlines.append(\"# Zephyr Sampler v2 vs v3 \u2014 Uniform vs Heterogeneous Summary\\n\")\nlines.append(f\"Uniform (v2): {v2_path}\")\nlines.append(f\"v3 sources: hetero (r\u2208{{0.8,0.9}}) {v3h_path}, uniform (r\u2208{{0.85,0.95}}) {uni_path}\\n\")\nlines.append(\"| reliability | v2 best time_to_full | v2 drops/step | v3 best time_to_full | v3 drops/step | delta (v3 - v2) |\")\nlines.append(\"|---:|---:|---:|---:|---:|---:|\")\nfor r in [\"0.8\", \"0.85\", \"0.9\", \"0.95\"]:\n    v2_entry = v2.get(\"best\", {}).get(r)\n    v2_tf = v2_entry.get(\"best_time_to_full\") if v2_entry else None\n    v2_dr = v2_entry.get(\"best_drops_per_step\") if v2_entry else None\n    v3_entry = pick_v3_best_for(r)\n    v3_tf = v3_entry[\"metrics\"].get(\"time_to_full_mean\") if v3_entry else None\n    v3_dr = v3_entry[\"metrics\"].get(\"drops_per_step_mean\") if v3_entry else None\n    delta = \"\" if (v2_tf is None or v3_tf is None) else f\"{v3_tf - v2_tf:.3g}\"\n    lines.append(f\"| {r} | {f(v2_tf)} | {f(v2_dr)} | {f(v3_tf)} | {f(v3_dr)} | {delta} |\")\n\nout_md.parent.mkdir(parents=True, exist_ok=True)\nout_md.write_text(\"\\n\".join(lines) + \"\\n\", encoding=\"utf-8\")\n\nprint(json.dumps({\n    \"uniform_results_artifact\": str(uni_path),\n    \"comparison_doc\": str(out_md)\n}, indent=2))\n",
+    "submitted_timestamp": 1757849675.7221746,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"uniform_results_artifact\": \"storage/shared/coord/results/zephyr2_v3_uniform_r085_r095.json\",\n  \"comparison_doc\": \"storage/shared/docs/summaries/zephyr_v2_vs_v3.md\"\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757849677.7457397,
+      "evaluation_datetime": "2025-09-14T19:34:37.745743"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757849677.7812974,
+    "version_notified": "original",
+    "message": "Your research submission 'Zephyr v3 Uniform Run (r=0.85, 0.95) + Comparison Doc Update' (ID: 53) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"uniform_results_artifact\": \"storage/shared/coord/results/zephyr2_v3_uniform_r085_r095.json\",\n  \"comparison_doc\": \"storage/shared/docs/summaries/zephyr_v2_vs_v3.md\"\n}\n\n\nSTDERR:\n\n```"
+  }
+}

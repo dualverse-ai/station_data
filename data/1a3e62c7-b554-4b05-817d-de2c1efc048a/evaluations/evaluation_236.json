@@ -1,0 +1,46 @@
+{
+  "id": "236",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Utility: Self-Consistency Audit (tol grid) + Baseline Revalidation",
+  "tags": [
+    "analysis",
+    "validation",
+    "slacks",
+    "histogram",
+    "audit"
+  ],
+  "abstract": "Re-validate the saved baseline packing (storage/noesis/latest_*). Compute boundary/pair slack stats and near-active counts across a tolerance grid (1e-9,2e-9,5e-9,1e-8). Emit JSON/CSV artifacts under storage/noesis/exports/. Return the same feasible packing (no peer reads, no optimization).",
+  "submitted_tick": 149,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np, json, os\n\nN = 26\nR_MIN = 1e-6\nEPS = 1e-9\nFINAL_SHRINK = 1e-9\nTOL_GRID = [1e-9, 2e-9, 5e-9, 1e-8]\n\ndef grid_plus_hole_seed(r0=0.1 - 1e-8, eps=1e-8):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    centers = [[x, y] for x in coords for y in coords]  # 25\n    hole_center = np.array([0.2, 0.2], dtype=float)\n    d = float(np.linalg.norm(hole_center - np.array([0.1, 0.1])))\n    r_hole = max(d - r0 - eps, R_MIN)\n    radii = [float(r0)] * 25 + [float(r_hole)]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef load_saved_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt').reshape(N, 2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt').reshape(N,)\n        return np.array(c, float), np.array(r, float)\n    except Exception:\n        return None, None\n\ndef boundary_caps(centers, eps=EPS):\n    x = centers[:, 0]; y = centers[:, 1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, R_MIN)\n\ndef feasibility_guard(centers, radii, eps=EPS, max_iter=4000):\n    c = np.clip(np.array(centers, float), 0.0, 1.0)\n    r = np.array(radii, float)\n    r = np.minimum(r, boundary_caps(c, eps=eps))\n    r = np.maximum(r, R_MIN)\n    for _ in range(max_iter):\n        diff = c[:, None, :] - c[None, :, :]\n        dist = np.sqrt((diff**2).sum(axis=2)) + 1e-15\n        iu = np.triu_indices(N, 1)\n        slack = dist[iu] - (r[iu[0]] + r[iu[1]])\n        if np.all(slack >= eps):\n            break\n        k = int(np.argmin(slack))\n        i = iu[0][k]; j = iu[1][k]\n        need = (r[i] + r[j] - dist[i, j]) + eps\n        di = min(need * 0.5, r[i] - R_MIN)\n        dj = min(need - di, r[j] - R_MIN)\n        if di <= 0 and dj <= 0:\n            r = np.maximum(r * 0.9995, R_MIN)\n        else:\n            r[i] -= max(di, 0.0)\n            r[j] -= max(dj, 0.0)\n        r = np.minimum(r, boundary_caps(c, eps=eps))\n    r = np.maximum(r - FINAL_SHRINK, R_MIN)\n    return c, r\n\ndef compute_slacks(centers, radii):\n    x = centers[:, 0]; y = centers[:, 1]; r = radii\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = centers[:, None, :] - centers[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    pair_slack = dist - (r[:, None] + r[None, :])\n    return (s_xL, s_xR, s_yB, s_yT), pair_slack\n\ndef near_active_counts(centers, radii, tol):\n    (s_xL, s_xR, s_yB, s_yT), s_pairs = compute_slacks(centers, radii)\n    b_ct = int(np.sum(s_xL <= tol) + np.sum(s_xR <= tol) + np.sum(s_yB <= tol) + np.sum(s_yT <= tol))\n    iu = np.triu_indices(N, 1)\n    p_ct = int(np.sum(s_pairs[iu] <= tol))\n    return b_ct, p_ct\n\ndef export_reports(centers, radii, path_prefix='storage/noesis/exports/validation_tick149'):\n    os.makedirs(os.path.dirname(path_prefix), exist_ok=True)\n    (s_xL, s_xR, s_yB, s_yT), s_pairs = compute_slacks(centers, radii)\n    iu = np.triu_indices(N, 1)\n    # Basic summary\n    summary = {\n        \"sum_radii\": float(np.sum(radii)),\n        \"min_boundary_slack\": float(np.min([s_xL.min(), s_xR.min(), s_yB.min(), s_yT.min()])),\n        \"min_pair_slack\": float(np.min(s_pairs[iu])),\n        \"tol_grid\": TOL_GRID,\n        \"near_active\": []\n    }\n    for tol in TOL_GRID:\n        b_ct, p_ct = near_active_counts(centers, radii, tol)\n        summary[\"near_active\"].append({\"tol\": tol, \"boundary\": b_ct, \"pairs\": p_ct})\n    with open(path_prefix + '.json', 'w') as f:\n        json.dump(summary, f, indent=2)\n    # CSV\n    lines = [\"metric,value\"]\n    lines.append(f\"sum_radii,{summary['sum_radii']}\")\n    lines.append(f\"min_boundary_slack,{summary['min_boundary_slack']}\")\n    lines.append(f\"min_pair_slack,{summary['min_pair_slack']}\")\n    for item in summary[\"near_active\"]:\n        lines.append(f\"near_active_boundary_tol_{item['tol']},{item['boundary']}\")\n        lines.append(f\"near_active_pairs_tol_{item['tol']},{item['pairs']}\")\n    with open(path_prefix + '.csv', 'w') as f:\n        f.write(\"\\n\".join(lines) + \"\\n\")\n\ndef construct_packing():\n    c, r = load_saved_best()\n    if c is None:\n        c, r = grid_plus_hole_seed()\n    c, r = feasibility_guard(c, r)\n    export_reports(c, r, path_prefix='storage/noesis/exports/validation_tick149')\n    # Re-save snapshot\n    try:\n        np.savetxt('storage/noesis/latest_centers.txt', c, fmt='%.9f')\n        np.savetxt('storage/noesis/latest_radii.txt', r, fmt='%.9f')\n    except Exception:\n        pass\n    return np.array(c, float), np.array(r, float)\n",
+    "submitted_timestamp": 1760885685.4210663,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6224053579999995,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760885687.1671917,
+      "evaluation_datetime": "2025-10-19T22:54:47.167194"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6224053579999995,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760885687.222442,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Self-Consistency Audit (tol grid) + Baseline Revalidation' (ID: 236) has been evaluated.\n\n**Score:** 2.6224053579999995\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

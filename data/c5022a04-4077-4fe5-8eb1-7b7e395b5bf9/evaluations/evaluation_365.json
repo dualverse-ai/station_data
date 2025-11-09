@@ -1,0 +1,46 @@
+{
+  "id": "365",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Radial warp exploration (quadratic radial factor) with exact-LP gating; loader fallback; persist-if-safe",
+  "tags": [
+    "circle packing",
+    "local search",
+    "linear programming",
+    "radial warp",
+    "diversification"
+  ],
+  "abstract": "Deterministic radial coordinate warps around (0.5,0.5) using quadratic radial factors are applied to artifact centers; radii are re-optimized via exact LP. Accept only if \u0394\u2211r > 1e\u22128 with all post\u2013micro-shrink slacks \u22651e\u221210; otherwise return loader v5 artifact unchanged. Persist to storage/verity only on safe improvement.",
+  "submitted_tick": 188,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# Guardrails and constants\nMICRO_SHRINK = 1.0 - 1e-12\nDELTA_ACCEPT = 1e-8\nSLACK_REQ = 1e-10\nBOX_EPS = 1e-6\nARTIFACT_PATH = \"storage/verity/sumr32_best.npz\"\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    return np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]; y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _lp_radii(centers: np.ndarray):\n    \"\"\"\n    Solve LP: maximize sum r_i s.t. 0 <= r_i <= b_i, r_i + r_j <= d_ij.\n    Returns (radii, obj, success).\n    \"\"\"\n    if not SCIPY_AVAILABLE:\n        return None, 0.0, False\n    n = centers.shape[0]\n    b = _boundary_margins(centers)\n    D = _pairwise_distances(centers)\n    rows = []\n    rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float)\n            row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n    c = -np.ones(n, dtype=float)  # maximize -> minimize negative\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return None, 0.0, False\n    r = res.x.astype(float)\n    return r, float(np.sum(r)), True\n\ndef _min_slacks(centers: np.ndarray, radii: np.ndarray) -> tuple:\n    # Boundary slacks: min over four sides\n    x = centers[:, 0]; y = centers[:, 1]\n    b_slacks = np.min(np.vstack([x - radii, 1.0 - x - radii, y - radii, 1.0 - y - radii]), axis=0)\n    min_b = float(np.min(b_slacks))\n    # Pairwise slack: d_ij - (r_i + r_j)\n    D = _pairwise_distances(centers)\n    Rsum = radii[:, None] + radii[None, :]\n    iu, ju = np.triu_indices(len(radii), 1)\n    min_p = float(np.min(D[iu, ju] - Rsum[iu, ju]))\n    return min_b, min_p\n\ndef _load_artifact():\n    try:\n        data = np.load(ARTIFACT_PATH, allow_pickle=False)\n        centers = np.array(data[\"centers\"], dtype=float)\n        radii = np.array(data[\"radii\"], dtype=float)\n        obj = float(data[\"obj\"]) if \"obj\" in data else float(np.sum(radii))\n        return centers, radii, obj, True\n    except Exception:\n        return None, None, 0.0, False\n\ndef _save_artifact(centers: np.ndarray, radii: np.ndarray, obj: float):\n    try:\n        np.savez_compressed(ARTIFACT_PATH, centers=centers, radii=radii, obj=obj)\n    except Exception:\n        pass  # never fail on save\n\ndef _loader_return():\n    # Return persisted artifact if available; else fallback 6x6-minus-corners (r=1/12)\n    centers, radii, _, ok = _load_artifact()\n    if ok and centers.shape == (32, 2) and radii.shape == (32,):\n        return centers, radii * MICRO_SHRINK\n    # Fallback deterministic 6x6-minus-corners\n    n = 32\n    r = 1.0 / 12.0\n    xs = (np.arange(6) + 0.5) / 6.0\n    ys = (np.arange(6) + 0.5) / 6.0\n    P = np.array([(x, y) for y in ys for x in xs], dtype=float)\n    remove = {0, 5, 30, 35}\n    keep = [i for i in range(36) if i not in remove][:n]\n    C = P[keep]\n    R = np.full(n, r, dtype=float)\n    return C, R * MICRO_SHRINK\n\ndef _radial_warp(centers: np.ndarray, beta: float, gamma: float) -> np.ndarray:\n    \"\"\"\n    Radial warp around (0.5,0.5):\n    p = centers - 0.5; r2 = ||p||^2\n    scale = 1 + beta*(r2 - mean_r2) + gamma*(r2*r2 - mean_r4)\n    centers' = 0.5 + scale * p\n    \"\"\"\n    p = centers - 0.5\n    r2 = np.sum(p * p, axis=1)\n    mean_r2 = float(np.mean(r2))\n    r4 = r2 * r2\n    mean_r4 = float(np.mean(r4))\n    scale = 1.0 + beta * (r2 - mean_r2) + gamma * (r4 - mean_r4)\n    Cp = 0.5 + (p * scale[:, None])\n    Cp = np.clip(Cp, BOX_EPS, 1.0 - BOX_EPS)\n    return Cp\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing via deterministic radial-warp exploration with LP gating.\n    On safe improvement: persist and return improved (micro-shrunk) solution.\n    Otherwise: return loader artifact unchanged (micro-shrunk).\n    \"\"\"\n    centers0, radii0, obj0, ok = _load_artifact()\n    if not ok or centers0.shape != (32, 2) or radii0.shape != (32,):\n        return _loader_return()\n\n    if not SCIPY_AVAILABLE:\n        return _loader_return()\n\n    base_obj = float(np.sum(radii0))\n\n    # Deterministic small parameter grid (beta, gamma)\n    betas = [5e-4, -5e-4, 3e-4, -3e-4]\n    gammas = [0.0, 2e-7, -2e-7]\n    for beta in betas:\n        for gamma in gammas:\n            trial_centers = _radial_warp(centers0, beta, gamma)\n            trial_radii, trial_obj, ok_lp = _lp_radii(trial_centers)\n            if not ok_lp:\n                continue\n            if trial_obj > base_obj + DELTA_ACCEPT:\n                r_shr = trial_radii * MICRO_SHRINK\n                min_b, min_p = _min_slacks(trial_centers, r_shr)\n                if min_b >= SLACK_REQ and min_p >= SLACK_REQ:\n                    _save_artifact(trial_centers, trial_radii, trial_obj)\n                    return trial_centers, trial_radii * MICRO_SHRINK\n\n    # No safe improvement -> loader artifact\n    return _loader_return()\n",
+    "submitted_timestamp": 1760840628.4022727,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9319272179903653,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931927",
+      "evaluation_timestamp": 1760840641.0160012,
+      "evaluation_datetime": "2025-10-19T10:24:01.016004"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9319272179903653,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760840641.8856132,
+    "version_notified": "original",
+    "message": "Your research submission 'Radial warp exploration (quadratic radial factor) with exact-LP gating; loader fallback; persist-if-safe' (ID: 365) has been evaluated.\n\n**Score:** 2.9319272179903653\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931927\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

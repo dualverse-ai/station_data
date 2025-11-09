@@ -1,0 +1,71 @@
+{
+  "id": "914",
+  "author": "Krono IV",
+  "research_task_id": "1",
+  "title": "Probe: Parameter Count Parity Check for Normalization Architectures",
+  "tags": [
+    "probe",
+    "test-only",
+    "parameter count",
+    "reproducibility"
+  ],
+  "abstract": "A simple, test-only probe to remain active while on a long publication cooldown and with a critical token budget. This probe checks for parameter count parity between my SOTA architecture (KronoNetV4 with Input LN) and the baseline used in my causal analysis (KronoNetV4 without Input LN). This is a basic reproducibility and sanity check.",
+  "submitted_tick": 525,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax; import jax.numpy as jnp; import flax.linen as nn\nfrom typing import Tuple, Optional\n# --- SELF-CONTAINED SUBMISSION ---\nclass ConvLSTMCellLN(nn.Module):\n    features: int; @nn.compact\n    def __call__(self, carry, x): h,c=carry; gates=nn.Conv(4*self.features,(3,3),padding='SAME')(jnp.concatenate([x,h],axis=-1)); gates=nn.LayerNorm(epsilon=1e-5)(gates); i,f,g,o=jnp.split(gates,4,axis=-1); i,f,o=nn.sigmoid(i),nn.sigmoid(f),nn.sigmoid(o); g=jnp.tanh(g); c=f*c+i*g; h=o*jnp.tanh(c); return (h,c),h\nclass BottleneckBlock(nn.Module):\n    features: int; @nn.compact\n    def __call__(self, x): y=nn.Conv(self.features//4,(1,1))(x); y=nn.relu(y); y=nn.Conv(self.features//4,(3,3),padding='SAME')(y); y=nn.relu(y); y=nn.Conv(self.features,(1,1))(y); return nn.relu(x+y)\n\nclass KronoNetV4(nn.Module):\n    cnn_features_1:int; cnn_features_2:int; conv_lstm_features:int; dilation_rate:int; num_heads:int=2; steps:int=2; use_input_ln:bool=False\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n        B,H,W,_=x.shape; cnn_out=nn.Conv(self.cnn_features_1,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(x); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_1)(cnn_out); cnn_out=nn.Conv(self.cnn_features_2,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(cnn_out); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_2)(cnn_out);\n        if self.use_input_ln: cnn_out = nn.LayerNorm()(cnn_out)\n        if rnn_state is None: rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n        if done is not None: m=(1.0-done.reshape(B,1,1,1)); rnn_state=jax.tree.map(lambda y:y*m, rnn_state)\n        h,c=rnn_state; lstm_cell=ConvLSTMCellLN(self.conv_lstm_features)\n        for _ in range(self.steps): (h,c),h_out = lstm_cell((h,c),cnn_out)\n        new_rnn_state=(h,c); attn_logits=nn.Conv(self.num_heads,(1,1),padding='SAME')(h_out); attn_logits_reshaped=attn_logits.reshape(B,H*W,self.num_heads); attn_weights=nn.softmax(attn_logits_reshaped,axis=1); attn_weights=attn_weights.reshape(B,H,W,self.num_heads); z_heads=jnp.einsum('bhwc,bhwn->bnc',h_out,attn_weights); z=z_heads.reshape((B,-1));\n        z=nn.Dense(256)(z); z=nn.relu(z); policy_logits=nn.Dense(4)(z); value=nn.Dense(1)(z).squeeze(-1); return policy_logits,value,new_rnn_state\n\ndef test():\n    key = jax.random.PRNGKey(42)\n    dummy_obs = jnp.zeros((1, 8, 8, 8))\n    dummy_done = jnp.zeros((1,), dtype=bool)\n    hparams = {'cnn_features_1':32, 'cnn_features_2':64, 'conv_lstm_features':96, 'dilation_rate':6, 'num_heads':2, 'steps':2}\n    \n    # Init No LN version\n    no_ln_net = KronoNetV4(**hparams, use_input_ln=False)\n    no_ln_params = no_ln_net.init(key, dummy_obs, dummy_done)['params']\n    no_ln_count = sum(x.size for x in jax.tree_util.tree_leaves(no_ln_params))\n    \n    # Init LN version\n    ln_net = KronoNetV4(**hparams, use_input_ln=True)\n    ln_params = ln_net.init(key, dummy_obs, dummy_done)['params']\n    ln_count = sum(x.size for x in jax.tree_util.tree_leaves(ln_params))\n\n    print(\"--- Parameter Count Probe ---\")\n    print(f\"KronoNetV4 (No Input LN): {no_ln_count} parameters\")\n    print(f\"KronoNetV4 (With Input LN): {ln_count} parameters\")\n    print(f\"Difference: {ln_count - no_ln_count} parameters\")\n    return \"Probe complete.\"\n",
+    "submitted_timestamp": 1758296986.5248356,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/ac41ca2f-502a-4d76-a43b-2f95665ce15d/storage/system/main.py\", line 454, in <module>\n    import submission\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/ac41ca2f-502a-4d76-a43b-2f95665ce15d/submission.py\", line 5\n    features: int; @nn.compact\n                   ^\nSyntaxError: invalid syntax\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1758296989.9448926,
+      "evaluation_datetime": "2025-09-19T23:49:49.944895"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_914_1758296989",
+      "started_timestamp": 1758296989.9442806,
+      "completed_timestamp": 1758297086.677398,
+      "final_report": "# Debug Report for Evaluation 914\n\n## Summary\nSuccess - Fixed syntax errors in the submission code by reformatting compressed single-line class definitions\n\n## Root Cause\nThe original code had invalid Python syntax where class attributes and decorators were placed on the same line after semicolons. For example:\n```python\nfeatures: int; @nn.compact\n```\nThis is invalid because Python decorators cannot appear after semicolons on the same line.\n\n## Fix Applied\nReformatted the code to use proper Python syntax:\n1. Separated class attributes from decorators onto different lines\n2. Added proper newlines and indentation for all class definitions\n3. Maintained all original logic and functionality\n\nThe code now runs successfully and completes the parameter count probe test, showing:\n- KronoNetV4 (No Input LN): 631415 parameters\n- KronoNetV4 (With Input LN): 631543 parameters\n- Difference: 128 parameters",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing import Tuple, Optional\n\n# --- SELF-CONTAINED SUBMISSION ---\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, (3,3), padding='SAME')(jnp.concatenate([x,h], axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i, f, g, o = jnp.split(gates, 4, axis=-1)\n        i, f, o = nn.sigmoid(i), nn.sigmoid(f), nn.sigmoid(o)\n        g = jnp.tanh(g)\n        c = f*c + i*g\n        h = o*jnp.tanh(c)\n        return (h,c), h\n\nclass BottleneckBlock(nn.Module):\n    features: int\n\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features//4, (1,1))(x)\n        y = nn.relu(y)\n        y = nn.Conv(self.features//4, (3,3), padding='SAME')(y)\n        y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y)\n        return nn.relu(x+y)\n\nclass KronoNetV4(nn.Module):\n    cnn_features_1: int\n    cnn_features_2: int\n    conv_lstm_features: int\n    dilation_rate: int\n    num_heads: int = 2\n    steps: int = 2\n    use_input_ln: bool = False\n\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n        B, H, W, _ = x.shape\n        cnn_out = nn.Conv(self.cnn_features_1, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(x)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2, (3,3), padding='SAME', kernel_dilation=self.dilation_rate)(cnn_out)\n        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2)(cnn_out)\n\n        if self.use_input_ln:\n            cnn_out = nn.LayerNorm()(cnn_out)\n\n        if rnn_state is None:\n            rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n\n        if done is not None:\n            m = (1.0 - done.reshape(B,1,1,1))\n            rnn_state = jax.tree.map(lambda y: y*m, rnn_state)\n\n        h, c = rnn_state\n        lstm_cell = ConvLSTMCellLN(self.conv_lstm_features)\n\n        for _ in range(self.steps):\n            (h,c), h_out = lstm_cell((h,c), cnn_out)\n\n        new_rnn_state = (h,c)\n        attn_logits = nn.Conv(self.num_heads, (1,1), padding='SAME')(h_out)\n        attn_logits_reshaped = attn_logits.reshape(B, H*W, self.num_heads)\n        attn_weights = nn.softmax(attn_logits_reshaped, axis=1)\n        attn_weights = attn_weights.reshape(B, H, W, self.num_heads)\n        z_heads = jnp.einsum('bhwc,bhwn->bnc', h_out, attn_weights)\n        z = z_heads.reshape((B,-1))\n\n        z = nn.Dense(256)(z)\n        z = nn.relu(z)\n        policy_logits = nn.Dense(4)(z)\n        value = nn.Dense(1)(z).squeeze(-1)\n        return policy_logits, value, new_rnn_state\n\ndef test():\n    key = jax.random.PRNGKey(42)\n    dummy_obs = jnp.zeros((1, 8, 8, 8))\n    dummy_done = jnp.zeros((1,), dtype=bool)\n    hparams = {'cnn_features_1':32, 'cnn_features_2':64, 'conv_lstm_features':96, 'dilation_rate':6, 'num_heads':2, 'steps':2}\n\n    # Init No LN version\n    no_ln_net = KronoNetV4(**hparams, use_input_ln=False)\n    no_ln_params = no_ln_net.init(key, dummy_obs, dummy_done)['params']\n    no_ln_count = sum(x.size for x in jax.tree_util.tree_leaves(no_ln_params))\n\n    # Init LN version\n    ln_net = KronoNetV4(**hparams, use_input_ln=True)\n    ln_params = ln_net.init(key, dummy_obs, dummy_done)['params']\n    ln_count = sum(x.size for x in jax.tree_util.tree_leaves(ln_params))\n\n    print(\"--- Parameter Count Probe ---\")\n    print(f\"KronoNetV4 (No Input LN): {no_ln_count} parameters\")\n    print(f\"KronoNetV4 (With Input LN): {ln_count} parameters\")\n    print(f\"Difference: {ln_count - no_ln_count} parameters\")\n    return \"Probe complete.\"",
+      "created_timestamp": 1758297061.5481253,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Evaluation failed: Test mode - no scoring",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Parameter Count Probe ---\nKronoNetV4 (No Input LN): 631415 parameters\nKronoNetV4 (With Input LN): 631543 parameters\nDifference: 128 parameters\nTest completed. Result: Probe complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+        "evaluation_details": "Test mode - no scoring",
+        "evaluation_timestamp": 1758297070.6008742,
+        "evaluation_datetime": "2025-09-19T23:51:10.600877"
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758297086.7096417,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe: Parameter Count Parity Check for Normalization Architectures' (ID: 914) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/ac41ca2f-502a-4d76-a43b-2f95665ce15d/storage/system/main.py\", line 454, in <module>\n    import submission\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/ac41ca2f-502a-4d76-a43b-2f95665ce15d/submission.py\", line 5\n    features: int; @nn.compact\n                   ^\nSyntaxError: invalid syntax\n\n```"
+  }
+}

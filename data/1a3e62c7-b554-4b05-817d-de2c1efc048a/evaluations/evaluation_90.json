@@ -1,0 +1,46 @@
+{
+  "id": "90",
+  "author": "Scientia I",
+  "research_task_id": "1",
+  "title": "Force-Directed Circle Packing (Jiggling Algorithm)",
+  "tags": [
+    "force-directed",
+    "jiggling",
+    "geometric optimization",
+    "repulsion",
+    "boundary"
+  ],
+  "abstract": "This submission introduces a force-directed optimization (jiggling) algorithm for circle packing. Starting with a concentric ring initial configuration, circle centers are iteratively moved based on repulsive forces from overlapping circles and boundary constraints, along with a weak centering force. The `compute_max_radii` function is periodically applied to determine the best packing, aiming to achieve a more optimal and physically-inspired dense arrangement.",
+  "submitted_tick": 47,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\ndef compute_max_radii(centers):\n    \"\"\"\n    Computes the maximum possible radii for a given set of circle centers\n    within a unit square, ensuring no overlap. (Robust version from Eval ID 23/61)\n    \"\"\"\n    n = centers.shape[0]\n    epsilon = 1e-7 # Slightly larger epsilon for better numerical stability\n    radii = np.ones(n)\n    \n    # Limit by distance to square borders\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - epsilon, y - epsilon, 1 - x - epsilon, 1 - y - epsilon)\n    \n    # Iteratively shrink radii to resolve overlaps\n    for _ in range(200): \n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                rad_sum = radii[i] + radii[j]\n                \n                if dist_sq < rad_sum**2 - epsilon: \n                    dist = np.sqrt(dist_sq) if dist_sq > 0 else 0\n                    if rad_sum > epsilon: \n                        scale_factor = (dist - epsilon) / rad_sum \n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n    \n    return np.maximum(radii, epsilon) \n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles in the unit square using a concentric ring pattern\n    and then applies a force-directed optimization (jiggling algorithm).\n    \n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (26, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (26,) with radius of each circle\n    \"\"\"\n    n = 26\n    \n    # Initial center placement: Concentric Ring Pattern\n    initial_centers = np.zeros((n, 2))\n    \n    # 1. Place a central circle\n    initial_centers[0] = [0.5, 0.5]\n    \n    # 2. Place circles in an inner ring (8 circles)\n    num_inner_ring = 8\n    inner_ring_radius = 0.25 \n    for i in range(num_inner_ring):\n        angle = 2 * np.pi * i / num_inner_ring\n        initial_centers[i + 1] = [0.5 + inner_ring_radius * np.cos(angle), 0.5 + inner_ring_radius * np.sin(angle)]\n    \n    # 3. Place circles in an outer ring (16 circles)\n    num_outer_ring = 16\n    outer_ring_radius = 0.4 \n    for i in range(num_outer_ring):\n        angle = 2 * np.pi * i / num_outer_ring\n        initial_centers[i + 1 + num_inner_ring] = [0.5 + outer_ring_radius * np.cos(angle), 0.5 + outer_ring_radius * np.sin(angle)]\n    \n    # 4. Place the 26th circle strategically\n    initial_centers[25] = [0.5, 0.7]\n\n    # Clip initial centers to ensure they are within a safe margin of the unit square.\n    initial_centers = np.clip(initial_centers, 0.05, 0.95)\n    \n    # --- Force-Directed Optimization Parameters ---\n    best_centers = np.copy(initial_centers)\n    best_radii = compute_max_radii(best_centers)\n    best_score = np.sum(best_radii)\n\n    # Tuning parameters for forces and simulation\n    k_repel = 0.005      # Inter-circle repulsion strength\n    k_boundary = 0.05    # Boundary repulsion strength (stronger than inter-circle)\n    k_center = 0.0001    # Weak attraction to center of square\n    step_size = 0.001    # How much to move centers per jiggle iteration\n    num_jiggle_iterations = 500 # Number of force application steps\n\n    # Estimate average radius for force calculations (helps normalize forces)\n    # Using previous best average radius as a starting estimate\n    avg_radius_estimate = best_score / n if best_score > 0 else 0.05\n\n    for jiggle_iter in range(num_jiggle_iterations):\n        current_centers = np.copy(best_centers) # Start from best found so far\n        force_vectors = np.zeros((n, 2))\n\n        # --- Calculate Inter-Circle Repulsion Forces ---\n        for i in range(n):\n            for j in range(i + 1, n):\n                vec_ij = current_centers[i] - current_centers[j]\n                dist_sq = np.sum(vec_ij**2)\n                dist = np.sqrt(dist_sq) if dist_sq > 0 else 1e-9 # Avoid division by zero\n\n                # Estimate sum of radii for overlap calculation during force-step\n                # This is a heuristic, as actual radii depend on max_radii calculation\n                estimated_rad_sum = avg_radius_estimate * 2 \n\n                if dist < estimated_rad_sum:\n                    overlap = estimated_rad_sum - dist\n                    unit_vec_ij = vec_ij / dist\n                    # Apply repulsive force\n                    force_magnitude = k_repel * overlap\n                    force_vectors[i] += unit_vec_ij * force_magnitude\n                    force_vectors[j] -= unit_vec_ij * force_magnitude\n\n        # --- Calculate Boundary Repulsion Forces and Centering Forces ---\n        for i in range(n):\n            x, y = current_centers[i]\n            # Boundary forces (using average_radius_estimate for circle size relative to boundary)\n            if x - avg_radius_estimate < 0:\n                force_vectors[i, 0] += k_boundary * (0 - (x - avg_radius_estimate))\n            if x + avg_radius_estimate > 1:\n                force_vectors[i, 0] -= k_boundary * ((x + avg_radius_estimate) - 1)\n            if y - avg_radius_estimate < 0:\n                force_vectors[i, 1] += k_boundary * (0 - (y - avg_radius_estimate))\n            if y + avg_radius_estimate > 1:\n                force_vectors[i, 1] -= k_boundary * ((y + avg_radius_estimate) - 1)\n            \n            # Centering force\n            center_of_square = np.array([0.5, 0.5])\n            force_vectors[i] += k_center * (center_of_square - current_centers[i])\n\n        # --- Update Centers ---\n        new_centers = current_centers + step_size * force_vectors\n        \n        # Clip new centers to prevent them from moving too far out, but allow for radius\n        # Using a fixed clip of 0.05 for stability\n        new_centers = np.clip(new_centers, 0.05, 0.95)\n\n        # --- Evaluate and Update Best ---\n        # Re-evaluate actual radii and score for the new centers\n        temp_radii = compute_max_radii(new_centers)\n        temp_score = np.sum(temp_radii)\n\n        if temp_score > best_score:\n            best_score = temp_score\n            best_centers = new_centers\n\n    # Final calculation for the best centers found\n    final_radii = compute_max_radii(best_centers)\n    \n    return best_centers, final_radii\n",
+    "submitted_timestamp": 1760866179.8726594,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.4752175985176594,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.475218",
+      "evaluation_timestamp": 1760866346.3667207,
+      "evaluation_datetime": "2025-10-19T17:32:26.366723"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.4752175985176594,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760866346.3857408,
+    "version_notified": "original",
+    "message": "Your research submission 'Force-Directed Circle Packing (Jiggling Algorithm)' (ID: 90) has been evaluated.\n\n**Score:** 1.4752175985176594\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.475218\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

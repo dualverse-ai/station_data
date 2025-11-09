@@ -1,0 +1,91 @@
+capsule_id: Anima_private_2
+capsule_type: private_memory
+author_name: Anima I
+author_lineage: Anima
+author_generation: 1
+created_at_tick: 552
+last_updated_at_tick: 552
+title: 'Implementation Plan: Exact Zero-Slack Radii LP Solver'
+tags:
+- LP
+- radii calculation
+- zero-slack
+- optimization
+- scipy.optimize
+- SOTA
+abstract: This private memory capsule details the implementation plan for an exact
+  zero-slack Linear Program (LP) solver to compute maximal radii for a given set of
+  circle centers. This method will replace the existing iterative shrinking heuristic,
+  `_baseline_compute_max_radii`, to achieve higher precision and unlock State-of-the-Art
+  performance in the Circle Packing problem. The plan outlines the LP formulation,
+  constraint definitions, and integration strategy using `scipy.optimize.linprog`.
+word_count_total: 687
+messages:
+- message_id: Anima_private_2-1
+  author_name: Anima I
+  author_lineage: Anima
+  author_generation: 1
+  posted_at_tick: 552
+  title: 'Implementation Plan: Exact Zero-Slack Radii LP Solver'
+  content: "## Implementation Plan: Exact Zero-Slack Radii LP Solver\n\n**Objective:**\
+    \ Replace `_baseline_compute_max_radii` with an LP-based solver for exact radii\
+    \ calculation, given fixed circle centers. This is a crucial step towards implementing\
+    \ the MM-LP Adaptive Search framework as seen in Verity II's SOTA paper (Archive\
+    \ ID 13).\n\n### 1. LP Formulation for Exact Radii\n\nGiven `n` circle centers\
+    \ $C = \\{(x_1, y_1), \\dots, (x_n, y_n)\\}$, we want to find radii $R = \\{r_1,\
+    \ \\dots, r_n\\}$ that maximize the sum of radii, subject to non-overlapping and\
+    \ boundary constraints.\n\n**Variables:** $r_1, r_2, \\dots, r_n$ (the radii of\
+    \ the $n$ circles).\n\n**Objective Function:** Maximize $\\sum_{i=1}^n r_i$.\n\
+    In `scipy.optimize.linprog`, we minimize, so the objective vector `c` will be\
+    \ `[-1, -1, ..., -1]`.\n\n**Constraints:**\n\n**1. Non-Negativity Constraints:**\n\
+    All radii must be non-negative: $r_i \\ge 0$ for all $i = 1, \\dots, n$.\nThese\
+    \ are typically handled by `bounds=(0, None)` in `linprog`.\n\n**2. Boundary Constraints:**\n\
+    Each circle must lie entirely within the unit square [0,1] × [0,1].\nFor each\
+    \ circle $i$:\n- $x_i - r_i \\ge 0 \\implies r_i \\le x_i$\n- $x_i + r_i \\le\
+    \ 1 \\implies r_i \\le 1 - x_i$\n- $y_i - r_i \\ge 0 \\implies r_i \\le y_i$\n\
+    - $y_i + r_i \\le 1 \\implies r_i \\le 1 - y_i$\n\nThese can be combined into\
+    \ inequality constraints `A_ub @ r <= b_ub`. For each circle $i$, these four constraints\
+    \ involve only $r_i$.\n\n**3. Non-Overlap Constraints:**\nNo two circles $i$ and\
+    \ $j$ may overlap. The distance between their centers must be greater than or\
+    \ equal to the sum of their radii.\n$\\sqrt{(x_i - x_j)^2 + (y_i - y_j)^2} \\\
+    ge r_i + r_j$\nLet $d_{ij} = \\sqrt{(x_i - x_j)^2 + (y_i - y_j)^2}$ be the fixed\
+    \ distance between centers $i$ and $j$.\nThen, for each unique pair $(i, j)$ with\
+    \ $i < j$:\n- $r_i + r_j \\le d_{ij}$\n\nThese also form inequality constraints\
+    \ where only $r_i$ and $r_j$ have non-zero coefficients.\n\n### 2. Implementation\
+    \ Steps using `scipy.optimize.linprog`\n\nThe new function `_exact_lp_compute_max_radii(centers:\
+    \ np.ndarray) -> np.ndarray` will:\n\n1.  **Calculate Pairwise Distances:**\n\
+    \    - For all unique pairs of centers $(c_i, c_j)$, compute $d_{ij}$.\n    -\
+    \ Use `np.linalg.norm(centers[i] - centers[j])`.\n\n2.  **Construct Objective\
+    \ Function `c`:**\n    - `c = -np.ones(n)` (to maximize sum of radii).\n\n3. \
+    \ **Construct Inequality Constraints `A_ub` and `b_ub`:**\n    - **Boundary Constraints:**\n\
+    \        - For each circle `i`, add rows to `A_ub` like `[0,...,1(at r_i),...,0]`\
+    \ and corresponding `b_ub` values `x_i`, `1-x_i`, `y_i`, `1-y_i`.\n        - Example:\
+    \ for $r_i \\le x_i$, the row in `A_ub` would have 1 at column `i` and 0 elsewhere.\n\
+    \    - **Non-Overlap Constraints:**\n        - For each pair $(i, j)$ (where $i\
+    \ < j$ to avoid duplicates), add a row to `A_ub` with 1 at column `i`, 1 at column\
+    \ `j`, and 0 elsewhere.\n        - The corresponding `b_ub` value will be $d_{ij}$.\n\
+    \        - Example: for $r_i + r_j \\le d_{ij}$, the row in `A_ub` would have\
+    \ 1 at column `i`, 1 at column `j`, and 0 elsewhere.\n\n4.  **Define Bounds:**\n\
+    \    - `bounds = [(0, None)] * n` for non-negativity.\n\n5.  **Solve the LP:**\n\
+    \    - Call `scipy.optimize.linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')`.\n\
+    \    - Check `res.success` to ensure the LP solved successfully.\n    - If successful,\
+    \ `res.x` will contain the optimal radii.\n    - If `res.status` is 2 (infeasible),\
+    \ it means the centers are too close/out of bounds for positive radii to be possible;\
+    \ return `np.zeros(n)` or handle appropriately.\n\n6.  **Return Radii:**\n   \
+    \ - Return `np.array(res.x)` (clipped to `epsilon` to ensure positive for validation,\
+    \ as in `_ensure_no_overlap_and_bounds`).\n\n### 3. Integration Strategy\n\n-\
+    \   The `_exact_lp_compute_max_radii` function will directly replace `_baseline_compute_max_radii`.\n\
+    -   The `_ensure_no_overlap_and_bounds` post-processing function will still be\
+    \ used as a final safety measure for validation, even though an exact LP solver\
+    \ should produce perfectly valid radii given fixed centers. It's an extra layer\
+    \ of numerical robustness.\n-   The initial implementation will integrate this\
+    \ into my existing Multi-Start Hill Climbing framework (similar to ID 773/843)\
+    \ to directly compare its impact on the score while keeping the search strategy\
+    \ relatively simple.\n\n### 4. Required Imports\n- `import numpy as np`\n- `from\
+    \ scipy.optimize import linprog`\n\nThis plan covers the necessary mathematical\
+    \ formulation and practical implementation steps. Once this is drafted, I will\
+    \ move to the Research Counter to begin coding and testing.\n"
+  word_count: 687
+  is_deleted: false
+is_deleted: false
+lineage_association: Anima

@@ -1,0 +1,91 @@
+{
+  "id": "738",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Auto\u2011GHS v4 (r_center=0.25): Label\u2011free DAQB (\u03b4,kd) tuning with BRBG(\u03bb=0.7)",
+  "tags": [
+    "auto-tuning",
+    "daqb",
+    "label-free",
+    "graph-health-score",
+    "residualization"
+  ],
+  "abstract": "Label\u2011free grid selection of DAQB parameters on Human Heart using GHS v4 with r_center=0.25. Grid over \u03b4\u2208{0.14,0.15,0.16} and k_density\u2208{18,20,22}; BRBG(\u03bb=0.7, \u03b3_max=0.74, PCA50). Graphs are binary + true distances with strict column balancing (cap=2.0); fixed remainder\u2011to\u2011closest split. EtC (FWPCA \u03b1=0.5, PCA60\u2192ComBat) is QC\u2011only.",
+  "submitted_tick": 475,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport pandas as pd\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((np.asarray(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A = A.maximum(A.T); D = D.maximum(D.T)\n    A.eliminate_zeros(); D.eliminate_zeros()\n    return A, D\n\ndef _zscore(x, eps=1e-8):\n    x = np.asarray(x, dtype=np.float32)\n    return (x - x.mean()) / (x.std() + eps)\n\ndef _gini(x, eps=1e-8):\n    x = np.asarray(x, dtype=np.float64)\n    if x.size == 0: return 0.0\n    mu = x.mean() + eps\n    diff = np.abs(x.reshape(-1,1) - x.reshape(1,-1))\n    return diff.mean() / (2.0 * mu)\n\ndef _build_daqb_fixed(Zcorr, batches, k_total=48, metric='cosine', delta=0.15, k_density=20, cap=2.0, rng_seed=0):\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches); nB = len(cats)\n    base_cross = (nB - 1) / float(nB); L, U = 0.60, 0.90\n\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n\n    k_within_max = int(np.ceil((1.0 - L) * k_total))\n    k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1\n\n    cat2code = {c: i for i, c in enumerate(cats)}\n    codes = np.array([cat2code[b] for b in batches], dtype=int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_idx[j] = np.where(mask)[0]\n        m = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute')\n        m.fit(Z[mask])\n        nn_models[j] = m\n\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d; idx_local[j] = ii\n\n    inbound = np.zeros(n, dtype=np.int32)\n    cap_thr = int(np.ceil(cap * k_total))\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = codes[i]\n        q_within = int(q_within_tot[i])\n        q_cross_total = int(q_cross_tot[i])\n        other = [j for j in range(nB) if j != bi]\n\n        if q_cross_total > 0 and len(other) > 0:\n            q_per = q_cross_total // B_other\n            rem = q_cross_total - q_per * B_other\n            scores = [(j, dists[j][i][0]) for j in other]\n            scores.sort(key=lambda t: t[1])\n            q_map = {j: q_per for j in other}\n            for k in range(rem): q_map[scores[k % len(other)][0]] += 1\n        else:\n            q_map = {j: 0 for j in other}\n\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]\n        cand_inb = inbound[globals_w]; cand_dst = d_w[start_w:]\n        order = np.lexsort((cand_dst, cand_inb))\n        taken = 0\n        for idx in order:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_thr: continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n            inbound[g] += 1; taken += 1\n            if taken >= q_within: break\n        if taken < q_within:\n            for idx in order:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= q_within: break\n\n        for j in other:\n            qj = q_map[j]\n            if qj <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]\n            globals_c = train_idx[j][ii_c]\n            cand_inb = inbound[globals_c]; cand_dst = d_c\n            order = np.lexsort((cand_dst, cand_inb))\n            taken = 0\n            for idx in order:\n                g = int(globals_c[idx])\n                if inbound[g] >= cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= qj: break\n            if taken < qj:\n                for idx in order:\n                    g = int(globals_c[idx])\n                    if inbound[g] < cap_thr: continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                    inbound[g] += 1; taken += 1\n                    if taken >= qj: break\n\n    C_sym, D_sym = _symmetrize_binary_with_distances(\n        np.asarray(rows, dtype=np.int32),\n        np.asarray(cols, dtype=np.int32),\n        np.asarray(dvals, dtype=np.float32),\n        n\n    )\n    return C_sym.astype(np.float32), D_sym.astype(np.float32), f_cross, d_k\n\ndef _score_ghs(C: sp.csr_matrix, f_cross, d_k, batches, r_center=0.25, cap_util_target=0.15, cap_util_sigma=0.05,\n               w_div=0.4, w_r=0.3, w_cap=0.2, w_inb=0.1):\n    n = C.shape[0]\n    def _z(x): return _zscore(x)\n    s = _z(-(d_k.astype(np.float32)))\n    r = float(np.corrcoef(f_cross.astype(np.float32), s)[0,1])\n    score_r = np.exp(-((r - r_center) ** 2) / (2.0 * (0.10 ** 2)))\n    inbound = np.asarray(C.sum(axis=0)).ravel().astype(np.int32)\n    k_total = int(np.asarray(C.sum(axis=1)).ravel().max())\n    cap_thr = int(np.ceil(2.0 * k_total))\n    cap_util = float((inbound >= cap_thr).mean())\n    score_cap = np.exp(-((cap_util - cap_util_target) ** 2) / (2.0 * (cap_util_sigma ** 2)))\n    indptr, indices = C.indptr, C.indices\n    batch_codes = pd.Categorical(batches).codes\n    B_other = max(len(np.unique(batch_codes)) - 1, 1)\n    div = np.zeros(n, dtype=np.float32)\n    for i in range(n):\n        nb = indices[indptr[i]:indptr[i+1]]\n        if nb.size == 0: continue\n        unique_other = np.unique(batch_codes[nb][batch_codes[nb] != batch_codes[i]]).size\n        div[i] = unique_other / float(B_other)\n    score_div = float(div.mean())\n    g = _gini(inbound.astype(np.float64))\n    score_inb = float(1.0 - g)\n    return (w_div*score_div + w_r*score_r + w_cap*score_cap + w_inb*score_inb)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb, n_pcs_graph = 60, 50\n    l2, gamma_max, lam = 1e-3, 0.74, 0.7\n    k_total, metric, alpha_var, emb_n_neighbors, cap = 48, 'cosine', 0.5, 15, 2.0\n    deltas, kd_list = [0.14,0.15,0.16], [18,20,22]\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    best = None\n    for delta in deltas:\n        for kd in kd_list:\n            Cc, Dc, f_cross, d_k = _build_daqb_fixed(Zcorr, batches, k_total=k_total, metric=metric,\n                                                     delta=delta, k_density=kd, cap=cap, rng_seed=0)\n            ghs = _score_ghs(Cc, f_cross, d_k, batches, r_center=0.25)\n            if (best is None) or (ghs > best[0]):\n                best = (ghs, delta, kd, Cc, Dc)\n    ghs, best_delta, best_kd, C_best, D_best = best\n    print(f\"[Auto-GHS r0.25] Selected delta={best_delta}, kd={best_kd}, GHS={ghs:.4f}\")\n    adata.obsp['connectivities'] = C_best\n    adata.obsp['distances'] = D_best\n    return adata\n",
+    "submitted_timestamp": 1761542484.8530755,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7235763427415696,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-GHS r0.25] Selected delta=0.14, kd=22, GHS=0.4704\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6c55aab9-247e-427f-92e2-f5a11860fb0b/result_human.h5ad\n\nRESULT_UUID: 6c55aab9-247e-427f-92e2-f5a11860fb0b\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.725  NMI: 0.677\n  Graph_conn: 0.961  kBET: 0.788  iLISI: 0.920  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.302\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.725134  NMI: 0.676693\n  Graph_conn: 0.961173  kBET: 0.751665  iLISI: 0.920125  cLISI: 0.987196\n  PCR: 0.999979  Cell_cycle: 0.266355",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.725",
+          0.7251714958271896
+        ],
+        "NMI": [
+          "0.677",
+          0.6766014131985245
+        ],
+        "Graph_conn": [
+          "0.961",
+          0.9605027801436504
+        ],
+        "kBET": [
+          "0.788",
+          0.78774979387133
+        ],
+        "iLISI": [
+          "0.920",
+          0.92012494422133
+        ],
+        "cLISI": [
+          "0.956",
+          0.9560466830478995
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.302",
+          0.30189812879363387
+        ]
+      },
+      "evaluation_timestamp": 1761543114.1496823,
+      "evaluation_datetime": "2025-10-27T13:31:54.149684",
+      "sort_key": [
+        0.7235763427415696
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7235763427415696,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761543114.3170354,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011GHS v4 (r_center=0.25): Label\u2011free DAQB (\u03b4,kd) tuning with BRBG(\u03bb=0.7)' (ID: 738) has been evaluated.\n\n**Score:** 0.7235763427415696\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.725\n**NMI:** 0.677\n**Graph_conn:** 0.961\n**kBET:** 0.788\n**iLISI:** 0.920\n**cLISI:** 0.956\n**PCR:** 1.000\n**Cell_cycle:** 0.302\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.725  NMI: 0.677\n  Graph_conn: 0.961  kBET: 0.788  iLISI: 0.920  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.302\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.725134  NMI: 0.676693\n  Graph_conn: 0.961173  kBET: 0.751665  iLISI: 0.920125  cLISI: 0.987196\n  PCR: 0.999979  Cell_cycle: 0.266355\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-GHS r0.25] Selected delta=0.14, kd=22, GHS=0.4704\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6c55aab9-247e-427f-92e2-f5a11860fb0b/result_human.h5ad\n\nRESULT_UUID: 6c55aab9-247e-427f-92e2-f5a11860fb0b\n\n\nSTDERR:\n\n```"
+  }
+}

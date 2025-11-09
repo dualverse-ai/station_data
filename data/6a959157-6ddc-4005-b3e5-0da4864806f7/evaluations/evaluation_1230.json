@@ -1,0 +1,91 @@
+{
+  "id": "1230",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "Mixing Shortfall H1: Budgeted Mutualization Symmetrizer (v2, self-contained)",
+  "tags": [
+    "sota",
+    "graph-theory",
+    "symmetrization",
+    "mixing-shortfall",
+    "bug-fix"
+  ],
+  "abstract": "This is a corrected version of experiment 1229, which failed due to an ImportError. This script is fully self-contained, including all necessary functions from the Praxis SOTA pipeline to avoid dependency issues. It tests the 'Budgeted Mutualization' algorithm, which replaces the default symmetrizer to prevent degree inflation, the hypothesized cause of catastrophic graph collapse (PCR=0).",
+  "submitted_tick": 875,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Inlined Code from 'praxis_core.py' ---\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\n# --- My Novel Symmetrization Function ---\ndef symmetrize_budgeted(rows, cols, dists, n, k_total):\n    print(f\"--- Running Budgeted Mutualization (k_total={k_total}) ---\")\n    A_directed = sp.coo_matrix((np.ones_like(dists), (rows, cols)), shape=(n, n)).tocsr()\n    D_directed = sp.coo_matrix((dists, (rows, cols)), shape=(n, n)).tocsr()\n    A_mutual = A_directed.multiply(A_directed.T)\n    A_oneway = A_directed - A_mutual\n    oneway_rows, oneway_cols = A_oneway.nonzero()\n    oneway_dists = np.array(D_directed[oneway_rows, oneway_cols]).flatten()\n    sorted_indices = np.argsort(oneway_dists)\n    initial_degrees = A_mutual.sum(axis=1).A.flatten()\n    budgets = np.maximum(0, k_total - initial_degrees)\n    A_final = A_mutual.tolil()\n    print(f\"Starting with {A_mutual.nnz // 2} mutual edges. Processing {len(sorted_indices)} one-way edges...\")\n    for idx in sorted_indices:\n        u, v = oneway_rows[idx], oneway_cols[idx]\n        if budgets[u] > 0 and budgets[v] > 0:\n            if A_final[u, v] == 0:\n                A_final[u, v] = 1\n                A_final[v, u] = 1\n                budgets[u] -= 1\n                budgets[v] -= 1\n    A_final = A_final.tocsr()\n    D_final = D_directed.maximum(D_directed.T)\n    A_final.eliminate_zeros()\n    D_final = D_final.multiply(A_final)\n    print(f\"Finished. Final graph has {A_final.nnz // 2} symmetric edges.\")\n    return A_final.astype(np.float32), D_final.astype(np.float32)\n\n# --- Inlined and Modified version of 'bbsg_density_adaptive.py' ---\ndef build_density_adaptive_bbsg_MODIFIED(Zcorr, batches, k_total, metric, delta, k_density, rng_seed):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute').fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr)\n    d_k = d_all[:, -1]\n    d_min, d_max = np.min(d_k), np.max(d_k)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    base_cross = (len(cats) - 1) / float(len(cats))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    batch_to_indices, nn_models = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn_models[j] = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute').fit(Zcorr[mask])\n    nn_dists, nn_idx_local = {}, {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr)\n        nn_dists[j], nn_idx_local[j] = d, ii\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        d_i, ii = nn_dists[bi][i], nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n        batch_scores = sorted([(j, nn_dists[j][i][0]) for j in other_batches], key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        if other_batches:\n            for k in range(rem): q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij, ii_j = nn_dists[j][i], nn_idx_local[j][i]\n            sel_j = min(q_map.get(j, 0), d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n    return symmetrize_budgeted(np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(dvals, dtype=np.float32), n, k_total)\n\n# --- Main Experiment Logic ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    alpha_g, n_pcs_graph, lam_override = 0.5, 50, 0.605\n    k_total, kdensity, delta = 50, 22, 0.10\n    \n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32)\n    \n    # Dummy embedding for compatibility\n    adata.obsm['X_emb'] = sc.pp.pca(Xd, n_comps=50)\n    \n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    Xw_graph = Xd * np.power(var_g, -0.5 * alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(0.74, float(lam_override) * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    \n    Cg, Dg = build_density_adaptive_bbsg_MODIFIED(Zcorr.astype(np.float32), batches, k_total, 'cosine', delta, kdensity, 0)\n    \n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761681675.2261758,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4583005664617835,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Budgeted Mutualization (k_total=50) ---\nStarting with 82147 mutual edges. Processing 835705 one-way edges...\nFinished. Final graph has 307325 symmetric edges.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/01ceb8db-b4f6-48e5-9a16-807707589bf5/result_human.h5ad\n\nRESULT_UUID: 01ceb8db-b4f6-48e5-9a16-807707589bf5\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.425  NMI: 0.645\n  Graph_conn: 0.894  kBET: 0.554  iLISI: 0.002  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.425167  NMI: 0.644817\n  Graph_conn: 0.895329  kBET: 0.532408  iLISI: 0.002455  cLISI: 0.997459\n  PCR: 0.000000  Cell_cycle: 0.305354",
+        "ASW_batch": [
+          "0.516",
+          0.5158370728664765
+        ],
+        "ASW_label": [
+          "0.208",
+          0.20782040493934487
+        ],
+        "ARI": [
+          "0.425",
+          0.4252448323891743
+        ],
+        "NMI": [
+          "0.645",
+          0.6447166666735439
+        ],
+        "Graph_conn": [
+          "0.894",
+          0.8935234108886432
+        ],
+        "kBET": [
+          "0.554",
+          0.5544450226741957
+        ],
+        "iLISI": [
+          "0.002",
+          0.0024549330640567155
+        ],
+        "cLISI": [
+          "0.991",
+          0.991276309298796
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.34768701182360406
+        ]
+      },
+      "evaluation_timestamp": 1761682014.862182,
+      "evaluation_datetime": "2025-10-29T04:06:54.862186",
+      "sort_key": [
+        0.4583005664617835
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4583005664617835,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761682014.8791058,
+    "version_notified": "original",
+    "message": "Your research submission 'Mixing Shortfall H1: Budgeted Mutualization Symmetrizer (v2, self-contained)' (ID: 1230) has been evaluated.\n\n**Score:** 0.4583005664617835\n**ASW_batch:** 0.516\n**ASW_label:** 0.208\n**ARI:** 0.425\n**NMI:** 0.645\n**Graph_conn:** 0.894\n**kBET:** 0.554\n**iLISI:** 0.002\n**cLISI:** 0.991\n**PCR:** 0.000\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.425  NMI: 0.645\n  Graph_conn: 0.894  kBET: 0.554  iLISI: 0.002  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.425167  NMI: 0.644817\n  Graph_conn: 0.895329  kBET: 0.532408  iLISI: 0.002455  cLISI: 0.997459\n  PCR: 0.000000  Cell_cycle: 0.305354\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Budgeted Mutualization (k_total=50) ---\nStarting with 82147 mutual edges. Processing 835705 one-way edges...\nFinished. Final graph has 307325 symmetric edges.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/01ceb8db-b4f6-48e5-9a16-807707589bf5/result_human.h5ad\n\nRESULT_UUID: 01ceb8db-b4f6-48e5-9a16-807707589bf5\n\n\nSTDERR:\n\n```"
+  }
+}

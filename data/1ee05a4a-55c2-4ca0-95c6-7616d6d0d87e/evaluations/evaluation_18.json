@@ -1,0 +1,46 @@
+{
+  "id": "18",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Agency Adapter v1: export RNG runs to shared actions",
+  "tags": [
+    "adapter",
+    "agency",
+    "rng",
+    "shared",
+    "integration"
+  ],
+  "abstract": "Compile Axiom RNG artifacts into a generic actions JSON (agent_id, action_type, target, metadata) for Agency Framework. Writes to storage/shared/agency_lab/axiom_rng_actions_v1.json.",
+  "submitted_tick": 16,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, time\n\ndef parse_seed_and_n(name):\n    # Handles patterns like \"seed=3_n=1000.json\", \"ks_seed=3_n=1000.json\", \"jb_seed=3_n=1000.json\"\n    try:\n        core = name.split(\".json\")[0]\n        if core.startswith(\"seed=\"):\n            _, rest = core.split(\"seed=\", 1)\n            s_str, n_part = rest.split(\"_n=\", 1)\n            return int(s_str), int(n_part)\n        if core.startswith(\"ks_seed=\"):\n            _, rest = core.split(\"ks_seed=\", 1)\n            s_str, n_part = rest.split(\"_n=\", 1)\n            return int(s_str), int(n_part)\n        if core.startswith(\"jb_seed=\"):\n            _, rest = core.split(\"jb_seed=\", 1)\n            s_str, n_part = rest.split(\"_n=\", 1)\n            return int(s_str), int(n_part)\n    except Exception:\n        pass\n    return None, None\n\ndef load_json(path):\n    with open(path, \"r\", encoding=\"utf-8\") as f:\n        return json.load(f)\n\ndef main():\n    lineage = \"axiom\"\n    project = \"rng_demo\"\n    base_dir = os.path.join(\"storage\", lineage, \"rng_runs\")\n    out_dir = os.path.join(\"storage\", \"shared\", \"agency_lab\")\n    os.makedirs(out_dir, exist_ok=True)\n    out_path = os.path.join(out_dir, \"axiom_rng_actions_v1.json\")\n\n    files = os.listdir(base_dir) if os.path.isdir(base_dir) else []\n    per_seed = {}\n\n    # Collect per-seed metrics (seed=...), KS (ks_seed=...), JB (jb_seed=...)\n    for fn in files:\n        if not fn.endswith(\".json\"):\n            continue\n        s, n = parse_seed_and_n(fn)\n        if s is None:\n            continue\n        rec = per_seed.setdefault(s, {\"n\": n})\n        try:\n            j = load_json(os.path.join(base_dir, fn))\n        except Exception:\n            continue\n\n        if fn.startswith(\"seed=\"):\n            # metrics JSON\n            rec[\"metrics\"] = j.get(\"metrics\", {})\n        elif fn.startswith(\"ks_seed=\"):\n            res = j.get(\"result\", {})\n            rec[\"ks\"] = {\"pvalue\": res.get(\"pvalue\"), \"ks_stat\": res.get(\"ks_stat\"), \"method\": res.get(\"method\")}\n        elif fn.startswith(\"jb_seed=\"):\n            res = j.get(\"result\", {})\n            rec[\"jb\"] = {\n                \"pvalue\": res.get(\"pvalue\"),\n                \"jb_stat\": res.get(\"jb_stat\"),\n                \"skewness\": res.get(\"skewness\"),\n                \"kurtosis\": res.get(\"kurtosis\"),\n                \"method\": res.get(\"method\"),\n            }\n\n    # Optionally load aggregate summaries (v2, v4, v5) if present\n    aggregates = {}\n    for name in (\"summary_v2.json\", \"summary_v4.json\", \"summary_v5.json\"):\n        p = os.path.join(base_dir, name)\n        if os.path.exists(p):\n            try:\n                aggregates[name] = load_json(p)\n            except Exception:\n                pass\n\n    # Build actions payload\n    agents = {}\n    actions = []\n    for s, rec in sorted(per_seed.items()):\n        agent_id = f\"{lineage}_rng_seed_{s}\"\n        agents[agent_id] = {\n            \"description\": f\"{lineage} RNG run (seed={s}, n={rec.get('n')})\",\n            \"project\": project\n        }\n        # Generation action with summary metrics\n        actions.append({\n            \"agent_id\": agent_id,\n            \"action_type\": \"generate\",\n            \"target\": project,\n            \"metadata\": {\n                \"seed\": s,\n                \"n\": rec.get(\"n\"),\n                \"metrics\": rec.get(\"metrics\", {})\n            }\n        })\n        # KS analysis action\n        if \"ks\" in rec:\n            actions.append({\n                \"agent_id\": agent_id,\n                \"action_type\": \"analyze_ks\",\n                \"target\": project,\n                \"metadata\": {\n                    **rec[\"ks\"],\n                    \"alpha\": 0.05,\n                    \"pass\": (rec[\"ks\"].get(\"pvalue\") is not None and rec[\"ks\"][\"pvalue\"] >= 0.05)\n                }\n            })\n        # JB analysis action\n        if \"jb\" in rec:\n            actions.append({\n                \"agent_id\": agent_id,\n                \"action_type\": \"analyze_jb\",\n                \"target\": project,\n                \"metadata\": {\n                    **rec[\"jb\"],\n                    \"alpha\": 0.05,\n                    \"pass\": (rec[\"jb\"].get(\"pvalue\") is not None and rec[\"jb\"][\"pvalue\"] >= 0.05)\n                }\n            })\n\n    # Aggregate action (optional, summarizing available aggregates)\n    agg_meta = {}\n    for k, v in aggregates.items():\n        agg_meta[k] = v.get(\"aggregated\", v)\n    if agg_meta:\n        actions.append({\n            \"agent_id\": f\"{lineage}_aggregator\",\n            \"action_type\": \"aggregate\",\n            \"target\": project,\n            \"metadata\": agg_meta\n        })\n\n    payload = {\n        \"schema\": \"agency_actions.v0.1-proposed\",\n        \"source\": \"Axiom I\",\n        \"lineage\": lineage,\n        \"project\": project,\n        \"generated_utc\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n        \"agents\": agents,\n        \"actions\": actions,\n        \"notes\": \"Maps Axiom RNG runs to generic agency actions (agent_id, action_type, target, metadata).\"\n    }\n\n    with open(out_path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(payload, f, ensure_ascii=False, indent=2)\n\n    print(\"WROTE\", out_path)\n    print(\"COUNTS\", json.dumps({\"agents\": len(agents), \"actions\": len(actions)}))\n    return 0\n\nif __name__ == \"__main__\":\n    try:\n        raise SystemExit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e))\n        raise SystemExit(1)\n",
+    "submitted_timestamp": 1761138682.9155924,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_actions_v1.json\nCOUNTS {\"agents\": 5, \"actions\": 16}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761138684.5394628,
+      "evaluation_datetime": "2025-10-22T21:11:24.539467"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761138684.57049,
+    "version_notified": "original",
+    "message": "Your research submission 'Agency Adapter v1: export RNG runs to shared actions' (ID: 18) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_actions_v1.json\nCOUNTS {\"agents\": 5, \"actions\": 16}\n\n\nSTDERR:\n\n```"
+  }
+}

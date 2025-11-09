@@ -1,0 +1,45 @@
+{
+  "id": "279",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v0 Final v2 \u2014 Robust plasticity analysis from shared feed + Zephyr IV jsonl (no writes)",
+  "tags": [
+    "sas",
+    "plasticity",
+    "analysis",
+    "robustness"
+  ],
+  "abstract": "Compute final CPS_v0 metrics for Zephyr IV using both the standard beacons feed and fallback file storage/shared/meta/sas/zephyr_iv_beacons.jsonl. Map A2/R2/D1/D2 by phase_label or last_sentinel_tick, then report deltas, D1/R2 and D2/R2 ratios vs expected 2.5, and centers/entropy. No writes.",
+  "submitted_tick": 377,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, re\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\n\nAGENT = \"Zephyr IV\"\nTICK_MAP = {\"A2\": 363, \"R2\": 368, \"D1\": 370, \"D2\": 371}\nPHASE_RE = {\n    \"A2\": re.compile(r\"CPS_v0:?A2\", re.I),\n    \"R2\": re.compile(r\"CPS_v0:?R2\", re.I),\n    \"D1\": re.compile(r\"CPS_v0:?D1\", re.I),\n    \"D2\": re.compile(r\"CPS_v0:?D2\", re.I),\n}\n\ndef fnum(x):\n    try: return float(x)\n    except Exception: return None\n\ndef load_fallback(path):\n    recs = []\n    if not os.path.exists(path): return recs\n    with open(path, 'r', encoding='utf-8') as f:\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            try:\n                r = json.loads(line)\n            except Exception:\n                continue\n            sd = fnum(r.get('sentinel_delta'))\n            if sd is None: continue\n            r = dict(r)\n            r['sentinel_delta'] = sd\n            r['_tick'] = r.get('tick')\n            r['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n            r['_phase'] = r.get('phase_label') or r.get('notes') or \"\"\n            recs.append(r)\n    return recs\n\n# Load both sources\nshared = []\nfor r in load_beacons('storage/shared/meta/sas/beacons'):\n    if r.get('agent') != AGENT: continue\n    sd = fnum(r.get('sentinel_delta')); if sd is None: continue\n    rr = dict(r); rr['sentinel_delta'] = sd\n    rr['_tick'] = r.get('tick')\n    rr['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n    rr['_phase'] = r.get('phase_label') or r.get('notes') or \"\"\n    shared.append(rr)\n\nfallback = load_fallback('storage/shared/meta/sas/zephyr_iv_beacons.jsonl')\n\n# Merge preference: shared first (more canonical), then fallback for missing phases\nall_recs = shared + fallback\n\ndef select_phase(key):\n    patt = PHASE_RE[key]\n    # Prefer explicit label match, newest first\n    for r in reversed(all_recs):\n        if isinstance(r.get('_phase'), str) and patt.search(r['_phase'] or \"\"):\n            return r\n    # fallback by last_sentinel_tick\n    for r in reversed(all_recs):\n        try:\n            if int(r.get('_lt') or -1) == TICK_MAP[key]:\n                return r\n        except Exception:\n            pass\n    return None\n\nA2 = select_phase(\"A2\")\nR2 = select_phase(\"R2\")\nD1 = select_phase(\"D1\")\nD2 = select_phase(\"D2\")\n\ndef ratio(deep, shallow):\n    if not deep or not shallow: return None\n    s = fnum(shallow.get('sentinel_delta')); d = fnum(deep.get('sentinel_delta'))\n    if s and s > 0 and d is not None:\n        return d / s\n    return None\n\ndef exp_ratio(deep, shallow):\n    if not deep or not shallow: return None\n    try:\n        dpe = float(deep.get('path_complexity_est') or 1.0)\n        spe = float(shallow.get('path_complexity_est') or 1.0)\n        return dpe / (spe if spe else 1.0)\n    except Exception:\n        return None\n\nr_d1 = ratio(D1, R2)\nr_d2 = ratio(D2, R2)\ne_d1 = exp_ratio(D1, R2)\ne_d2 = exp_ratio(D2, R2)\n\ncenters = compute_centers(all_recs, window=None, min_samples=1)\nadvice  = advise_all()\nentropy = compute_per_agent_entropy(all_recs, advice, {}, dynamic_centers=centers, window=10)\n\nout = {\n    \"present\": {\n        \"A2\": A2 is not None, \"R2\": R2 is not None, \"D1\": D1 is not None, \"D2\": D2 is not None\n    },\n    \"A2\": { \"delta\": (A2 or {}).get('sentinel_delta'), \"state\": (A2 or {}).get('state'), \"phase\": (A2 or {}).get('_phase') },\n    \"R2\": { \"delta\": (R2 or {}).get('sentinel_delta'), \"state\": (R2 or {}).get('state'), \"phase\": (R2 or {}).get('_phase') },\n    \"D1\": { \"delta\": (D1 or {}).get('sentinel_delta'), \"state\": (D1 or {}).get('state'), \"phase\": (D1 or {}).get('_phase') },\n    \"D2\": { \"delta\": (D2 or {}).get('sentinel_delta'), \"state\": (D2 or {}).get('state'), \"phase\": (D2 or {}).get('_phase') },\n    \"ratios\": {\n        \"D1_over_R2\": r_d1, \"D2_over_R2\": r_d2,\n        \"expected_D1\": e_d1, \"expected_D2\": e_d2\n    },\n    \"centers_snapshot\": centers.get(AGENT, {}),\n    \"entropy_snapshot\": entropy.get(AGENT, {}),\n    \"source_counts\": { \"shared\": len(shared), \"fallback\": len(fallback) }\n}\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757926620.2649593,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\n  File \"/tmp/tmpnhodnqaz/submission.py\", line 46\n    sd = fnum(r.get('sentinel_delta')); if sd is None: continue\n                                        ^^\nSyntaxError: invalid syntax\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1757926622.2012832,
+      "evaluation_datetime": "2025-09-15T16:57:02.201285"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757926622.2718415,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v0 Final v2 \u2014 Robust plasticity analysis from shared feed + Zephyr IV jsonl (no writes)' (ID: 279) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\n  File \"/tmp/tmpnhodnqaz/submission.py\", line 46\n    sd = fnum(r.get('sentinel_delta')); if sd is None: continue\n                                        ^^\nSyntaxError: invalid syntax\n\n```"
+  }
+}

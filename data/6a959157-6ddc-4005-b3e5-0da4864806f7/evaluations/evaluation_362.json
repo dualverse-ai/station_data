@@ -1,0 +1,92 @@
+{
+  "id": "362",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Dual BRBG + BRS-Emb (\u03bb=0.8): Conservative Rank-to-Normal Blending in Embedding Path",
+  "tags": [
+    "dual",
+    "combat",
+    "hvg",
+    "rank-normal",
+    "whitening",
+    "pbve"
+  ],
+  "abstract": "Apply batchwise rank-to-normal on HVGs before ComBat in the Dual BRBG embedding path, blended with original values (\u03bb=0.8) to avoid over-normalization. Keep graph unchanged. Tests whether conservative BRS helps under a strong representation.",
+  "submitted_tick": 203,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom scipy.special import ndtri\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _ensure_dense(X):\n    return X.A if sp.issparse(X) else X\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    return Zhat\n\ndef _build_balanced_knn(Z: np.ndarray, batches: np.ndarray, k_total=48, metric='cosine'):\n    batches = np.asarray(batches)\n    uniq = np.unique(batches)\n    n = Z.shape[0]\n    k_pb = max(1, int(np.ceil(k_total / max(1, uniq.size))))\n    pairs_min_dist = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k = min(k_pb + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k, metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k, return_distance=True)\n        neigh_global = idx_train[inds]\n        for i in range(n):\n            g = neigh_global[i]; di = dists[i]\n            mask = g != i\n            g = g[mask][:k_pb]; di = di[mask][:k_pb]\n            for j, d in zip(g, di):\n                if i == j: continue\n                a, c = (i, j) if i < j else (j, i)\n                prev = pairs_min_dist.get((a, c))\n                if (prev is None) or (d < prev):\n                    pairs_min_dist[(a, c)] = float(d)\n    from scipy.sparse import coo_matrix\n    if not pairs_min_dist: return None, None\n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs_min_dist.items():\n        rows += [i, j]; cols += [j, i]; dist_data += [d, d]\n    D = coo_matrix((dist_data, (rows, cols)), shape=(n, n)).tocsr()\n    C = D.copy(); C.data[:] = 1.0\n    return C.tocsr(), D.tocsr()\n\ndef _brs_blend_inplace(Xd, batches, hv_mask, lam=0.8):\n    batches = np.asarray(batches)\n    hv_idx = np.where(hv_mask)[0]\n    Xh = Xd[:, hv_idx]\n    Xh_brs = Xh.copy()\n    for b in np.unique(batches):\n        idx = np.where(batches == b)[0]\n        if idx.size <= 1:\n            continue\n        Xb = Xh[idx, :]\n        # ranks per column (stable)\n        order = np.argsort(Xb, axis=0, kind='mergesort')\n        ranks = np.empty_like(order, dtype=np.int32)\n        cols = np.broadcast_to(np.arange(Xb.shape[1]), order.shape)\n        ranks[order, cols] = np.arange(Xb.shape[0])[:, None]\n        u = (ranks + 0.5) / float(Xb.shape[0])\n        Z = ndtri(u)\n        Xh_brs[idx, :] = Z\n    # blend with original\n    Xh_new = lam * Xh_brs + (1.0 - lam) * Xh\n    Xd[:, hv_idx] = Xh_new\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb = 64\n    n_pcs_graph = 50\n    tau_whiten = 0.95\n    alpha_pb = 0.5\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam_brs = 0.8\n    lam_r2 = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding: BRS (\u03bb=0.8) on HVGs \u2192 ComBat \u2192 PCA64 \u2192 whitening \u2192 PBVE\n    Xd = _ensure_dense(adata.X)\n    _brs_blend_inplace(Xd, batches=batches, hv_mask=hv, lam=lam_brs)\n    adata.X = Xd\n\n    sc.pp.combat(adata, key='batch')\n    adata.var['highly_variable'] = hv\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = adata.obsm['X_pca']\n    Zc = Z - Z.mean(axis=0, keepdims=True)\n    C = (Zc.T @ Zc) / max(1, Zc.shape[0] - 1)\n    S, U = np.linalg.eigh(C); S = np.maximum(S, 0.0)\n    S_pow = np.power(S + 1e-8, -0.5 * tau_whiten)\n    T = (U * S_pow) @ U.T\n    Zw = Zc @ T\n\n    var_all = Zw.var(axis=0, ddof=1) + 1e-8\n    Zemb = Zw.copy()\n    for b in np.unique(batches):\n        idx = (batches == b)\n        Zb = Zw[idx, :]\n        var_b = Zb.var(axis=0, ddof=1) + 1e-8\n        s = np.power(var_all / var_b, 0.5 * alpha_pb)\n        Zemb[idx, :] = Zb * s\n\n    adata.obsm['X_emb'] = Zemb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # Graph: PCA50 \u2192 adaptive residualization \u2192 equal-quotas balanced kNN\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam_r2 * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = _build_balanced_knn(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n\n    return adata\n",
+    "submitted_timestamp": 1761460412.8213227,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6643653301863738,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/430a69c2-f141-46ac-ab39-850f492069fb/result_human.h5ad\n\nRESULT_UUID: 430a69c2-f141-46ac-ab39-850f492069fb\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.860  ASW_label: 0.153  ARI: 0.365  NMI: 0.505\n  Graph_conn: 0.946  kBET: 0.889  iLISI: 0.928  cLISI: 0.924\n  PCR: 0.999  Cell_cycle: 0.075\n\nRaw Scores (before normalization):\n  ASW_batch: 0.921092  ASW_label: 0.499951  ARI: 0.364680  NMI: 0.505420\n  Graph_conn: 0.946582  kBET: 0.846608  iLISI: 0.927868  cLISI: 0.977815\n  PCR: 0.998731  Cell_cycle: 0.073372",
+        "ASW_batch": [
+          "0.860",
+          0.8603475350278642
+        ],
+        "ASW_label": [
+          "0.153",
+          0.15306244955685167
+        ],
+        "ARI": [
+          "0.365",
+          0.36476614047351696
+        ],
+        "NMI": [
+          "0.505",
+          0.505280342158937
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9456598972518836
+        ],
+        "kBET": [
+          "0.889",
+          0.8887763029876234
+        ],
+        "iLISI": [
+          "0.928",
+          0.9278678106132826
+        ],
+        "cLISI": [
+          "0.924",
+          0.9238423076115523
+        ],
+        "PCR": [
+          "0.999",
+          0.998730742293088
+        ],
+        "Cell_cycle": [
+          "0.075",
+          0.0753197738891382
+        ]
+      },
+      "evaluation_timestamp": 1761460971.7824113,
+      "evaluation_datetime": "2025-10-26T14:42:51.782412",
+      "sort_key": [
+        0.6643653301863738
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6643653301863738,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761460971.8575926,
+    "version_notified": "original",
+    "message": "Your research submission 'Dual BRBG + BRS-Emb (\u03bb=0.8): Conservative Rank-to-Normal Blending in Embedding Path' (ID: 362) has been evaluated.\n\n**Score:** 0.6643653301863738\n**ASW_batch:** 0.860\n**ASW_label:** 0.153\n**ARI:** 0.365\n**NMI:** 0.505\n**Graph_conn:** 0.946\n**kBET:** 0.889\n**iLISI:** 0.928\n**cLISI:** 0.924\n**PCR:** 0.999\n**Cell_cycle:** 0.075\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.860  ASW_label: 0.153  ARI: 0.365  NMI: 0.505\n  Graph_conn: 0.946  kBET: 0.889  iLISI: 0.928  cLISI: 0.924\n  PCR: 0.999  Cell_cycle: 0.075\n\nRaw Scores (before normalization):\n  ASW_batch: 0.921092  ASW_label: 0.499951  ARI: 0.364680  NMI: 0.505420\n  Graph_conn: 0.946582  kBET: 0.846608  iLISI: 0.927868  cLISI: 0.977815\n  PCR: 0.998731  Cell_cycle: 0.073372\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/430a69c2-f141-46ac-ab39-850f492069fb/result_human.h5ad\n\nRESULT_UUID: 430a69c2-f141-46ac-ab39-850f492069fb\n\n\nSTDERR:\n\n```"
+  }
+}

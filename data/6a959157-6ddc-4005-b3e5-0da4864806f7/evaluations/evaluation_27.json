@@ -1,0 +1,91 @@
+{
+  "id": "27",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Manual Combat Empirical Bayes Batch Integration",
+  "tags": [
+    "baseline",
+    "combat",
+    "empirical-bayes",
+    "embedding",
+    "manual-implementation"
+  ],
+  "abstract": "This submission implements the Combat (ComBat) empirical Bayes batch correction algorithm from scratch, closely following the provided system baseline. It performs normalization, log-transformation, designs a batch effects matrix, and iteratively estimates additive and multiplicative batch effect parameters. The data is then adjusted, and a PCA embedding is computed from the corrected expression matrix, providing an integrated representation.",
+  "submitted_tick": 15,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy import stats\nfrom scipy.sparse import csr_matrix, issparse\nimport warnings\n\n\ndef _aprior(delta_hat):\n    \"\"\"Calculate a prior for inverse gamma distribution.\"\"\"\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8  # Avoid division by zero\n    return (2 * s2 + m**2) / s2\n\n\ndef _bprior(delta_hat):\n    \"\"\"Calculate b prior for inverse gamma distribution.\"\"\"\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8  # Avoid division by zero\n    return (m * s2 + m**3) / s2\n\n\ndef _it_sol(s_data, g_hat, d_hat, g_bar, t2, a, b, conv=0.0001):\n    \"\"\"\n    Iteratively compute the conditional posterior means for gamma and delta.\n\n    This is the core of the empirical Bayes framework - gamma and delta\n    depend on each other, so we iterate until convergence.\n    \"\"\"\n    n = (~np.isnan(s_data)).sum(axis=1)\n    g_old = g_hat.copy()\n    d_old = d_hat.copy()\n\n    change = 1\n    count = 0\n    max_iter = 200\n\n    while change > conv and count < max_iter:\n        # Update gamma (additive effect)\n        with warnings.catch_warnings():\n            warnings.simplefilter(\"ignore\", RuntimeWarning) # Ignore division by zero/nan in this specific line\n            g_new = (t2 * n * g_hat + d_old * g_bar) / (t2 * n + d_old)\n            g_new = np.nan_to_num(g_new, nan=0.0) # Handle potential NaN from division\n\n        # Update delta (multiplicative effect)\n        sum2 = s_data - g_new.reshape((g_new.shape[0], 1)) @ np.ones((1, s_data.shape[1]))\n        sum2 = sum2**2\n        sum2 = sum2.sum(axis=1)\n        d_new = (0.5 * sum2 + b) / (n / 2.0 + a - 1.0)\n        d_new = np.nan_to_num(d_new, nan=0.0) # Handle potential NaN from division\n\n\n        # Check convergence\n        # Ensure stability by adding epsilon to denominator\n        change = max(\n            (np.abs(g_new - g_old) / (np.abs(g_old) + 1e-8)).max(),\n            (np.abs(d_new - d_old) / (np.abs(d_old) + 1e-8)).max()\n        )\n\n        g_old = g_new\n        d_old = d_new\n        count += 1\n\n    return g_new, d_new\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Manual implementation of Combat batch integration using the exact\n    scanpy algorithm, generating a PCA embedding from corrected data.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix)\n            - adata.obs['batch']: Batch labels\n            - adata.var['feature_name']: Gene names\n            - adata.uns['dataset_id']: Dataset identifier\n\n    Returns:\n        AnnData with:\n            - adata.obsm['X_emb']: PCA embedding from batch-corrected data\n    \"\"\"\n\n    # Normalize raw counts (Combat standard preprocessing)\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # Convert to dense array for Combat calculations\n    if issparse(adata.X):\n        data = adata.X.toarray()\n    else:\n        data = adata.X.copy()\n\n    # Transpose to genes x samples (Combat convention)\n    data = data.T\n\n    # Get batch information\n    batch_labels = adata.obs['batch'].values\n    unique_batches = np.unique(batch_labels)\n    n_batches_total = len(unique_batches)\n    n_genes, n_samples = data.shape\n\n    # Create batch design matrix (one-hot encoding)\n    batch_design = np.zeros((n_samples, n_batches_total))\n    batch_info = []\n    for i, batch in enumerate(unique_batches):\n        batch_mask = batch_labels == batch\n        batch_indices = np.where(batch_mask)[0]\n        batch_design[batch_indices, i] = 1\n        batch_info.append(batch_indices)\n\n    n_batches = np.array([len(indices) for indices in batch_info])\n\n    # Standardize data across genes\n    # Calculate batch means and variances\n    B_hat = np.dot(batch_design.T, batch_design)\n    # Handle singular matrix by adding a small diagonal to avoid linalg.inv errors\n    B_hat_inv = np.linalg.inv(B_hat + np.eye(B_hat.shape[0]) * 1e-8)\n    B_hat_pseudo_inv = np.dot(B_hat_inv, batch_design.T)\n\n\n    # Calculate grand mean and batch means\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = np.dot(B_hat_pseudo_inv, data.T).T\n\n    # Calculate pooled variance\n    var_pooled = np.zeros(n_genes)\n    for i, batch_indices in enumerate(batch_info):\n        batch_data = data[:, batch_indices]\n        batch_mean = batch_means[:, i:i+1]\n        diff = batch_data - batch_mean\n        var_pooled += np.sum(diff**2, axis=1)\n\n    with warnings.catch_warnings():\n        warnings.simplefilter(\"ignore\", RuntimeWarning)\n        var_pooled = var_pooled / (n_samples - n_batches_total)\n        var_pooled = np.nan_to_num(var_pooled, nan=1e-8) # Ensure no division by zero later\n\n    # Standardize the data\n    stand_mean = np.dot(grand_mean, np.ones((1, n_samples)))\n    s_data = np.zeros_like(data)\n\n    for i, batch_indices in enumerate(batch_info):\n        batch_data = data[:, batch_indices]\n        batch_mean = batch_means[:, i:i+1]\n        # Ensure var_pooled elements are positive before sqrt\n        safe_var_pooled = np.maximum(var_pooled[:, np.newaxis], 1e-8)\n        s_data[:, batch_indices] = (batch_data - batch_mean) / np.sqrt(safe_var_pooled)\n\n\n    # Fit L/S model and find priors\n    # First estimates\n    gamma_hat = np.dot(np.linalg.inv(np.dot(batch_design.T, batch_design) + np.eye(batch_design.shape[1]) * 1e-8),\n                      np.dot(batch_design.T, s_data.T)).T\n\n    delta_hat = []\n    for batch_indices in batch_info:\n        # ddof=1 for sample variance\n        batch_var = np.var(s_data[:, batch_indices], axis=1, ddof=1)\n        # Replace 0s or NaNs from empty batches/no variance with a small epsilon\n        batch_var = np.nan_to_num(batch_var, nan=1e-8)\n        batch_var = np.maximum(batch_var, 1e-8)\n        delta_hat.append(batch_var)\n\n    # Find priors\n    gamma_bar = np.mean(gamma_hat, axis=1)\n    t2 = np.var(gamma_hat, axis=1)\n\n    a_prior = [_aprior(d) for d in delta_hat]\n    b_prior = [_bprior(d) for d in delta_hat]\n\n    # Find parametric adjustments using iterative solution\n    gamma_star = []\n    delta_star = []\n\n    for i, batch_indices in enumerate(batch_info):\n        gamma, delta = _it_sol(\n            s_data[:, batch_indices],\n            gamma_hat[:, i],\n            delta_hat[i],\n            gamma_bar,\n            t2,\n            a_prior[i],\n            b_prior[i]\n        )\n        gamma_star.append(gamma)\n        delta_star.append(delta)\n\n    gamma_star = np.array(gamma_star).T\n    delta_star = np.array(delta_star).T\n\n    # Adjust data\n    bayesdata = s_data.copy()\n\n    for j, batch_indices in enumerate(batch_info):\n        dsq = np.sqrt(np.maximum(delta_star[:, j], 1e-8)) # Ensure positive values for sqrt\n        dsq = dsq.reshape((len(dsq), 1))\n        denom = np.dot(dsq, np.ones((1, n_batches[j])))\n\n        batch_gamma = gamma_star[:, j].reshape(-1, 1)\n        numer = bayesdata[:, batch_indices] - batch_gamma @ np.ones((1, n_batches[j]))\n\n        bayesdata[:, batch_indices] = numer / (denom + 1e-8) # Add epsilon to denom to prevent division by zero\n\n    # Scale back and add mean\n    vpsq = np.sqrt(np.maximum(var_pooled, 1e-8)).reshape((len(var_pooled), 1)) # Ensure positive values for sqrt\n    bayesdata = bayesdata * np.dot(vpsq, np.ones((1, n_samples))) + stand_mean\n\n    # Transpose back to samples x genes\n    X_corrected = bayesdata.T\n\n    # Handle any NaN or infinite values\n    X_corrected = np.nan_to_num(X_corrected, nan=0.0, posinf=0.0, neginf=0.0)\n\n    # Create temporary AnnData for PCA computation\n    temp_adata = ad.AnnData(X=X_corrected)\n    temp_adata.obs_names = adata.obs_names\n    temp_adata.var_names = adata.var_names\n\n    # Compute PCA on corrected data (default 50 components)\n    n_pcs = min(50, temp_adata.n_vars - 1, temp_adata.n_obs - 1)\n    sc.pp.pca(temp_adata, n_comps=n_pcs)\n\n    # Create output AnnData with embedding\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'combat_manual',\n            'combat_params': {\n                'n_batches': n_batches_total,\n                'batch_sizes': n_batches.tolist(),\n                'empirical_bayes': True,\n                'parametric': True,\n                'iterative_solver': True,\n                'embedding_components': n_pcs\n            }\n        },\n        obsm={\n            'X_emb': temp_adata.obsm['X_pca']\n        }\n    )\n\n    return output\n",
+    "submitted_timestamp": 1761393068.423078,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5893111228438687,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/5bbc1f66-fb7c-42bc-b5b9-9aca781f3fdc/result_human.h5ad\n\nRESULT_UUID: 5bbc1f66-fb7c-42bc-b5b9-9aca781f3fdc\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.493  NMI: 0.683\n  Graph_conn: 0.885  kBET: 0.601  iLISI: 0.033  cLISI: 0.988\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832855  ASW_label: 0.540153  ARI: 0.492866  NMI: 0.682941\n  Graph_conn: 0.887081  kBET: 0.576275  iLISI: 0.032724  cLISI: 0.996470\n  PCR: 1.000000  Cell_cycle: 0.284674",
+        "ASW_batch": [
+          "0.664",
+          0.6644721940675564
+        ],
+        "ASW_label": [
+          "0.223",
+          0.22258533339801198
+        ],
+        "ARI": [
+          "0.493",
+          0.49293435984966316
+        ],
+        "NMI": [
+          "0.683",
+          0.6828509645159148
+        ],
+        "Graph_conn": [
+          "0.885",
+          0.8851331229936013
+        ],
+        "kBET": [
+          "0.601",
+          0.601122780545007
+        ],
+        "iLISI": [
+          "0.033",
+          0.03272395051503859
+        ],
+        "cLISI": [
+          "0.988",
+          0.9878820346555348
+        ],
+        "PCR": [
+          "1.000",
+          0.999999867097547
+        ],
+        "Cell_cycle": [
+          "0.323",
+          0.32340662080081295
+        ]
+      },
+      "evaluation_timestamp": 1761393475.3229666,
+      "evaluation_datetime": "2025-10-25T19:57:55.322968",
+      "sort_key": [
+        0.5893111228438687
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5893111228438687,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761393475.3358629,
+    "version_notified": "original",
+    "message": "Your research submission 'Manual Combat Empirical Bayes Batch Integration' (ID: 27) has been evaluated.\n\n**Score:** 0.5893111228438687\n**ASW_batch:** 0.664\n**ASW_label:** 0.223\n**ARI:** 0.493\n**NMI:** 0.683\n**Graph_conn:** 0.885\n**kBET:** 0.601\n**iLISI:** 0.033\n**cLISI:** 0.988\n**PCR:** 1.000\n**Cell_cycle:** 0.323\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.493  NMI: 0.683\n  Graph_conn: 0.885  kBET: 0.601  iLISI: 0.033  cLISI: 0.988\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832855  ASW_label: 0.540153  ARI: 0.492866  NMI: 0.682941\n  Graph_conn: 0.887081  kBET: 0.576275  iLISI: 0.032724  cLISI: 0.996470\n  PCR: 1.000000  Cell_cycle: 0.284674\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/5bbc1f66-fb7c-42bc-b5b9-9aca781f3fdc/result_human.h5ad\n\nRESULT_UUID: 5bbc1f66-fb7c-42bc-b5b9-9aca781f3fdc\n\n\nSTDERR:\n\n```"
+  }
+}

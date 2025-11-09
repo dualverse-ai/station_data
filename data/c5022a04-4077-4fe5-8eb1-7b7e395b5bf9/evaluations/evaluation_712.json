@@ -1,0 +1,46 @@
+{
+  "id": "712",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "WarpedLattice v4: Reduced Dimensionality with Affine Warp",
+  "tags": [
+    "lattice",
+    "generative",
+    "meta-optimization",
+    "differential-evolution",
+    "dimensionality-reduction"
+  ],
+  "abstract": "Previous WarpedLattice experiments showed the paradigm is viable but inefficient, getting stuck in low-quality optima. The 12-dimensional parameter space is likely too large and complex for the meta-optimizer to search effectively. This submission tests a dimensionality reduction strategy by replacing the 8-parameter quadratic warp with a 6-parameter affine transformation. By searching a simpler, more structured 8-dimensional space (2 lattice + 6 affine params), this experiment aims to achieve a more efficient search and a significantly better score.",
+  "submitted_tick": 439,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nfrom scipy.optimize import differential_evolution\n\nsys.path.append('storage/praxis')\nfrom asn_utils import solve_radii_lp_with_duals\n# Note: The v2 lattice utils are general enough and do not need to be replaced.\n\nN_CIRCLES = 32\nEVAL_CACHE = {}\n\ndef create_packing_from_affine_theta(theta):\n    \"\"\"\n    Generates centers from a simplified 8D theta for an affine warp.\n    theta = [scale, base_rotation, tx, ty, sx, sy, shear, rot]\n    \"\"\"\n    scale, base_rotation, tx, ty, sx, sy, shear, rot = theta\n    \n    # Generate base lattice\n    v1 = np.array([scale, 0])\n    v2 = np.array([scale * 0.5, scale * np.sqrt(3) / 2])\n    R_base = np.array([[np.cos(base_rotation), -np.sin(base_rotation)],\n                       [np.sin(base_rotation), np.cos(base_rotation)]])\n    v1_rot = R_base @ v1\n    v2_rot = R_base @ v2\n    \n    points = []\n    for i in range(-15, 16):\n        for j in range(-15, 16):\n            points.append(i * v1_rot + j * v2_rot + 0.5)\n    base_points = np.array(points)\n\n    dists = np.linalg.norm(base_points - 0.5, axis=1)\n    central_indices = np.argsort(dists)[:N_CIRCLES]\n    initial_centers = base_points[central_indices]\n\n    # Apply affine transformation\n    centers_c = initial_centers - 0.5 # Center for transformation\n    \n    R_affine = np.array([[np.cos(rot), -np.sin(rot)], [np.sin(rot), np.cos(rot)]])\n    S_shear = np.array([[1, shear], [0, 1]])\n    S_scale = np.diag([sx, sy])\n    \n    transformed_centers_c = (R_affine @ S_shear @ S_scale @ centers_c.T).T\n    \n    final_centers = transformed_centers_c + 0.5 + np.array([tx, ty])\n    return final_centers\n\ndef objective_function(theta):\n    theta_key = tuple(theta)\n    if theta_key in EVAL_CACHE: return EVAL_CACHE[theta_key]\n\n    centers = create_packing_from_affine_theta(theta)\n\n    if np.any(centers > 1.0) or np.any(centers < 0.0):\n        violations = np.maximum(0, centers - 1.0) + np.maximum(0, -centers)\n        penalty = 1000.0 * np.sum(violations**2)\n        EVAL_CACHE[theta_key] = penalty\n        return penalty\n    \n    lp_results = solve_radii_lp_with_duals(centers)\n    score = np.sum(lp_results[\"radii\"]) if lp_results and lp_results[\"radii\"] is not None else -1.0\n    neg_score = -score\n    EVAL_CACHE[theta_key] = neg_score\n    return neg_score\n\ndef construct_packing() -> tuple:\n    bounds = [\n        (0.15, 0.25),      # scale\n        (0, np.pi/12),   # base_rotation\n        (-0.1, 0.1),     # tx\n        (-0.1, 0.1),     # ty\n        (0.8, 1.2),      # sx\n        (0.8, 1.2),      # sy\n        (-0.2, 0.2),     # shear\n        (-np.pi/12, np.pi/12), # rot\n    ]\n\n    result = differential_evolution(\n        objective_function, bounds=bounds, maxiter=200, popsize=20,\n        seed=42, workers=-1, polish=False\n    )\n\n    best_theta = result.x\n    final_centers = np.clip(create_packing_from_affine_theta(best_theta), 0.0, 1.0)\n    \n    lp_results = solve_radii_lp_with_duals(final_centers)\n    final_radii = lp_results[\"radii\"] if lp_results else np.full((N_CIRCLES,), 0.01)\n    \n    return final_centers, final_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760913337.0680647,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5828340712904327,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/scipy/optimize/_differentialevolution.py:487: UserWarning: differential_evolution: the 'workers' keyword has overridden updating='immediate' to updating='deferred'\n  with DifferentialEvolutionSolver(func, bounds, args=args,\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.582834",
+      "evaluation_timestamp": 1760913341.1401646,
+      "evaluation_datetime": "2025-10-20T06:35:41.140167"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5828340712904327,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760913341.1647606,
+    "version_notified": "original",
+    "message": "Your research submission 'WarpedLattice v4: Reduced Dimensionality with Affine Warp' (ID: 712) has been evaluated.\n\n**Score:** 2.5828340712904327\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.582834\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/scipy/optimize/_differentialevolution.py:487: UserWarning: differential_evolution: the 'workers' keyword has overridden updating='immediate' to updating='deferred'\n  with DifferentialEvolutionSolver(func, bounds, args=args,\n\n```"
+  }
+}

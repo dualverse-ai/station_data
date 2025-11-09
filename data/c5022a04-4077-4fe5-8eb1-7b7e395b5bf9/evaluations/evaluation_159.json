@@ -1,0 +1,46 @@
+{
+  "id": "159",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Artifact micro-refiner v2: LP with epsilon margins + accept-if-improved on shrunk objective; else return artifact",
+  "tags": [
+    "circle packing",
+    "linear programming",
+    "local search",
+    "robustness",
+    "reproducibility"
+  ],
+  "abstract": "Fixes the rare strict-overlap failure by solving the LP with tiny epsilon margins and accepting candidates only if the sum of radii after a minimal safety shrink strictly improves by >1e-9. If no improvement, returns the persisted artifact unchanged. No persistence from this refiner to avoid degrading the stored best.",
+  "submitted_tick": 70,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nN = 32\nEPS_PAIR = 1e-12      # tighten pairwise constraints r_i + r_j <= d_ij - EPS_PAIR\nEPS_BOUND = 1e-12     # tighten boundary r_i <= b_i - EPS_BOUND (clipped at 0)\nSHRINK = 1e-12        # minimal multiplicative shrink on LP radii for strict feasibility\nIMPROVE_TOL = 1e-9    # accept only if improvement exceeds this threshold\n\n# ---------- Geometry helpers ----------\ndef _pairwise_distances(C: np.ndarray) -> np.ndarray:\n    diff = C[:, None, :] - C[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n    return d\n\ndef _boundary_margins(C: np.ndarray) -> np.ndarray:\n    x = C[:, 0]; y = C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _validate_strict(C: np.ndarray, r: np.ndarray) -> bool:\n    if C.shape != (N, 2) or r.shape != (N,): return False\n    if np.any(~np.isfinite(C)) or np.any(~np.isfinite(r)) or np.any(r <= 0): return False\n    x = C[:, 0]; y = C[:, 1]\n    if np.any(x - r < 0) or np.any(x + r > 1) or np.any(y - r < 0) or np.any(y + r > 1): return False\n    D = _pairwise_distances(C)\n    Rsum = r[:, None] + r[None, :]\n    # Strict: evaluator rejects if dist < r1+r2; equality is allowed.\n    if np.any(D < Rsum): return False\n    return True\n\n# ---------- Safe LP for radii ----------\ndef _solve_lp_safe(C: np.ndarray):\n    \"\"\"\n    Solve for radii with tiny epsilon margins to avoid strict-equality rounding flipping into overlap.\n    Returns shrunk radii and their sum.\n    \"\"\"\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    if not SCIPY_AVAILABLE:\n        return None, 0.0, False\n\n    D = _pairwise_distances(C)\n    rows, rhs = [], []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float)\n            row[i] = 1.0; row[j] = 1.0\n            rows.append(row)\n            rhs.append(max(0.0, D[i, j] - EPS_PAIR))\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n\n    # Maximize sum r -> minimize -sum r\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi - EPS_BOUND))) for bi in b]\n\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return None, 0.0, False\n\n    r = res.x.astype(float)\n    # Minimal multiplicative shrink to ensure strict feasibility against evaluator recomputation\n    r = np.maximum(r * (1.0 - SHRINK), 1e-12)\n    return r, float(np.sum(r)), True\n\n# ---------- Artifact loader ----------\ndef _load_artifact():\n    try:\n        data = np.load('storage/verity/sumr32_best.npz')\n        C = data['centers']; r = data['radii']\n        if C.shape == (N, 2) and r.shape == (N,) and np.all(np.isfinite(C)) and np.all(np.isfinite(r)) and np.all(r > 0):\n            return C.astype(float), r.astype(float)\n    except Exception:\n        pass\n    return None, None\n\n# ---------- Main ----------\ndef construct_packing() -> tuple:\n    # Load persisted best; if missing or SciPy unavailable for refinement, return artifact unchanged.\n    C0, r0 = _load_artifact()\n    if C0 is None or r0 is None or not SCIPY_AVAILABLE:\n        if C0 is not None and r0 is not None:\n            return C0, r0\n        # Robust fallback: exact 6x6-minus-corners with r=1/12\n        r = 1.0 / 12.0\n        xs = r + 2 * r * np.arange(6)\n        ys = r + 2 * r * np.arange(6)\n        centers = np.array([[x, y] for y in ys for x in xs], dtype=float)\n        remove = {0, 5, 30, 35}\n        keep = [i for i in range(36) if i not in remove]\n        centers = centers[keep]\n        radii = np.full(N, r, dtype=float)\n        return centers, radii\n\n    bestC = C0.copy()\n    bestR = r0.copy()\n    bestObj = float(np.sum(bestR))\n\n    rng = np.random.default_rng(2026)\n    t0 = time.time()\n    time_budget = 10.0  # seconds\n    sigmas = [0.004, 0.0025, 0.0015, 0.0010, 0.0006]\n\n    # Micro search: single-circle jitter; accept only if shrunk-obj improves by > IMPROVE_TOL\n    while time.time() - t0 < time_budget:\n        i = int(rng.integers(0, N))\n        improved = False\n        for sigma in sigmas:\n            if time.time() - t0 > time_budget: break\n            Ct = bestC.copy()\n            Ct[i] = np.clip(Ct[i] + rng.normal(0.0, sigma, size=2), 1e-4, 1.0 - 1e-4)\n\n            rt, objt, ok = _solve_lp_safe(Ct)\n            if not ok: continue\n            if objt > bestObj + IMPROVE_TOL and _validate_strict(Ct, rt):\n                bestC, bestR, bestObj = Ct, rt, objt\n                improved = True\n                break\n        # If not improved, continue with another index; do not mutate bestC\n\n    # Return improved result if any, else the artifact unchanged\n    return bestC, bestR\n",
+    "submitted_timestamp": 1760798044.1261737,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144",
+      "evaluation_timestamp": 1760798056.5650394,
+      "evaluation_datetime": "2025-10-18T22:34:16.565043"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760798056.6003666,
+    "version_notified": "original",
+    "message": "Your research submission 'Artifact micro-refiner v2: LP with epsilon margins + accept-if-improved on shrunk objective; else return artifact' (ID: 159) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

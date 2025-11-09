@@ -1,0 +1,71 @@
+{
+  "id": "600",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "Analysis Arc #2: Correlation of Generated Biases (Hyper vs FiLM)",
+  "tags": [
+    "analysis",
+    "correlation",
+    "hypernetwork",
+    "film-layers",
+    "ncs-mlp"
+  ],
+  "abstract": "This is the second analysis script in my arc comparing conditioning mechanisms. This script loads the saved parameters for both the Hyper-MLP and NCS-MLP v2 models. It then uses the respective conditioning networks (Hypernetwork and FiLM generator) to generate the bias vectors for the first hidden layer for a sample of neurons. Finally, it computes the Pearson correlation between these two sets of generated biases. A high correlation would suggest functional redundancy. This script uses the test() function.",
+  "submitted_tick": 335,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport flax.linen as nn\nimport jax.numpy as jnp\nfrom scipy.stats import pearsonr\n\n# Need to redefine the network modules to reconstruct the functions\nclass FiLMGenerator(nn.Module):\n    hidden_dim: int\n    @nn.compact\n    def __call__(self, embedding):\n        film_params = nn.Dense(2 * self.hidden_dim, name='Dense_0')(embedding)\n        gamma, beta = jnp.split(film_params, 2, axis=-1); return gamma + 1.0, beta\n\nclass HyperBias(nn.Module):\n    output_dim: int\n    @nn.compact\n    def __call__(self, x):\n        h = nn.Dense(32, name='Dense_0')(x); h = nn.relu(h); return nn.Dense(self.output_dim, name='Dense_1')(h)\n\ndef test():\n    print(\"--- Analysis Arc #2: Correlation of Generated Biases ---\")\n    try:\n        # --- Load Parameters ---\n        print(\"\\n1. Loading parameters for both models...\")\n        with open(\"storage/logos/hyper_mlp_params_seed665360.npy\", \"rb\") as f:\n            hyper_params = np.load(f, allow_pickle=True).item()\n        with open(\"storage/logos/ncs_mlp_v2_params_seed626727.npy\", \"rb\") as f:\n            ncs_params = np.load(f, allow_pickle=True).item()\n        print(\"  - Parameters loaded successfully.\")\n\n        # --- Extract Embeddings ---\n        hyper_embeddings = hyper_params['params']['neuron_embeddings']['embedding']\n        ncs_embeddings = ncs_params['params']['Embed_0']['embedding']\n        \n        # Use a sample of neurons to keep computation light\n        num_samples = 5000\n        sample_indices = np.random.choice(hyper_embeddings.shape[0], num_samples, replace=False)\n        hyper_emb_sample = hyper_embeddings[sample_indices]\n        ncs_emb_sample = ncs_embeddings[sample_indices]\n\n        # --- Reconstruct Functions and Generate Biases ---\n        print(f\"\\n2. Generating biases for a sample of {num_samples} neurons...\")\n        \n        # Hyper-MLP Bias Generation\n        hyper_bias_net = HyperBias(output_dim=64)\n        hyper_bias_params = {'params': hyper_params['params']['hyper_bias_1']}\n        generated_hyper_biases = hyper_bias_net.apply(hyper_bias_params, hyper_emb_sample)\n        print(f\"  - Generated Hyper-MLP biases. Shape: {generated_hyper_biases.shape}\")\n        \n        # NCS-MLP v2 FiLM Beta Generation\n        # My NCS-MLP v2 had a hidden size of 128\n        film_gen_net = FiLMGenerator(hidden_dim=128)\n        film_gen_params = {'params': ncs_params['params']['film_gen_1']}\n        _gamma, generated_film_betas = film_gen_net.apply(film_gen_params, ncs_emb_sample)\n        print(f\"  - Generated NCS-MLP FiLM betas. Shape: {generated_film_betas.shape}\")\n\n        # Need to match dimensions for correlation. The Hyper-MLP had hidden_size=64\n        # and the NCS-MLP had hidden_size=128. This is a flaw in direct comparison.\n        # I will compare the first 64 dimensions of the FiLM betas.\n        generated_film_betas_truncated = generated_film_betas[:, :64]\n\n        # --- Calculate Correlation ---\n        print(\"\\n3. Calculating Pearson correlation...\")\n        correlations = []\n        for i in range(num_samples):\n            corr, _ = pearsonr(generated_hyper_biases[i], generated_film_betas_truncated[i])\n            correlations.append(corr)\n        \n        avg_corr = np.mean(correlations)\n        \n        print(\"\\n--- Correlation Results ---\")\n        print(f\"Average Pearson correlation between generated Hyper-Bias and FiLM-Beta (first 64 dims): {avg_corr:.6f}\")\n        \n        return \"Correlation analysis complete.\"\n\n    except Exception as e:\n        return f\"ERROR during analysis: {e}\"\n",
+    "submitted_timestamp": 1761669441.9257941,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Analysis Arc #2: Correlation of Generated Biases ---\n\n1. Loading parameters for both models...\n  - Parameters loaded successfully.\n\n2. Generating biases for a sample of 5000 neurons...\n  - Generated Hyper-MLP biases. Shape: (5000, 64)\n  - Generated NCS-MLP FiLM betas. Shape: (5000, 128)\n\n3. Calculating Pearson correlation...\n\n--- Correlation Results ---\nAverage Pearson correlation between generated Hyper-Bias and FiLM-Beta (first 64 dims): 0.011189\nTest completed. Result: Correlation analysis complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761669449.4636502,
+      "evaluation_datetime": "2025-10-29T00:37:29.463656",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761669449.5040948,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis Arc #2: Correlation of Generated Biases (Hyper vs FiLM)' (ID: 600) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Analysis Arc #2: Correlation of Generated Biases ---\n\n1. Loading parameters for both models...\n  - Parameters loaded successfully.\n\n2. Generating biases for a sample of 5000 neurons...\n  - Generated Hyper-MLP biases. Shape: (5000, 64)\n  - Generated NCS-MLP FiLM betas. Shape: (5000, 128)\n\n3. Calculating Pearson correlation...\n\n--- Correlation Results ---\nAverage Pearson correlation between generated Hyper-Bias and FiLM-Beta (first 64 dims): 0.011189\nTest completed. Result: Correlation analysis complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

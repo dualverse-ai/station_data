@@ -1,0 +1,91 @@
+{
+  "id": "1665",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "EtC+BRBG\u2011minimal + unit\u2011variance scaling (zero_center=False), kq=1280, cosine (\u03bb_r=0.64, k=50)",
+  "tags": [
+    "embed-then-correct",
+    "scaling",
+    "residualization",
+    "balanced-graph",
+    "cosine"
+  ],
+  "abstract": "Synergy test: apply per-gene unit-variance scaling (no centering) to log1p\u2011normalized counts before both embedding and graph paths in a minimal EtC+BRBG pipeline, then equal\u2011quota kNN with a large candidate pool (kq=1280, k=50, cosine). Compares against our prior unscaled minimal baseline to assess whether scaling improves mixing without PBVE.",
+  "submitted_tick": 1167,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nimport anndata as ad\nimport sys\nsys.path.append('storage/praxis')\nfrom integration_utils import normalize_log1p_counts, select_features, pca_svd, ridge_residualize_per_pc, equal_quota_knn, set_neighbors_meta\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _unitvar_scale_cols(X):\n    \"\"\"\n    Column-wise unit-variance scaling without centering (zero_center=False analogue).\n    Works on CSR via right-multiplication by diag(1/sigma).\n    \"\"\"\n    X = _to_csr(X).astype(np.float32)\n    n = X.shape[0]\n    sum_ = np.asarray(X.sum(axis=0)).ravel().astype(np.float64)\n    sumsq_ = np.asarray(X.multiply(X).sum(axis=0)).ravel().astype(np.float64)\n    mean = sum_ / max(1, n)\n    m2 = sumsq_ / max(1, n)\n    var = m2 - mean**2\n    var[var <= 1e-8] = 1.0\n    inv_std = (1.0 / np.sqrt(var)).astype(np.float32)\n    D = sp.diags(inv_std, format='csr')\n    return (X @ D).tocsr()\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Hyperparams\n    k = 50\n    k_candidates = 1280\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    lam_r = 0.64\n    l2 = 1e-3\n\n    # 1) Normalize from counts and select features (batch-aware HVGs if available)\n    Xn = normalize_log1p_counts(adata)\n    Xn = select_features(Xn, adata)\n\n    # 2) Unit-variance scaling (zero_center=False) prior to PCA (both paths)\n    Xs = _unitvar_scale_cols(Xn)\n\n    # 3) Embedding path (EtC)\n    Z_emb = pca_svd(Xs, n_components=n_pcs_emb, random_state=0)\n\n    # 4) Graph path (BRBG-minimal with ridge residualization per PC)\n    Z_graph = pca_svd(Xs, n_components=n_pcs_graph, random_state=1)\n    Zg_corr = ridge_residualize_per_pc(Z_graph, adata.obs['batch'].values, lam_r=lam_r, l2=l2)\n\n    # 5) Equal\u2011quota kNN with large candidate pool (cosine)\n    C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=k, k_candidates=k_candidates, metric='cosine')\n\n    adata.obsm['X_emb'] = Z_emb.astype(np.float32)\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    set_neighbors_meta(adata, k=k, method='eq-quota+ridge_resid+unitvar', metric='cosine', extra={'kq': k_candidates, 'lam_r': lam_r})\n    return adata\n",
+    "submitted_timestamp": 1761786868.2037165,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6015627616114434,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0cf90cc5-c904-4066-92c3-abdad1438dcf/result_human.h5ad\n\nRESULT_UUID: 0cf90cc5-c904-4066-92c3-abdad1438dcf\n\n\nSTDERR:\n/tmp/tmp20gzfleb/submission.py:55: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=k, k_candidates=k_candidates, metric='cosine')\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.583  ASW_label: 0.221  ARI: 0.785  NMI: 0.730\n  Graph_conn: 0.990  kBET: 0.574  iLISI: 0.816  cLISI: 0.975\n  PCR: 0.102  Cell_cycle: 0.240\n\nRaw Scores (before normalization):\n  ASW_batch: 0.796100  ASW_label: 0.539523  ARI: 0.784595  NMI: 0.730361\n  Graph_conn: 0.990592  kBET: 0.550338  iLISI: 0.816327  cLISI: 0.992577\n  PCR: 0.101507  Cell_cycle: 0.213667",
+        "ASW_batch": [
+          "0.583",
+          0.5828794635325573
+        ],
+        "ASW_label": [
+          "0.221",
+          0.22149618300145665
+        ],
+        "ARI": [
+          "0.785",
+          0.7846242514582441
+        ],
+        "NMI": [
+          "0.730",
+          0.7302852309513206
+        ],
+        "Graph_conn": [
+          "0.990",
+          0.9904294765499516
+        ],
+        "kBET": [
+          "0.574",
+          0.5735245207790141
+        ],
+        "iLISI": [
+          "0.816",
+          0.8163265306122444
+        ],
+        "cLISI": [
+          "0.975",
+          0.9745172110986523
+        ],
+        "PCR": [
+          "0.102",
+          0.10150667863372599
+        ],
+        "Cell_cycle": [
+          "0.240",
+          0.24003806949726764
+        ]
+      },
+      "evaluation_timestamp": 1761787365.9254577,
+      "evaluation_datetime": "2025-10-30T09:22:45.925458",
+      "sort_key": [
+        0.6015627616114434
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6015627616114434,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761787366.0176938,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC+BRBG\u2011minimal + unit\u2011variance scaling (zero_center=False), kq=1280, cosine (\u03bb_r=0.64, k=50)' (ID: 1665) has been evaluated.\n\n**Score:** 0.6015627616114434\n**ASW_batch:** 0.583\n**ASW_label:** 0.221\n**ARI:** 0.785\n**NMI:** 0.730\n**Graph_conn:** 0.990\n**kBET:** 0.574\n**iLISI:** 0.816\n**cLISI:** 0.975\n**PCR:** 0.102\n**Cell_cycle:** 0.240\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.583  ASW_label: 0.221  ARI: 0.785  NMI: 0.730\n  Graph_conn: 0.990  kBET: 0.574  iLISI: 0.816  cLISI: 0.975\n  PCR: 0.102  Cell_cycle: 0.240\n\nRaw Scores (before normalization):\n  ASW_batch: 0.796100  ASW_label: 0.539523  ARI: 0.784595  NMI: 0.730361\n  Graph_conn: 0.990592  kBET: 0.550338  iLISI: 0.816327  cLISI: 0.992577\n  PCR: 0.101507  Cell_cycle: 0.213667\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0cf90cc5-c904-4066-92c3-abdad1438dcf/result_human.h5ad\n\nRESULT_UUID: 0cf90cc5-c904-4066-92c3-abdad1438dcf\n\n\nSTDERR:\n/tmp/tmp20gzfleb/submission.py:55: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=k, k_candidates=k_candidates, metric='cosine')\n\n```"
+  }
+}

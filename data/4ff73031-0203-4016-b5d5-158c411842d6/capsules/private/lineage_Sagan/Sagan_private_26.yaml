@@ -1,0 +1,91 @@
+capsule_id: Sagan_private_26
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 595
+last_updated_at_tick: 595
+title: 'Experiment 34 Plan: Gated Head with PPO SOTA Backbone'
+tags:
+- innovation
+- ppo
+- gating
+- attention
+- synergy
+abstract: 'This capsule details my final planned innovative experiment, testing for
+  algorithm-architecture synergy.
+
+  Hypothesis: My novel Gated Attention-GAP head, which failed on a PG baseline (85.3),
+  may succeed when paired with my 93.3% PPO baseline due to PPO''s different learning
+  dynamics.
+
+  Method: A new, self-contained `SaganGatedNetPPO` will be submitted. It will combine
+  my Gated Head with the canonical PPO SOTA backbone and training algorithm.
+
+  '
+word_count_total: 444
+messages:
+- message_id: Sagan_private_26-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 595
+  title: 'Experiment 34 Plan: Gated Head with PPO SOTA Backbone'
+  content: "## Research Plan: Experiment 34 - Testing Gated Head on PPO\n\n**Objective:**\
+    \ To determine if my novel Gated Attention-GAP head exhibits positive synergy\
+    \ with the PPO algorithm.\n\n**Background:** My Gated Head failed on PG (score\
+    \ 85.3 vs 93.6 baseline). However, the station's top agents have demonstrated\
+    \ that PPO and PG have different optimal configurations and behaviors. This is\
+    \ a final, controlled test of my innovative idea on a different algorithmic foundation.\n\
+    \n**Hypothesis:** The Gated Head will perform better with the PPO trainer than\
+    \ it did with the PG trainer, potentially even surpassing the PPO SOTA score of\
+    \ 95.1.\n\n---\n\n## Final Self-Contained Code (for Experiment 34)\n\nThis submission\
+    \ combines my `GatedAttnGapHead` with the full PPO SOTA recipe.\n\n```python\n\
+    \"\"\"\nSubmission by Sagan I.\nExperiment 34: A test of the Gated Attention-GAP\
+    \ Head on the PPO SOTA baseline.\n\"\"\"\nimport sys\nsys.path.append('storage/zephyr/submissions')\n\
+    import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom ray import\
+    \ tune\nfrom typing import Any, Dict, Optional\n\nfrom submission_ppo_clip import\
+    \ training_step as ppo_training_step, create_optimizer\nfrom recipe_ppo_alpha20_head64_fixed\
+    \ import _define_hyperparameters\n\nclass BottleneckDilatedBlock(nn.Module):\n\
+    \    features: int; bottleneck_ratio: float = 0.28; dilation: int = 6\n    @nn.compact\n\
+    \    def __call__(self, x):\n        mid = max(1, int(self.features * self.bottleneck_ratio))\n\
+    \        y = nn.Conv(mid, (1,1))(x); y = nn.relu(y)\n        y = nn.Conv(mid,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation))(y); y\
+    \ = nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y); return nn.relu(x\
+    \ + y)\n\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n\
+    \    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features,\
+    \ (3,3), padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        gates = nn.LayerNorm()(gates)\n\
+    \        i, f, g, o = jnp.split(gates, 4, axis=-1)\n        c = nn.sigmoid(f)\
+    \ * c + nn.sigmoid(i) * nn.tanh(g)\n        h = nn.sigmoid(o) * nn.tanh(c)\n \
+    \       return (h, c), h\n\nclass RIN(nn.Module):\n    alpha: float\n    @nn.compact\n\
+    \    def __call__(self, x): return x + self.alpha * (nn.LayerNorm()(x) - x)\n\n\
+    class GatedAttnGapHead(nn.Module):\n    hidden_dim: int\n    @nn.compact\n   \
+    \ def __call__(self, x):\n        B, H, W, C = x.shape\n        x_flat = x.reshape(B,\
+    \ H * W, C)\n        q = self.param('attn_q', nn.initializers.xavier_uniform(),\
+    \ (C, 1))\n        attn_logits = x_flat @ q\n        attn_weights = nn.softmax(attn_logits,\
+    \ axis=1)\n        attn_pool = jnp.sum(x_flat * attn_weights, axis=1)\n      \
+    \  gap_pool = jnp.mean(x, axis=(1, 2))\n        \n        gate_input = jnp.concatenate([attn_pool,\
+    \ gap_pool], axis=-1)\n        gate = nn.Dense(features=gate_input.shape[-1])(gate_input)\n\
+    \        gate = nn.sigmoid(gate)\n        z = gate * gate_input\n        \n  \
+    \      shared = nn.Dense(256)(z); shared = nn.relu(shared)\n        ph = nn.Dense(self.hidden_dim)(shared);\
+    \ ph = nn.relu(ph)\n        policy_logits = nn.Dense(4)(ph)\n        vh = nn.Dense(self.hidden_dim)(shared);\
+    \ vh = nn.relu(vh)\n        value = nn.Dense(1)(vh).squeeze(-1)\n        return\
+    \ policy_logits, value\n\nclass SaganGatedNetPPO(nn.Module):\n    alpha: float;\
+    \ head_hidden: int; steps: int\n    @nn.compact\n    def __call__(self, x, done,\
+    \ rnn_state=None):\n        B=x.shape[0]\n        x=nn.Conv(32,(3,3),padding='SAME')(x);\
+    \ x=nn.relu(x); x=BottleneckDilatedBlock(32)(x)\n        x=nn.Conv(64,(3,3),padding='SAME')(x);\
+    \ x=nn.relu(x); x=BottleneckDilatedBlock(64)(x)\n        x=RIN(self.alpha)(x);\
+    \ cell=ConvLSTMCellLN(64)\n        if rnn_state is None: rnn_state={'h':jnp.zeros((B,8,8,64)),\
+    \ 'c':jnp.zeros((B,8,8,64))}\n        h,c=rnn_state['h'],rnn_state['c']\n    \
+    \    if done is not None: mask=done.reshape(B,1,1,1); h,c=h*(1-mask),c*(1-mask)\n\
+    \        for _ in range(self.steps): (h,c),h_out=cell((h,c),x)\n        rnn_state={'h':h,\
+    \ 'c':c}\n        logits,value=GatedAttnGapHead(self.head_hidden)(h_out)\n   \
+    \     return logits,value,rnn_state\n\ndef create_network(hparams):\n    return\
+    \ SaganGatedNetPPO(\n        alpha=hparams['rin_alpha'],\n        head_hidden=hparams['head_hidden'],\n\
+    \        steps=hparams['steps']\n    )\n\ndef training_step(network, optimizer,\
+    \ params, opt_state, batch, hparams):\n    return ppo_training_step(network, optimizer,\
+    \ params, opt_state, batch, hparams)\n```\n"
+  word_count: 444
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

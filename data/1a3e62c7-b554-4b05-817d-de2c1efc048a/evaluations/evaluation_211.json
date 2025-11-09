@@ -1,0 +1,46 @@
+{
+  "id": "211",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Consensus active sets at tol=1e-8: n=26 (4 lineages) and n=29 (Aletheia vs Scientia)",
+  "tags": [
+    "analysis",
+    "consensus",
+    "nmap",
+    "jaccard",
+    "contact-graph"
+  ],
+  "abstract": "Computes consensus/union and frequency statistics of boundary and pair actives at tol=1e\u22128 for n=26 across {Noesis,Aletheia,Inquire,Scientia}, and for n=29 across {Aletheia,Scientia}. Writes storage/noesis/nmap/consensus_sets_tol1e8.json. Returns baseline pack unchanged.",
+  "submitted_tick": 132,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\n\nN = 26\n\ndef read_pairs_csv(path):\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line or line[0].isalpha():\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0]); j = int(parts[1])\n                    except Exception:\n                        continue\n                    if i > j: i, j = j, i\n                    s.add((i, j))\n    except Exception:\n        return None\n    return s\n\ndef read_boundary_csv(path):\n    alias = {'xL':'xmin','xR':'xmax','yB':'ymin','yT':'ymax',\n             'xmin':'xmin','xmax':'xmax','ymin':'ymin','ymax':'ymax'}\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line:\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0])\n                    except Exception:\n                        continue\n                    kind = alias.get(parts[1], parts[1])\n                    s.add((i, kind))\n    except Exception:\n        return None\n    return s\n\ndef serialize_pairs(S):\n    return sorted([[i, j] for (i, j) in S], key=lambda x: (x[0], x[1]))\n\ndef serialize_boundary(S):\n    return sorted([[i, k] for (i, k) in S], key=lambda x: (x[0], x[1]))\n\ndef consensus_sets_n26():\n    # Paths at tol=1e-8\n    roots = {\n        'noesis':   'storage/noesis/exports',\n        'aletheia': 'storage/Aletheia/exports',\n        'inquire':  'storage/Inquire/exports',\n        'scientia': 'storage/Scientia/exports',\n    }\n    B = {}\n    P = {}\n    for name, root in roots.items():\n        bp = os.path.join(root, 'active_boundary_tol1e8.csv')\n        pp = os.path.join(root, 'active_pairs_tol1e8.csv')\n        B[name] = read_boundary_csv(bp)\n        P[name] = read_pairs_csv(pp)\n\n    lineages = [k for k in roots.keys() if B[k] is not None and P[k] is not None]\n    if not lineages:\n        return None\n\n    # Intersections and unions\n    b_inter = set.intersection(*[B[k] for k in lineages])\n    p_inter = set.intersection(*[P[k] for k in lineages])\n    b_union = set.union(*[B[k] for k in lineages])\n    p_union = set.union(*[P[k] for k in lineages])\n\n    # Frequencies\n    from collections import Counter\n    b_freq = Counter()\n    p_freq = Counter()\n    for k in lineages:\n        for x in B[k]: b_freq[x] += 1\n        for y in P[k]: p_freq[y] += 1\n\n    # Top variant contacts (appear in some but not all)\n    b_variant = [(list(x), int(c)) for x, c in b_freq.items() if c < len(lineages)]\n    p_variant = [(list(x), int(c)) for x, c in p_freq.items() if c < len(lineages)]\n    b_variant.sort(key=lambda t: (-t[1], t[0]))\n    p_variant.sort(key=lambda t: (-t[1], t[0]))\n\n    return {\n        'lineages': lineages,\n        'boundary': {\n            'intersection_count': len(b_inter),\n            'union_count': len(b_union),\n            'intersection': serialize_boundary(b_inter),\n            'top_variants_by_freq': b_variant[:50]\n        },\n        'pairs': {\n            'intersection_count': len(p_inter),\n            'union_count': len(p_union),\n            'intersection': serialize_pairs(p_inter),\n            'top_variants_by_freq': p_variant[:50]\n        }\n    }\n\ndef consensus_sets_n29():\n    # Aletheia vs Scientia (nmap layout)\n    roots = {\n        'aletheia': 'storage/Aletheia/nmap/n29',\n        'scientia': 'storage/Scientia/nmap/n29',\n    }\n    B = {}\n    P = {}\n    for name, root in roots.items():\n        bp = os.path.join(root, 'active_boundary_tol1e8.csv')\n        pp = os.path.join(root, 'active_pairs_tol1e8.csv')\n        B[name] = read_boundary_csv(bp)\n        P[name] = read_pairs_csv(pp)\n\n    lineages = [k for k in roots.keys() if B[k] is not None and P[k] is not None]\n    if len(lineages) < 2:\n        return None\n\n    b_inter = set.intersection(*[B[k] for k in lineages])\n    p_inter = set.intersection(*[P[k] for k in lineages])\n    b_union = set.union(*[B[k] for k in lineages])\n    p_union = set.union(*[P[k] for k in lineages])\n\n    # Differences\n    b_only = {k: serialize_boundary(B[k] - b_inter) for k in lineages}\n    p_only = {k: serialize_pairs(P[k] - p_inter) for k in lineages}\n\n    return {\n        'lineages': lineages,\n        'boundary': {\n            'intersection_count': len(b_inter),\n            'union_count': len(b_union),\n            'intersection': serialize_boundary(b_inter),\n            'only': b_only\n        },\n        'pairs': {\n            'intersection_count': len(p_inter),\n            'union_count': len(p_union),\n            'intersection': serialize_pairs(p_inter),\n            'only': p_only\n        }\n    }\n\ndef construct_packing():\n    out_dir = 'storage/noesis/nmap'\n    os.makedirs(out_dir, exist_ok=True)\n    out = {'tol': 1e-8}\n\n    try:\n        out['n26'] = consensus_sets_n26()\n    except Exception:\n        out['n26'] = None\n\n    try:\n        out['n29'] = consensus_sets_n29()\n    except Exception:\n        out['n29'] = None\n\n    try:\n        with open(os.path.join(out_dir, 'consensus_sets_tol1e8.json'), 'w') as f:\n            json.dump(out, f, indent=2)\n    except Exception:\n        pass\n\n    # Return baseline pack unchanged\n    import numpy as np\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(N,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(N,)\n    except Exception:\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = np.array([[x,y] for x in coords for y in coords], float)\n        hole = np.array([0.2,0.2], float)\n        centers = np.vstack([centers, hole])\n        r0 = 0.1 - 1e-8\n        d = float(np.linalg.norm(hole - np.array([0.1,0.1])))\n        radii = np.array([r0]*25 + [d - r0 - 1e-8], float)\n        c, r = centers, radii\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760881118.9823987,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.622405384,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760881121.0114107,
+      "evaluation_datetime": "2025-10-19T21:38:41.011414"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.622405384,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760881121.099691,
+    "version_notified": "original",
+    "message": "Your research submission 'Consensus active sets at tol=1e-8: n=26 (4 lineages) and n=29 (Aletheia vs Scientia)' (ID: 211) has been evaluated.\n\n**Score:** 2.622405384\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

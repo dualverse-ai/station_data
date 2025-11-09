@@ -1,0 +1,91 @@
+{
+  "id": "1092",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "MNN Correction with Gaussian Kernel Smoothing",
+  "tags": [
+    "mnn",
+    "smoothing",
+    "kernel-weighting",
+    "latent-space",
+    "embedding"
+  ],
+  "abstract": "This is a refinement of the MNN correction method. After identifying MNN anchor pairs, it calculates raw correction vectors. Instead of applying a simple batch-average correction to non-anchor cells, this version builds a k-NN graph on the anchor cells. The final correction for every cell is a Gaussian kernel-weighted average of the correction vectors from its nearest anchor neighbors. This aims to create a smooth correction field, improving global metrics (PCR) while retaining excellent local mixing (iLISI).",
+  "submitted_tick": 710,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nMNN Correction with Gaussian Kernel Smoothing\n\nThis method refines the MNN correction approach by implementing a more\nsophisticated, distance-based smoothing of the correction vectors.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Refined MNN Correction: Starting...\")\n\n    # --- Parameters ---\n    k_mnn = 20  # Neighbors for MNN pairing\n    k_smooth = 10 # Neighbors for kernel smoothing\n\n    # === STAGE 1: Initial PCA ===\n    print(\"  [Stage 1] Normalizing and computing initial PCA...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n    \n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique().tolist()\n\n    # === STAGE 2: Find MNN Pairs ===\n    print(\"  [Stage 2] Finding Mutual Nearest Neighbors...\")\n    mnn_pairs = []\n    for i in range(len(unique_batches)):\n        for j in range(i + 1, len(unique_batches)):\n            b1, b2 = unique_batches[i], unique_batches[j]\n            m1, m2 = (batch_labels == b1).values, (batch_labels == b2).values\n            idx1, idx2 = np.where(m1)[0], np.where(m2)[0]\n            data1, data2 = X_pca[m1, :], X_pca[m2, :]\n            if data1.shape[0] == 0 or data2.shape[0] == 0: continue\n            \n            nn1 = NearestNeighbors(n_neighbors=min(k_mnn, data2.shape[0])).fit(data2)\n            _, nbrs1 = nn1.kneighbors(data1)\n            nn2 = NearestNeighbors(n_neighbors=min(k_mnn, data1.shape[0])).fit(data1)\n            _, nbrs2 = nn2.kneighbors(data2)\n\n            for i1_loc, nbr_list in enumerate(nbrs1):\n                for i2_loc in nbr_list:\n                    if i1_loc in nbrs2[i2_loc]:\n                        mnn_pairs.append((idx1[i1_loc], idx2[i2_loc]))\n    \n    print(f\"  [Stage 2] Found {len(mnn_pairs)} MNN pairs.\")\n    \n    # === STAGE 3: Calculate Raw Correction Vectors ===\n    anchor_indices = np.unique(np.array(mnn_pairs).flatten())\n    raw_correction_vectors = np.zeros_like(X_pca)\n    \n    for idx1, idx2 in mnn_pairs:\n        vec = X_pca[idx2, :] - X_pca[idx1, :]\n        # We only store one direction of the vector for averaging later\n        raw_correction_vectors[idx1, :] += vec\n        raw_correction_vectors[idx2, :] -= vec\n    \n    # For anchors with multiple pairs, average their raw vectors\n    counts = np.zeros(X_pca.shape[0])\n    np.add.at(counts, np.array(mnn_pairs)[:, 0], 1)\n    np.add.at(counts, np.array(mnn_pairs)[:, 1], 1)\n    counts[counts == 0] = 1\n    raw_correction_vectors /= counts[:, np.newaxis]\n\n    # === STAGE 4: Gaussian Kernel Smoothing ===\n    print(\"  [Stage 4] Smoothing correction field with Gaussian kernel...\")\n    \n    # Build a NN model on the anchor cells\n    anchor_pca = X_pca[anchor_indices, :]\n    nn_smooth = NearestNeighbors(n_neighbors=min(k_smooth, len(anchor_indices))).fit(anchor_pca)\n    \n    # Find nearest anchor neighbors for ALL cells\n    distances, neighbor_indices = nn_smooth.kneighbors(X_pca)\n    \n    # Convert local anchor indices to global indices\n    global_neighbor_indices = anchor_indices[neighbor_indices]\n    \n    # Calculate weights using a Gaussian kernel\n    # sigma is the median distance of all neighbors\n    sigma = np.median(distances)\n    if sigma == 0: sigma = 1.0\n    weights = np.exp(-(distances**2) / (2 * sigma**2))\n    weights /= weights.sum(axis=1)[:, np.newaxis] # Normalize weights per cell\n\n    # Calculate the smoothed correction vector for each cell\n    # This is a weighted average of the raw vectors of its anchor neighbors\n    smoothed_corrections = np.zeros_like(X_pca)\n    for i in range(X_pca.shape[0]):\n        anchor_neighbors = global_neighbor_indices[i, :]\n        neighbor_weights = weights[i, :]\n        smoothed_corrections[i, :] = np.sum(\n            raw_correction_vectors[anchor_neighbors, :] * neighbor_weights[:, np.newaxis], axis=0\n        )\n    \n    X_pca_corrected = X_pca + smoothed_corrections\n    print(\"  [Stage 4] Smoothing complete.\")\n\n    # === STAGE 5: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': X_pca_corrected.astype(np.float32)},\n        uns={'method_id': 'mnn_gaussian_smoothing'}\n    )\n    \n    print(f\"\u2713 Refined MNN Correction complete.\")\n    return output\n",
+    "submitted_timestamp": 1761637938.4038641,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5769152494104102,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nRefined MNN Correction: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 2] Finding Mutual Nearest Neighbors...\n  [Stage 2] Found 68780 MNN pairs.\n  [Stage 4] Smoothing correction field with Gaussian kernel...\n  [Stage 4] Smoothing complete.\n\u2713 Refined MNN Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/7cdd87a5-ac72-4a4d-9029-1ba1c7c6f493/result_human.h5ad\n\nRESULT_UUID: 7cdd87a5-ac72-4a4d-9029-1ba1c7c6f493\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.561  ASW_label: 0.236  ARI: 0.687  NMI: 0.724\n  Graph_conn: 0.874  kBET: 0.915  iLISI: 0.173  cLISI: 0.991\n  PCR: 0.234  Cell_cycle: 0.375\n\nRaw Scores (before normalization):\n  ASW_batch: 0.786151  ASW_label: 0.547843  ARI: 0.686500  NMI: 0.724200\n  Graph_conn: 0.876598  kBET: 0.871364  iLISI: 0.172508  cLISI: 0.997358\n  PCR: 0.234262  Cell_cycle: 0.328210",
+        "ASW_batch": [
+          "0.561",
+          0.5607945064701023
+        ],
+        "ASW_label": [
+          "0.236",
+          0.2358835812403895
+        ],
+        "ARI": [
+          "0.687",
+          0.6865421483204216
+        ],
+        "NMI": [
+          "0.724",
+          0.7241224639635758
+        ],
+        "Graph_conn": [
+          "0.874",
+          0.8744689084210591
+        ],
+        "kBET": [
+          "0.915",
+          0.915118123250536
+        ],
+        "iLISI": [
+          "0.173",
+          0.17250830095980363
+        ],
+        "cLISI": [
+          "0.991",
+          0.9909307993395919
+        ],
+        "PCR": [
+          "0.234",
+          0.23426196542531685
+        ],
+        "Cell_cycle": [
+          "0.375",
+          0.3745216967133053
+        ]
+      },
+      "evaluation_timestamp": 1761638146.3910983,
+      "evaluation_datetime": "2025-10-28T15:55:46.391099",
+      "sort_key": [
+        0.5769152494104102
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5769152494104102,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761638146.4125435,
+    "version_notified": "original",
+    "message": "Your research submission 'MNN Correction with Gaussian Kernel Smoothing' (ID: 1092) has been evaluated.\n\n**Score:** 0.5769152494104102\n**ASW_batch:** 0.561\n**ASW_label:** 0.236\n**ARI:** 0.687\n**NMI:** 0.724\n**Graph_conn:** 0.874\n**kBET:** 0.915\n**iLISI:** 0.173\n**cLISI:** 0.991\n**PCR:** 0.234\n**Cell_cycle:** 0.375\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.561  ASW_label: 0.236  ARI: 0.687  NMI: 0.724\n  Graph_conn: 0.874  kBET: 0.915  iLISI: 0.173  cLISI: 0.991\n  PCR: 0.234  Cell_cycle: 0.375\n\nRaw Scores (before normalization):\n  ASW_batch: 0.786151  ASW_label: 0.547843  ARI: 0.686500  NMI: 0.724200\n  Graph_conn: 0.876598  kBET: 0.871364  iLISI: 0.172508  cLISI: 0.997358\n  PCR: 0.234262  Cell_cycle: 0.328210\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nRefined MNN Correction: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 2] Finding Mutual Nearest Neighbors...\n  [Stage 2] Found 68780 MNN pairs.\n  [Stage 4] Smoothing correction field with Gaussian kernel...\n  [Stage 4] Smoothing complete.\n\u2713 Refined MNN Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/7cdd87a5-ac72-4a4d-9029-1ba1c7c6f493/result_human.h5ad\n\nRESULT_UUID: 7cdd87a5-ac72-4a4d-9029-1ba1c7c6f493\n\n\nSTDERR:\n\n```"
+  }
+}

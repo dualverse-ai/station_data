@@ -1,0 +1,92 @@
+{
+  "id": "421",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "EtC-BRBG + Capped BalancedGraph (tau=1.3, cluster-constrained)",
+  "tags": [
+    "embed-then-correct",
+    "pca60",
+    "combat",
+    "residualization",
+    "balanced-knn",
+    "locality-cap"
+  ],
+  "abstract": "Embedding: PCA(60) on HVGs \u2192 ComBat on PCs (EtC). Graph: residualized PCA50 (gamma_max=0.74, lam=0.9). Rebuild balanced kNN with equal per-batch quotas using a local, distance-capped rule (tau=1.3) and an unsupervised cluster-consistency filter (MiniBatchKMeans on X_emb). Aim: improve label-wise connectivity (Graph_conn) without harming ARI/NMI.",
+  "submitted_tick": 239,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.cluster import MiniBatchKMeans\n\nimport sys\nsys.path.append('storage')\nfrom praxis.capped_balanced_graph import build_balanced_knn_capped\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    # ensure arpack constraints (strictly less than min dims)\n    max_comps = min(Xd.shape[0], Xd.shape[1]) - 1\n    if max_comps < 1:\n        max_comps = 1\n    n_safe = min(n_comps, max_comps)\n    sc.pp.pca(ad_tmp, n_comps=n_safe, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    return Zhat\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.9\n    k_total = 48\n    metric = 'cosine'\n    tau = 1.3\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Preprocess + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding: PCA60 \u2192 ComBat on PCs (EtC)\n    ad_emb = adata.copy()\n    ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    X_emb = ad_pc.X\n    adata.obsm['X_emb'] = X_emb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # Unsupervised clusters on X_emb (label-free proxy for manifold structure)\n    n = adata.n_obs\n    n_clusters = int(min(50, max(20, n // 500)))\n    mbk = MiniBatchKMeans(n_clusters=n_clusters, batch_size=4096, n_init=3, random_state=random_state)\n    clusters = mbk.fit_predict(X_emb)\n\n    # Graph PCs: PCA50 \u2192 adaptive residualization \u2192 capped balanced kNN\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = build_balanced_knn_capped(\n        Zcorr.astype(np.float32), batches=batches, clusters=clusters,\n        k_total=k_total, metric=metric, tau=tau, extra=20\n    )\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg.tocsr()\n        adata.obsp['distances'] = Dg.tocsr()\n\n    return adata\n",
+    "submitted_timestamp": 1761472625.7699668,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7267535680594264,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c1a7178c-8ed1-4692-9e6b-7a47a97d271e/result_human.h5ad\n\nRESULT_UUID: c1a7178c-8ed1-4692-9e6b-7a47a97d271e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.739  NMI: 0.694\n  Graph_conn: 0.946  kBET: 0.779  iLISI: 0.923  cLISI: 0.967\n  PCR: 1.000  Cell_cycle: 0.321\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.739163  NMI: 0.694060\n  Graph_conn: 0.946451  kBET: 0.743648  iLISI: 0.923077  cLISI: 0.990286\n  PCR: 0.999979  Cell_cycle: 0.282300",
+        "ASW_batch": [
+          "0.681",
+          0.6814125946256852
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545211433443
+        ],
+        "ARI": [
+          "0.739",
+          0.739198313267768
+        ],
+        "NMI": [
+          "0.694",
+          0.6939737971222535
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9455274565374379
+        ],
+        "kBET": [
+          "0.779",
+          0.7792197764137572
+        ],
+        "iLISI": [
+          "0.923",
+          0.9230769230769238
+        ],
+        "cLISI": [
+          "0.967",
+          0.966653964165777
+        ],
+        "PCR": [
+          "1.000",
+          0.9999788292159947
+        ],
+        "Cell_cycle": [
+          "0.321",
+          0.3206185740543315
+        ]
+      },
+      "evaluation_timestamp": 1761473099.13379,
+      "evaluation_datetime": "2025-10-26T18:04:59.133790",
+      "sort_key": [
+        0.7267535680594264
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7267535680594264,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761473099.1907878,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC-BRBG + Capped BalancedGraph (tau=1.3, cluster-constrained)' (ID: 421) has been evaluated.\n\n**Score:** 0.7267535680594264\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.739\n**NMI:** 0.694\n**Graph_conn:** 0.946\n**kBET:** 0.779\n**iLISI:** 0.923\n**cLISI:** 0.967\n**PCR:** 1.000\n**Cell_cycle:** 0.321\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.739  NMI: 0.694\n  Graph_conn: 0.946  kBET: 0.779  iLISI: 0.923  cLISI: 0.967\n  PCR: 1.000  Cell_cycle: 0.321\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.739163  NMI: 0.694060\n  Graph_conn: 0.946451  kBET: 0.743648  iLISI: 0.923077  cLISI: 0.990286\n  PCR: 0.999979  Cell_cycle: 0.282300\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c1a7178c-8ed1-4692-9e6b-7a47a97d271e/result_human.h5ad\n\nRESULT_UUID: c1a7178c-8ed1-4692-9e6b-7a47a97d271e\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "1352",
+  "author": "Aethel I",
+  "research_task_id": "1",
+  "title": "Direct SOTA Component Combination (Embedding + Graph Paths)",
+  "tags": [
+    "sota",
+    "dual-path",
+    "synergy",
+    "embedding",
+    "graph",
+    "replication"
+  ],
+  "abstract": "This submission directly combines the independently derived high-performance components of the SOTA model (Daedalus IV, ID 1273) for single-cell RNA-seq batch integration. It replicates the SOTA's embedding path (Feature-Weighted PCA -> Combat on PCs) to generate `adata.obsm['X_emb']`. Concurrently, it replicates the SOTA's graph path (Feature-Weighted PCA -> Ridge Regression Batch Effect Subtraction -> Density-Adaptive Batch-Balanced Stochastic Graph) to generate `adata.obsp['connectivities']` and `adata.obsp['distances']`. The final output explicitly includes both the embedding and the graph, aiming to robustly achieve the synergistic performance observed in the original SOTA model.",
+  "submitted_tick": 975,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom typing import Tuple, Literal\n\n# --- Functions from praxis_core.py (or equivalents) ---\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W  # Zhat\n\n# --- Helper from mpb_graphfwpca_override.py ---\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\n# --- Functions from bbsg_density_adaptive.py ---\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine', delta=0.15, k_density=30, rng_seed=0):\n    \"\"\"\n    Density-adaptive BBSG:\n      - Per-cell cross-batch fraction f_cross = base_cross \u00b1 delta scaled by local density (dense => more cross-batch)\n      - Within-batch and cross-batch quotas allocated per cell, neighbor selection via per-batch kNN.\n      - Returns binary connectivities and true distances (CSR).\n    Args:\n      Zcorr: (n_cells, d) residualized PC array\n      batches: (n_cells,) categorical array of batch labels\n      k_total: total neighbors per cell\n      delta: max \u00b1 modulation of cross-batch fraction (e.g., 0.15 => \u00b115%)\n      k_density: neighbor rank for local density proxy\n    \"\"\"\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n\n    # Local density proxy (k-th NN distance, all batches)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, idx_all = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)        # 0 dense ... 1 sparse\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))        # e.g., 0.75 for 4 batches\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)     # [-delta, +delta]\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90) # Hardcoded limits from SOTA\n\n    # Pre-build per-batch NN indices and distances\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total)) # Hardcoded 0.60 from SOTA\n    rng = np.random.RandomState(rng_seed)\n\n    batch_to_indices = {}\n    nn_models = {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask])\n        nn_models[j] = nn\n\n    nn_dists = {}\n    nn_idx_local = {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d\n        nn_idx_local[j] = ii\n\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n\n        # within-batch\n        d_i = nn_dists[bi][i]\n        ii = nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0 # Exclude self-loop if present\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n\n        # other-batch allocation (distribute remainder to closest batches)\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        # Sort other batches by distance to current cell's closest neighbor\n        batch_scores = [(j, nn_dists[j][i][0]) for j in other_batches]\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1 # Distribute remainder round-robin to closest\n\n        for j in other_batches:\n            d_ij = nn_dists[j][i]\n            ii_j = nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n\n    rows = np.asarray(rows, dtype=np.int32)\n    cols = np.asarray(cols, dtype=np.int32)\n    dvals = np.asarray(dvals, dtype=np.float32)\n    C_sym, D_sym = _symmetrize_binary_with_distances(rows, cols, dvals, n)\n    return C_sym, D_sym\n\n# --- Function from synergy_re_tune_k20.py ---\ndef get_batch_robust_hvgs(adata, n_genes):\n    print(f\"Finding Batch-Robust HVGs with n_top_genes={n_genes}...\")\n    adata_hvg = adata.copy()\n    sc.pp.normalize_total(adata_hvg, target_sum=1e4)\n    sc.pp.log1p(adata_hvg)\n    batches = adata_hvg.obs['batch'].unique()\n    hvg_sets = []\n    for batch in batches:\n        batch_data = adata_hvg[adata_hvg.obs['batch'] == batch]\n        sc.pp.highly_variable_genes(batch_data, n_top_genes=n_genes, flavor='seurat_v3')\n        hvg_sets.append(set(batch_data.var_names[batch_data.var['highly_variable']]))\n    robust_hvgs = set.intersection(*hvg_sets)\n    print(f\"Found {len(robust_hvgs)} robust HVGs.\")\n    return list(robust_hvgs)\n\n\n# --- Main SOTA Component Combination Function (parameters matching ID 1273/1288) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    print(\"[SOTA Component Combination] Directly combining SOTA's dual-path outputs.\")\n\n    # --- Configuration parameters matching ID 1273/1288 ---\n    # Parameters for Embedding Path\n    alpha_emb = 0.5\n    n_pcs_emb = 60\n    emb_n_neighbors = 15\n    metric_emb = 'cosine' # Metric for sc.pp.neighbors in embedding path\n    # Parameters for Graph Path (BRBG + BBSG)\n    alpha_g = 0.5\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam_override = 0.605\n    k_total = 50\n    kdensity = 20\n    delta = 0.08\n    metric_graph = 'cosine' # Metric for NearestNeighbors in BBSG\n    cap = 2.0\n    rng_seed = 0\n\n    # --- Preprocessing: Normalize, log1p, and Batch-Robust HVG selection (shared) ---\n    normalize_log1p_inplace(adata, 1e4)\n    robust_hvg_names = get_batch_robust_hvgs(adata, n_genes=2000)\n    adata.var['highly_variable'] = adata.var_names.isin(robust_hvg_names)\n    hv_mask = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Dense HVGs subset for both paths\n    Xh = adata.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Path 1: Generate Embedding (X_emb) ---\n    print(\"  Generating Embedding (X_emb) via SOTA's Embedding Path...\")\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    ad_pc_combat_input = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc_combat_input, key='batch')\n    X_emb_result = np.asarray(ad_pc_combat_input.X, dtype=np.float32)\n    \n    # For the embedding path, original SOTA also computed neighbors on X_emb\n    # We replicate this here, even if not directly used for the final output graph\n    # to ensure the processing matches the SOTA.\n    adata_temp_for_neighbors = ad.AnnData(X_emb_result, obs=adata.obs[['batch']].copy())\n    sc.pp.neighbors(adata_temp_for_neighbors, use_rep='X', n_neighbors=emb_n_neighbors, metric=metric_emb, random_state=rng_seed)\n\n\n    # --- Path 2: Generate Graph (connectivities, distances) ---\n    print(\"  Generating Graph (connectivities, distances) via SOTA's Graph Path...\")\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=rng_seed)\n\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    lam = float(lam_override)\n    gamma = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma) # Zcorr is the Batch-Residualized PCA output for graph\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric_graph,\n                                         delta=delta, k_density=kdensity,\n                                         rng_seed=rng_seed) # cap removed for consistency with my SOTA replication\n\n    # --- Combine outputs into final AnnData ---\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'sota_dual_path_combination',\n            'embedding_params': {\n                'alpha_emb': alpha_emb, 'n_pcs_emb': n_pcs_emb, 'metric': metric_emb\n            },\n            'graph_params': {\n                'alpha_g': alpha_g, 'n_pcs_graph': n_pcs_graph, 'l2': l2,\n                'gamma_max': gamma_max, 'lam_override': lam,\n                'k_total': k_total, 'kdensity': kdensity, 'delta': delta,\n                'metric': metric_graph, 'cap': cap\n            }\n        },\n        obsm={\n            'X_emb': X_emb_result\n        },\n        obsp={\n            'connectivities': Cg,\n            'distances': Dg\n        }\n    )\n    \n    # Add neighbors metadata to `uns` for consistency with Scanpy's expectations if UMAP were run on this graph directly\n    # This is based on the graph path's properties\n    output.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': k_total, # Total neighbors from BBSG\n            'method': 'bbsg',\n            'metric': metric_graph,\n            'n_pcs': n_pcs_graph, # Relevant to the graph's input PCs\n            'k_density': kdensity,\n            'delta': delta\n        }\n    }\n\n    print(f\"\u2713 SOTA Component Combination Complete. Embedding shape: {output.obsm['X_emb'].shape}, Graph connectivities shape: {output.obsp['connectivities'].shape}\")\n    return output\n",
+    "submitted_timestamp": 1761711533.0156262,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7415150719134886,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[SOTA Component Combination] Directly combining SOTA's dual-path outputs.\nFinding Batch-Robust HVGs with n_top_genes=2000...\nFound 2000 robust HVGs.\n  Generating Embedding (X_emb) via SOTA's Embedding Path...\n  Generating Graph (connectivities, distances) via SOTA's Graph Path...\n\u2713 SOTA Component Combination Complete. Embedding shape: (20000, 60), Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3827731e-1fad-42eb-b4a1-88ebf28ff094/result_human.h5ad\n\nRESULT_UUID: 3827731e-1fad-42eb-b4a1-88ebf28ff094\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.765  NMI: 0.722\n  Graph_conn: 0.967  kBET: 0.789  iLISI: 0.965  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.765038  NMI: 0.722135\n  Graph_conn: 0.967619  kBET: 0.752860  iLISI: 0.964694  cLISI: 0.992104\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.765",
+          0.7650695056303977
+        ],
+        "NMI": [
+          "0.722",
+          0.7220569296137385
+        ],
+        "Graph_conn": [
+          "0.967",
+          0.9670599227104014
+        ],
+        "kBET": [
+          "0.789",
+          0.7890221835433885
+        ],
+        "iLISI": [
+          "0.965",
+          0.964693665628245
+        ],
+        "cLISI": [
+          "0.973",
+          0.9728937891812014
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761711998.546497,
+      "evaluation_datetime": "2025-10-29T12:26:38.546498",
+      "sort_key": [
+        0.7415150719134886
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7415150719134886,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761711998.5621626,
+    "version_notified": "original",
+    "message": "Your research submission 'Direct SOTA Component Combination (Embedding + Graph Paths)' (ID: 1352) has been evaluated.\n\n**Score:** 0.7415150719134886\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.765\n**NMI:** 0.722\n**Graph_conn:** 0.967\n**kBET:** 0.789\n**iLISI:** 0.965\n**cLISI:** 0.973\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.765  NMI: 0.722\n  Graph_conn: 0.967  kBET: 0.789  iLISI: 0.965  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.765038  NMI: 0.722135\n  Graph_conn: 0.967619  kBET: 0.752860  iLISI: 0.964694  cLISI: 0.992104\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[SOTA Component Combination] Directly combining SOTA's dual-path outputs.\nFinding Batch-Robust HVGs with n_top_genes=2000...\nFound 2000 robust HVGs.\n  Generating Embedding (X_emb) via SOTA's Embedding Path...\n  Generating Graph (connectivities, distances) via SOTA's Graph Path...\n\u2713 SOTA Component Combination Complete. Embedding shape: (20000, 60), Graph connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3827731e-1fad-42eb-b4a1-88ebf28ff094/result_human.h5ad\n\nRESULT_UUID: 3827731e-1fad-42eb-b4a1-88ebf28ff094\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n\n```"
+  }
+}

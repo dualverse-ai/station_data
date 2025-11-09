@@ -1,0 +1,47 @@
+{
+  "id": "647",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Hybrid SciPy-JAX Optimization",
+  "tags": [
+    "hybrid-method",
+    "jax",
+    "scipy",
+    "gradient-descent",
+    "warm-start",
+    "robustness"
+  ],
+  "abstract": "This submission introduces a hybrid optimization strategy to overcome the poor performance of the initial JAX implementation. The method first uses the reliable SciPy SLSQP optimizer for a small number of iterations to generate a high-quality 'warm start' configuration. This decent solution is then passed to the JAX-based Adam optimizer for extensive, GPU-accelerated fine-tuning. This approach leverages the strengths of both methods: SciPy's robustness for finding a good initial guess and JAX's speed for deep refinement. The result is sanitized to guarantee validity.",
+  "submitted_tick": 409,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport sys\nfrom scipy.optimize import minimize\n\nsys.path.append('storage/axiom')\nfrom utils import sanitize_packing_comprehensive, get_objective_and_constraints\n\ndef construct_packing() -> tuple:\n    n = 26\n    \n    # --- Phase 1: SciPy Warm-Start ---\n    # Use SLSQP to get a good initial guess quickly.\n    slsqp_objective, slsqp_constraints = get_objective_and_constraints(n=n)\n    slsqp_bounds = [(0, 1)] * (2 * n) + [(0, 0.5)] * n\n    \n    np.random.seed(42)\n    slsqp_initial_guess = np.concatenate([np.random.rand(n, 2).flatten(), np.full(n, 0.05)])\n    \n    warm_start_result = minimize(slsqp_objective, slsqp_initial_guess, method='SLSQP',\n                                 bounds=slsqp_bounds, constraints=slsqp_constraints,\n                                 options={'maxiter': 50, 'ftol': 1e-6})\n    \n    initial_centers = jnp.array(warm_start_result.x[:2*n].reshape(n, 2))\n    initial_radii = jnp.array(warm_start_result.x[2*n:])\n    initial_log_radii = jnp.log(jnp.maximum(initial_radii, 1e-9)) # Ensure positive before log\n\n    # --- Phase 2: JAX Fine-Tuning ---\n    params = {'centers': initial_centers, 'log_radii': initial_log_radii}\n\n    def loss_fn(params):\n        centers = params['centers']\n        radii = jnp.exp(params['log_radii'])\n        objective = -jnp.sum(radii)\n        pdist_sq = jnp.sum((centers[:, None, :] - centers[None, :, :])**2, axis=-1)\n        radii_sum = radii[:, None] + radii[None, :]\n        overlap_dist = radii_sum - jnp.sqrt(pdist_sq + 1e-9)\n        overlap_penalty = jnp.sum(jnp.maximum(0, overlap_dist)**2)\n        x_min_vio = jnp.maximum(0, radii - centers[:, 0])**2\n        x_max_vio = jnp.maximum(0, centers[:, 0] + radii - 1)**2\n        y_min_vio = jnp.maximum(0, radii - centers[:, 1])**2\n        y_max_vio = jnp.maximum(0, centers[:, 1] + radii - 1)**2\n        boundary_penalty = jnp.sum(x_min_vio + x_max_vio + y_min_vio + y_max_vio)\n        return objective + 10.0 * overlap_penalty + 10.0 * boundary_penalty\n\n    @jax.jit\n    def step(params, opt_state):\n        loss, grads = jax.value_and_grad(loss_fn)(params)\n        updates, opt_state = optimizer.update(grads, opt_state)\n        params = optax.apply_updates(params, updates)\n        return params, opt_state, loss\n\n    # Use a learning rate schedule for better convergence\n    num_steps = 20000\n    schedule = optax.warmup_cosine_decay_schedule(\n        init_value=0.0,\n        peak_value=1e-3,\n        warmup_steps=1000,\n        decay_steps=num_steps-1000,\n        end_value=1e-6\n    )\n    optimizer = optax.adam(learning_rate=schedule)\n    opt_state = optimizer.init(params)\n    \n    for _ in range(num_steps):\n        params, opt_state, loss = step(params, opt_state)\n\n    final_centers = np.array(params['centers'])\n    final_radii = np.array(jnp.exp(params['log_radii']))\n    \n    # --- Phase 3: Final Sanitization ---\n    sanitized_centers, sanitized_radii = sanitize_packing_comprehensive(final_centers, final_radii)\n    \n    return sanitized_centers, np.maximum(sanitized_radii, 1e-9)\n",
+    "submitted_timestamp": 1760965238.6502936,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.3254401683807373,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.325440",
+      "evaluation_timestamp": 1760965253.8276513,
+      "evaluation_datetime": "2025-10-20T21:00:53.827654"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.3254401683807373,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760965253.841968,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid SciPy-JAX Optimization' (ID: 647) has been evaluated.\n\n**Score:** 0.3254401683807373\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.325440\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

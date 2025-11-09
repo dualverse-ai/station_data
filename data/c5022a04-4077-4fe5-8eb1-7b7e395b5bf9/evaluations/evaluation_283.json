@@ -1,0 +1,45 @@
+{
+  "id": "283",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "Generator Arc 2, Step 1: Simulated Annealing Generator",
+  "tags": [
+    "simulated annealing",
+    "generator",
+    "global optimization",
+    "sota improvement"
+  ],
+  "abstract": "This experiment introduces a new generator for the SOTA pipeline, replacing multi-start SLSQP with Simulated Annealing (SA). The SA algorithm minimizes an energy function defined by the output of an exact LP solver for radii, focusing the search on optimal center configurations. The goal is to produce a superior warm-start artifact. The best configuration found will be saved to 'storage/cognito/sa_generator_artifact.npz'.",
+  "submitted_tick": 139,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport os\nimport time\n\n# --- Utility functions from previous submissions ---\ndef _pair_indices(n: int): return np.triu_indices(n, 1)\ndef _boundary_margins(C: np.ndarray) -> np.ndarray: return np.minimum.reduce([C[:,0], 1-C[:,0], C[:,1], 1-C[:,1]])\ndef _seed_praxis_grid(seed):\n    np.random.seed(seed)\n    n=32\n    grid_points = np.stack(np.meshgrid(np.linspace(0.1, 0.9, 6), np.linspace(0.1, 0.9, 6)), -1).reshape(-1, 2)[:n]\n    noise = (np.random.rand(n, 2) - 0.5) * 0.08\n    return np.clip(grid_points + noise, 0.05, 0.95)\n\n# --- Energy Function for SA ---\ndef exact_lp(C: np.ndarray):\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    I, J = _pair_indices(n)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n    m = len(I)\n    A_ub = np.zeros((m, n))\n    A_ub[np.arange(m), I] = 1\n    A_ub[np.arange(m), J] = 1\n    b_ub = D\n    c = -np.ones(n)\n    bounds = [(0, float(max(0, bi))) for bi in b]\n    # Using 'highs' method as it's proven robust in prior work\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    if not res.success:\n        return np.zeros(n), 0, False # Return 0 score for failure\n    return res.x, -res.fun, True\n\n# --- Main SA Generator ---\ndef construct_packing() -> tuple:\n    n = 32\n    start_time = time.time()\n    TIME_BUDGET = 1180 # seconds\n\n    # Parameters based on reflection\n    T_initial = 0.05\n    T_final = 1e-6\n    alpha = 0.999\n    markov_chain_length = 100\n    max_stagnation = 50 # terminate after 50 temp steps with no improvement\n    \n    # Initialization\n    current_centers = _seed_praxis_grid(seed=42)\n    current_radii, current_score, ok = exact_lp(current_centers)\n    if not ok: current_score = 0\n    current_energy = -current_score\n    \n    best_centers = np.copy(current_centers)\n    best_radii = np.copy(current_radii)\n    best_energy = current_energy\n    \n    T = T_initial\n    stagnation_counter = 0\n\n    # Main SA loop\n    while T > T_final:\n        if time.time() - start_time > TIME_BUDGET:\n            print(\"Time budget exceeded, terminating.\")\n            break\n\n        for _ in range(markov_chain_length):\n            # Neighborhood function\n            candidate_centers = np.copy(current_centers)\n            move_type = np.random.rand()\n            \n            if move_type < 0.95: # 95% chance: Single-circle perturbation\n                i = np.random.randint(n)\n                max_step = 0.1 # max step size at T_initial\n                current_step = max_step * (T / T_initial)\n                perturbation = np.random.normal(0, current_step, 2)\n                candidate_centers[i] += perturbation\n                candidate_centers[i] = np.clip(candidate_centers[i], 0, 1)\n            else: # 5% chance: Two-circle swap\n                i, j = np.random.choice(n, 2, replace=False)\n                candidate_centers[[i, j]] = candidate_centers[[j, i]]\n\n            # Calculate energy of candidate\n            candidate_radii, candidate_score, ok = exact_lp(candidate_centers)\n            if not ok: candidate_score = 0\n            candidate_energy = -candidate_score\n            \n            # Acceptance criterion\n            delta_E = candidate_energy - current_energy\n            if delta_E < 0 or np.random.rand() < np.exp(-delta_E / T):\n                current_centers = candidate_centers\n                current_energy = candidate_energy\n                \n                if current_energy < best_energy:\n                    best_energy = current_energy\n                    best_centers = np.copy(current_centers)\n                    best_radii = candidate_radii # Store the radii from the successful LP call\n                    stagnation_counter = 0\n\n        # Cooling\n        T *= alpha\n        stagnation_counter += 1\n        if stagnation_counter >= max_stagnation:\n            print(\"Stagnation detected, terminating.\")\n            break\n    \n    # Save the best artifact found\n    SAVE_PATH = 'storage/cognito/sa_generator_artifact.npz'\n    os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)\n    np.savez(SAVE_PATH, centers=best_centers, radii=best_radii)\n    \n    # Return a trivial packing as the script's purpose is artifact generation\n    return np.array([[0.1 + i*0.01, 0.1] for i in range(n)]), np.full(n, 0.001)\n",
+    "submitted_timestamp": 1760823225.9906454,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.032,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStagnation detected, terminating.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.032000",
+      "evaluation_timestamp": 1760823245.5174506,
+      "evaluation_datetime": "2025-10-19T05:34:05.517452"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.032,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760823245.583646,
+    "version_notified": "original",
+    "message": "Your research submission 'Generator Arc 2, Step 1: Simulated Annealing Generator' (ID: 283) has been evaluated.\n\n**Score:** 0.032\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.032000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStagnation detected, terminating.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

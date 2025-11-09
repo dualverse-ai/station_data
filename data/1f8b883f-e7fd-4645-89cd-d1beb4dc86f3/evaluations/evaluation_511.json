@@ -1,0 +1,71 @@
+{
+  "id": "511",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Analysis: \u03b3[t] vs per-condition difficulty (Fourier LN learnable-\u03b3)",
+  "tags": [
+    "analysis",
+    "fourier",
+    "learnable-gamma",
+    "condition-wise",
+    "reproducibility"
+  ],
+  "abstract": "Runs test()-only CPU analysis to correlate learned \u03b3[t] with per-condition step MAEs using prior exports (trials 43/44/45). Writes summary JSON to storage for decision on condition-aware offsets.",
+  "submitted_tick": 273,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math\nimport numpy as np\n\n# Test-only analysis: no training, no GPU\ndef test():\n    base_dir = \"storage/ariadne/analyses\"\n    percond_dir = os.path.join(base_dir, \"fourier_learn_gamma_per_condition\")\n    gamma_dir = os.path.join(base_dir, \"fourier_learn_gamma_export_v2\")\n\n    # Trials available from prior exports (base seed 42 set)\n    trials = [43, 44, 45]\n    T = 32\n\n    percond = []  # list of dicts: condition -> np.array(T,)\n    gammas = []   # list of np.array(T,)\n\n    # Load \u03b3[t]\n    for tr in trials:\n        gpath = os.path.join(gamma_dir, f\"trial_{tr}.json\")\n        if not os.path.exists(gpath):\n            continue\n        with open(gpath, \"r\") as f:\n            gobj = json.load(f)\n        # Try common keys\n        g = None\n        for k in [\"gamma\", \"gamma_profile\", \"gamma_t\", \"gamma_values\"]:\n            if k in gobj:\n                g = np.array(gobj[k], dtype=float)\n                break\n        if g is None:\n            # fallback: try nested\n            if \"params\" in gobj and \"gamma\" in gobj[\"params\"]:\n                g = np.array(gobj[\"params\"][\"gamma\"], dtype=float)\n        if g is None or g.shape[0] != T:\n            continue\n        gammas.append(g)\n\n    # Load per-condition step MAEs\n    for tr in trials:\n        ppath = os.path.join(percond_dir, f\"trial_{tr}.json\")\n        if not os.path.exists(ppath):\n            continue\n        with open(ppath, \"r\") as f:\n            pobj = json.load(f)\n        # Accept several possible schemas\n        cond_map = {}\n        if \"per_condition_step_mae\" in pobj:\n            src = pobj[\"per_condition_step_mae\"]\n        elif \"val_mae_by_condition\" in pobj:\n            src = pobj[\"val_mae_by_condition\"]\n        else:\n            src = {}\n        for ck, v in src.items():\n            arr = np.array(v, dtype=float)\n            if arr.ndim == 1 and arr.shape[0] == T:\n                cond_map[str(ck)] = arr\n        if cond_map:\n            percond.append(cond_map)\n\n    summary = {\n        \"trials_used\": trials,\n        \"loaded_gamma_count\": len(gammas),\n        \"loaded_per_condition_count\": len(percond),\n    }\n\n    if not gammas or not percond:\n        out = {\n            \"ok\": False,\n            \"reason\": \"Missing gamma or per-condition files\",\n            **summary,\n        }\n    else:\n        G = np.vstack(gammas)                              # (S,T)\n        gamma_mean = G.mean(axis=0)                        # (T,)\n        gamma_std  = G.std(axis=0)\n\n        # Aggregate per-condition MAE across seeds for each condition\n        # Build union of condition keys\n        keys = set()\n        for m in percond:\n            keys |= set(m.keys())\n        # Drop conditions with any NaN rows\n        cond_stats = {}\n        for ck in sorted(keys):\n            mats = []\n            for m in percond:\n                if ck in m:\n                    mats.append(m[ck])\n            if not mats:\n                continue\n            M = np.vstack(mats)                            # (#seeds_for_ck, T)\n            if np.isnan(M).any():\n                # Ignore this condition due to NaNs\n                continue\n            cond_stats[ck] = {\n                \"mean\": M.mean(axis=0).tolist(),\n                \"std\":  M.std(axis=0).tolist(),\n                \"count\": int(M.shape[0]),\n            }\n\n        # Define \"hard\" and \"easy\" groups heuristically if present\n        hard_candidates = [k for k in cond_stats.keys() if k.lower() in (\"cond7\", \"7\", \"condition7\")]\n        easy_candidates = [k for k in cond_stats.keys() if k.lower() in (\"cond1\", \"1\", \"condition1\", \"cond6\", \"6\", \"condition6\")]\n        hard_key = hard_candidates[0] if hard_candidates else None\n        easy_key = easy_candidates[0] if easy_candidates else None\n\n        # Build step-wise difficulty (mean across all available conditions)\n        all_means = [np.array(v[\"mean\"], dtype=float) for v in cond_stats.values()]\n        if all_means:\n            step_mae_mean = np.vstack(all_means).mean(axis=0)  # (T,)\n        else:\n            step_mae_mean = np.full((T,), np.nan)\n\n        # Correlations\n        def safe_corr(a, b):\n            a = np.asarray(a, dtype=float)\n            b = np.asarray(b, dtype=float)\n            if np.isnan(a).any() or np.isnan(b).any():\n                return None\n            if a.std() == 0 or b.std() == 0:\n                return None\n            return float(np.corrcoef(a, b)[0,1])\n\n        corr_gamma_vs_mean_mae = safe_corr(gamma_mean, step_mae_mean)\n\n        # Hard-vs-easy gap and correlation with gamma\n        hard_vs_easy = None\n        corr_gamma_vs_gap = None\n        if hard_key and easy_key:\n            hard_mean = np.array(cond_stats[hard_key][\"mean\"], dtype=float)\n            easy_mean = np.array(cond_stats[easy_key][\"mean\"], dtype=float)\n            hard_vs_easy = (hard_mean - easy_mean).tolist()\n            corr_gamma_vs_gap = safe_corr(gamma_mean, hard_mean - easy_mean)\n\n        # Simple gain heuristic: if gamma is lower at hardest steps (largest MAE),\n        # increasing gamma there could help. We quantify rough potential as\n        # normalized dot(-gamma_z, mae_z) where z-scores are used.\n        def z(x):\n            x = np.asarray(x, dtype=float)\n            return (x - x.mean()) / (x.std() + 1e-8)\n        if not np.isnan(step_mae_mean).any():\n            potential = float(np.dot(-z(gamma_mean), z(step_mae_mean)) / T)\n        else:\n            potential = None\n\n        out = {\n            \"ok\": True,\n            **summary,\n            \"gamma_mean\": gamma_mean.tolist(),\n            \"gamma_std\": gamma_std.tolist(),\n            \"corr_gamma_vs_step_mae_mean\": corr_gamma_vs_mean_mae,\n            \"hard_key\": hard_key,\n            \"easy_key\": easy_key,\n            \"hard_minus_easy\": hard_vs_easy,\n            \"corr_gamma_vs_hard_easy_gap\": corr_gamma_vs_gap,\n            \"potential_alignment_score\": potential,\n            \"conditions_analyzed\": {k: {\"count\": v[\"count\"]} for k,v in cond_stats.items()},\n        }\n\n    # Write summary JSON\n    out_path = os.path.join(base_dir, \"cond_gamma_correlation.json\")\n    with open(out_path, \"w\") as f:\n        json.dump(out, f, indent=2)\n\n    print(\"Analysis complete. Summary ->\", out_path)\n    return \"OK\"\n",
+    "submitted_timestamp": 1761554212.5752153,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis complete. Summary -> storage/ariadne/analyses/cond_gamma_correlation.json\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761554216.4832916,
+      "evaluation_datetime": "2025-10-27T16:36:56.483295",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761554216.5793703,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis: \u03b3[t] vs per-condition difficulty (Fourier LN learnable-\u03b3)' (ID: 511) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis complete. Summary -> storage/ariadne/analyses/cond_gamma_correlation.json\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

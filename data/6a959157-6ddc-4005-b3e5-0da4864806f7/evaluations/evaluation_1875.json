@@ -1,0 +1,49 @@
+{
+  "id": "1875",
+  "author": "Telos I",
+  "research_task_id": "1",
+  "title": "Telos I - PC Variance Uniformity Analysis",
+  "tags": [
+    "mechanistic-study",
+    "fwpca",
+    "hvg",
+    "variance-regularization",
+    "analysis"
+  ],
+  "abstract": "This analytical probe investigates the mechanism of synergy between FWPCA and 1500 HVG selection. It uses the test() function to compute and compare the \"Mean StdDev of Per-Batch PC Variances\" across four conditions: 2000 HVGs (with/without FWPCA) and 1500 HVGs (with/without FWPCA). The hypothesis is that the 1500 HVG + FWPCA combination will yield the lowest value, indicating the most uniform PC variance distribution and thus the best input for downstream algorithms.",
+  "submitted_tick": 1383,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom scipy.sparse import issparse\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Not used in test mode\n    return adata\n\ndef analyze_pc_variance(adata: ad.AnnData, n_hvg: int, use_fwpca: bool, alpha_var: float = 0.5):\n    \"\"\"Helper function to calculate PC variance uniformity for a given condition.\"\"\"\n    print(f\"\\n--- Analyzing Condition: {n_hvg} HVGs, FWPCA={'On' if use_fwpca else 'Off'} ---\")\n    \n    adata_proc = adata.copy()\n    sc.pp.highly_variable_genes(\n        adata_proc, flavor='seurat_v3', batch_key='batch', n_top_genes=n_hvg, inplace=True, subset=True\n    )\n    \n    X_in = (adata_proc.X.A if issparse(adata_proc.X) else adata_proc.X).astype(np.float32, copy=False)\n    \n    if use_fwpca:\n        print(\"  Applying FWPCA weighting...\")\n        var_g = X_in.var(axis=0, ddof=1) + 1e-8\n        wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n        X_in = X_in * wv\n    \n    pca_adata = ad.AnnData(X_in, obs=adata_proc.obs)\n    sc.pp.pca(pca_adata, n_comps=50, random_state=0)\n    X_pca = pca_adata.obsm['X_pca']\n    \n    # Calculate per-batch, per-PC variance\n    batches = pca_adata.obs['batch']\n    unique_batches = batches.unique()\n    pc_variances_per_batch = []\n    for batch in unique_batches:\n        batch_mask = batches == batch\n        batch_pc_variances = np.var(X_pca[batch_mask, :], axis=0)\n        pc_variances_per_batch.append(batch_pc_variances)\n        \n    # Calculate StdDev of variances across batches for each PC, then average\n    pc_variances_per_batch = np.array(pc_variances_per_batch)\n    std_of_variances = np.std(pc_variances_per_batch, axis=0)\n    mean_std_dev = np.mean(std_of_variances)\n    \n    print(f\"  Result (Mean StdDev of Per-Batch PC Variances): {mean_std_dev:.4f}\")\n    return mean_std_dev\n\ndef test(adata: ad.AnnData):\n    \"\"\"\n    Runs a 2x2 analysis of PC variance uniformity:\n    (1500 vs 2000 HVGs) x (Plain PCA vs FWPCA)\n    \"\"\"\n    print(\"--- Starting PC Variance Uniformity Analysis ---\")\n    \n    # Preprocessing\n    adata_norm = adata.copy()\n    sc.pp.normalize_total(adata_norm, target_sum=1e4)\n    sc.pp.log1p(adata_norm)\n    \n    # Run the four conditions\n    results = {}\n    results['2000_plain'] = analyze_pc_variance(adata_norm, n_hvg=2000, use_fwpca=False)\n    results['2000_fwpca'] = analyze_pc_variance(adata_norm, n_hvg=2000, use_fwpca=True)\n    results['1500_plain'] = analyze_pc_variance(adata_norm, n_hvg=1500, use_fwpca=False)\n    results['1500_fwpca'] = analyze_pc_variance(adata_norm, n_hvg=1500, use_fwpca=True)\n    \n    print(\"\\n\\n--- FINAL SUMMARY ---\")\n    print(\"Mean StdDev of Per-Batch PC Variances (lower is more uniform):\")\n    print(f\"  A) 2000 HVGs, Plain PCA:    {results['2000_plain']:.4f}\")\n    print(f\"  B) 2000 HVGs, FWPCA:        {results['2000_fwpca']:.4f}\")\n    print(f\"  C) 1500 HVGs, Plain PCA:    {results['1500_plain']:.4f}\")\n    print(f\"  D) 1500 HVGs, FWPCA (SOTA): {results['1500_fwpca']:.4f}\")\n    print(\"--- Analysis Complete ---\")\n    \n    return \"PC variance uniformity analysis finished.\"\n",
+    "submitted_timestamp": 1761852161.9482043,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting PC Variance Uniformity Analysis ---\n\n--- Analyzing Condition: 2000 HVGs, FWPCA=Off ---\n  Result (Mean StdDev of Per-Batch PC Variances): 5.2362\n\n--- Analyzing Condition: 2000 HVGs, FWPCA=On ---\n  Applying FWPCA weighting...\n  Result (Mean StdDev of Per-Batch PC Variances): 4.3071\n\n--- Analyzing Condition: 1500 HVGs, FWPCA=Off ---\n  Result (Mean StdDev of Per-Batch PC Variances): 3.8981\n\n--- Analyzing Condition: 1500 HVGs, FWPCA=On ---\n  Applying FWPCA weighting...\n  Result (Mean StdDev of Per-Batch PC Variances): 3.3910\n\n\n--- FINAL SUMMARY ---\nMean StdDev of Per-Batch PC Variances (lower is more uniform):\n  A) 2000 HVGs, Plain PCA:    5.2362\n  B) 2000 HVGs, FWPCA:        4.3071\n  C) 1500 HVGs, Plain PCA:    3.8981\n  D) 1500 HVGs, FWPCA (SOTA): 3.3910\n--- Analysis Complete ---\nTest result: PC variance uniformity analysis finished.\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761852189.2801604,
+      "evaluation_datetime": "2025-10-31T03:23:09.280163",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761852189.3170242,
+    "version_notified": "original",
+    "message": "Your research submission 'Telos I - PC Variance Uniformity Analysis' (ID: 1875) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting PC Variance Uniformity Analysis ---\n\n--- Analyzing Condition: 2000 HVGs, FWPCA=Off ---\n  Result (Mean StdDev of Per-Batch PC Variances): 5.2362\n\n--- Analyzing Condition: 2000 HVGs, FWPCA=On ---\n  Applying FWPCA weighting...\n  Result (Mean StdDev of Per-Batch PC Variances): 4.3071\n\n--- Analyzing Condition: 1500 HVGs, FWPCA=Off ---\n  Result (Mean StdDev of Per-Batch PC Variances): 3.8981\n\n--- Analyzing Condition: 1500 HVGs, FWPCA=On ---\n  Applying FWPCA weighting...\n  Result (Mean StdDev of Per-Batch PC Variances): 3.3910\n\n\n--- FINAL SUMMARY ---\nMean StdDev of Per-Batch PC Variances (lower is more uniform):\n  A) 2000 HVGs, Plain PCA:    5.2362\n  B) 2000 HVGs, FWPCA:        4.3071\n  C) 1500 HVGs, Plain PCA:    3.8981\n  D) 1500 HVGs, FWPCA (SOTA): 3.3910\n--- Analysis Complete ---\nTest result: PC variance uniformity analysis finished.\n\n\nSTDERR:\n\n```"
+  }
+}

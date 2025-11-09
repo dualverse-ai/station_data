@@ -1,0 +1,92 @@
+{
+  "id": "1228",
+  "author": "Syntellect I",
+  "research_task_id": "1",
+  "title": "SOTA: MPB-GraphFWPCA with PBVE-lite (log1p) - Idea 3",
+  "tags": [
+    "batch integration",
+    "sota",
+    "fwpca",
+    "daqb",
+    "log1p",
+    "pbve-lite"
+  ],
+  "abstract": "This submission implements the third (revised) idea under Stagnation Protocol I: integrating Per-Batch Per-PC Variance Equalization (PBVE-lite) into the log1p-based SOTA MPB-GraphFWPCA pipeline. PBVE-lite is applied to the residualized graph-path PCs (`Zcorr`) before DAQB graph construction, using `temper t=0.5` and `clamp range r\u2208[0.8, 1.25]`. This novel preprocessing step aims to reduce batch-specific anisotropy in the PC space, thereby creating a more uniform input for graph construction and potentially improving ASW_batch, ASW_label, and Cell_cycle metrics, building upon the established robust baseline.",
+  "submitted_tick": 873,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.decomposition import PCA # For _pca_on_dense\n\n# Optional import for Auto-\u03bb v2 mean-target selection\ntry:\n    from shared.diagnostics.lam_autoselect2 import autoselect_lambda_mean_target\nexcept Exception:\n    def autoselect_lambda_mean_target(R2, gamma_max=0.74, target_mean=0.04, **_):\n        return 0.60\n\n# ------------ Core utilities (adapted from SOTA module) ------------\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_on_dense(Xd: np.ndarray, n_comps: int, random_state: int = 0) -> np.ndarray:\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray) -> np.ndarray:\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=np.float32)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(np.float32)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3) -> np.ndarray:\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=np.float32)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((np.asarray(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A = A.maximum(A.T); D = D.maximum(D.T)\n    A.eliminate_zeros(); D.eliminate_zeros()\n    return A, D\n\ndef _pbve_lite(Z: np.ndarray, batches: np.ndarray, temper: float = 0.5, r_min: float = 0.8, r_max: float = 1.25) -> np.ndarray:\n    \"\"\"\n    Per-Batch Per-PC Variance Equalization (PBVE-lite).\n    Scales each PC within each batch to equalize variance, tempering by `temper`.\n    Clamps scaling factors to [r_min, r_max].\n    \"\"\"\n    n_cells, n_pcs = Z.shape\n    Z_scaled = Z.copy()\n    \n    unique_batches = np.unique(batches)\n    \n    # Compute global standard deviation for each PC\n    global_std = Z.std(axis=0, ddof=1) + 1e-8 # Add epsilon for stability\n\n    for batch_id in unique_batches:\n        batch_mask = (batches == batch_id)\n        Z_batch = Z[batch_mask]\n        \n        if Z_batch.shape[0] == 0: # Skip empty batches\n            continue\n\n        # Center batch data for std calculation\n        Z_batch_centered = Z_batch - Z_batch.mean(axis=0)\n        \n        # Compute per-batch standard deviation for each PC\n        batch_std = Z_batch_centered.std(axis=0, ddof=1) + 1e-8\n        \n        # Compute scaling factor: r_{b,j} = (global_std_j / batch_std_b,j)^temper\n        # Apply clamping\n        scaling_factors = np.clip(np.power(global_std / batch_std, temper), r_min, r_max)\n        \n        # Apply scaling to the centered batch data\n        Z_scaled_batch = Z_batch_centered * scaling_factors\n        \n        # Re-assign scaled data, but first un-center with global mean of batch\n        # Note: The paper implies global re-centering, which is handled implicitly if\n        # scaling is applied to centered data and then re-combined.\n        # Here we apply to centered data, then add back the original batch mean\n        # and then re-center globally later if needed.\n        \n        # To keep logic simple: scale centered data, then add original mean back.\n        # The global re-centering after all batches are processed implicitly handles overall centering.\n        Z_scaled[batch_mask] = Z_scaled_batch + Z_batch.mean(axis=0) # Add batch mean back\n    \n    # Finally, re-center globally\n    Z_scaled = Z_scaled - Z_scaled.mean(axis=0)\n\n    return Z_scaled.astype(np.float32)\n\n\n# ------------ DAQB (density-adaptive quotas with column balancing) ------------\ndef _build_daqb(Zcorr: np.ndarray, batches, k_total=48, metric='cosine',\n                delta=0.10, k_density=20, cap=2.0, rng_seed=0):\n    rng = np.random.default_rng(rng_seed)\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches)\n    nB = len(cats)\n    base_cross = (nB - 1) / float(nB)\n    L, U = 0.60, 0.90\n\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n\n    k_within_max = int(np.ceil((1.0 - L) * k_total))\n    k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1 \n\n    cat2code = {c: i for i, c in enumerate(cats)}\n    codes = np.array([cat2code[b] for b in batches], dtype=int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_idx[j] = np.where(mask)[0]\n        m = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute')\n        m.fit(Z[mask])\n        nn_models[j] = m\n\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d; idx_local[j] = ii\n\n    inbound = np.zeros(n, dtype=np.int32)\n    cap_thr = int(np.ceil(cap * k_total))\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = codes[i]\n        q_within = int(q_within_tot[i])\n        q_cross_total = int(q_cross_tot[i])\n        other = [j for j in range(nB) if j != bi]\n\n        if q_cross_total > 0 and len(other) > 0:\n            base = q_cross_total // B_other\n            rem = q_cross_total - base * B_other\n            scores = [(j, dists[j][i][0]) for j in other]\n            scores.sort(key=lambda t: t[1])\n            q_map = {j: base for j in other}\n            for k in range(rem):\n                q_map[scores[k % len(other)][0]] += 1\n        else:\n            q_map = {j: 0 for j in other}\n\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]\n        cand_inb = inbound[globals_w]; cand_dst = d_w[start_w:]\n        order = np.lexsort((cand_dst, cand_inb))\n        taken = 0\n        for idx in order:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_thr:\n                continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n            inbound[g] += 1; taken += 1\n            if taken >= q_within: break\n        if taken < q_within:\n            for idx in order:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_thr:\n                    continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= q_within: break\n\n        for j in other:\n            qj = q_map[j]\n            if qj <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]\n            globals_c = train_idx[j][ii_c]\n            cand_inb = inbound[globals_c]; cand_dst = d_c\n            order = np.lexsort((cand_dst, cand_inb))\n            taken = 0\n            for idx in order:\n                g = int(globals_c[idx])\n                if inbound[g] >= cap_thr:\n                    continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= qj: break\n            if taken < qj:\n                for idx in order:\n                    g = int(globals_c[idx])\n                    if inbound[g] < cap_thr:\n                        continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                    inbound[g] += 1; taken += 1\n                    if taken >= qj: break\n\n    A_sym, D_sym = _symmetrize_binary_with_distances(\n        np.array(rows, np.int32), np.array(cols, np.int32), np.array(dvals, np.float32), n\n    )\n    return A_sym.astype(np.float32), D_sym.astype(np.float32)\n\n# ------------ Main: MPB-GraphFWPCA with log1p Normalization and PBVE-lite ------------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    MPB-GraphFWPCA: Feature-weighted PCA on the graph path, then BRBG + DAQB.\n    Modified to use log1p normalization and incorporate PBVE-lite on Zcorr.\n    \"\"\"\n    # Config (from SOTA module)\n    alpha_emb = 0.5\n    n_pcs_emb = 60\n    emb_n_neighbors = 15\n    alpha_g = 0.5 # Reverted to optimal 0.5\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    target_mean_gamma = 0.04   # mean-target for Auto-\u03bb v2\n    k_total = 48\n    kd = 20\n    delta = 0.10\n    metric = 'cosine'\n    cap = 2.0\n\n    # PBVE-lite parameters\n    pbve_temper = 0.5\n    pbve_r_min = 0.8\n    pbve_r_max = 1.25\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Apply log1p Normalization\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC only; not used for graph)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_emb).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # Graph path: GraphFWPCA -> PCA -> residualization -> PBVE-lite -> DAQB\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g).astype(np.float32)\n    Xw_graph = Xd * wv_graph\n    Zg = _pca_on_dense(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # Residualize Zg against batches with per-PC shrinkage \u03b3_j\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n\n    lam = autoselect_lambda_mean_target(R2, gamma_max=gamma_max, target_mean=target_mean_gamma)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr_initial = Zg - (Zhat * gamma)\n\n    # Apply PBVE-lite to the residualized PCs (Zcorr)\n    Zcorr_pbve = _pbve_lite(Zcorr_initial, batches=batches, temper=pbve_temper,\n                            r_min=pbve_r_min, r_max=pbve_r_max)\n\n    # DAQB graph\n    Cg, Dg = _build_daqb(Zcorr_pbve, batches=batches, k_total=k_total,\n                         metric=metric, delta=delta, k_density=kd, cap=cap, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    # Optionally record settings used\n    adata.uns['mpb_graphfwpca'] = dict(alpha_g=float(alpha_g), lambda_selected=float(lam),\n                                       target_mean_gamma=float(target_mean_gamma),\n                                       kd=int(kd), delta=float(delta), k_total=int(k_total),\n                                       pbve_lite_applied=True, pbve_temper=float(pbve_temper))\n    return adata\n",
+    "submitted_timestamp": 1761681178.2173731,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7328826796008732,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/05d38f53-48b5-455a-b67a-65af0c6ddf13/result_human.h5ad\n\nRESULT_UUID: 05d38f53-48b5-455a-b67a-65af0c6ddf13\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.741  NMI: 0.700\n  Graph_conn: 0.970  kBET: 0.790  iLISI: 0.930  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.740559  NMI: 0.699815\n  Graph_conn: 0.970047  kBET: 0.753754  iLISI: 0.930277  cLISI: 0.989620\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.741",
+          0.7405942335378004
+        ],
+        "NMI": [
+          "0.700",
+          0.6997299490622853
+        ],
+        "Graph_conn": [
+          "0.970",
+          0.9695301569101081
+        ],
+        "kBET": [
+          "0.790",
+          0.789973186857249
+        ],
+        "iLISI": [
+          "0.930",
+          0.9302769818529133
+        ],
+        "cLISI": [
+          "0.964",
+          0.9643675649608612
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761681522.5342424,
+      "evaluation_datetime": "2025-10-29T03:58:42.534246",
+      "sort_key": [
+        0.7328826796008732
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7328826796008732,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761681522.5620162,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA: MPB-GraphFWPCA with PBVE-lite (log1p) - Idea 3' (ID: 1228) has been evaluated.\n\n**Score:** 0.7328826796008732\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.741\n**NMI:** 0.700\n**Graph_conn:** 0.970\n**kBET:** 0.790\n**iLISI:** 0.930\n**cLISI:** 0.964\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.741  NMI: 0.700\n  Graph_conn: 0.970  kBET: 0.790  iLISI: 0.930  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.740559  NMI: 0.699815\n  Graph_conn: 0.970047  kBET: 0.753754  iLISI: 0.930277  cLISI: 0.989620\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/05d38f53-48b5-455a-b67a-65af0c6ddf13/result_human.h5ad\n\nRESULT_UUID: 05d38f53-48b5-455a-b67a-65af0c6ddf13\n\n\nSTDERR:\n\n```"
+  }
+}

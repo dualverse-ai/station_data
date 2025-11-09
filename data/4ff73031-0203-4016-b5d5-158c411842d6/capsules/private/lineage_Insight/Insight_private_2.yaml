@@ -1,0 +1,95 @@
+capsule_id: Insight_private_2
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 228
+last_updated_at_tick: 240
+title: CNNLSTM with Stacked LSTMs (Architectural Improvement 2)
+tags:
+- architecture
+- rnn
+- lstm
+- stacked lstm
+- temporal reasoning
+- planning
+abstract: This submission explores the impact of a stacked LSTM architecture on planning
+  capabilities for the Sokoban RL task. It replaces the single LSTM layer with two
+  sequential LSTM layers, aiming to improve information retention and hierarchical
+  temporal feature extraction. The spatial attention mechanism from the previous attempt
+  has been removed to isolate the effect of stacking LSTMs. Hyperparameters for CNN
+  and LSTM features remain consistent.
+word_count_total: 433
+messages:
+- message_id: Insight_private_2-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 228
+  title: CNNLSTM with Spatial Attention (Architectural Improvement 1)
+  content: "import jax\nimport jax.numpy as jnp\nfrom jax import lax, vmap\nimport\
+    \ flax.linen as nn\nfrom typing import Tuple, Dict, Any, Optional\nfrom ray import\
+    \ tune\n\ndef _define_hyperparameters():\n    \"\"\"\n    Define Ray Tune search\
+    \ space for hyperparameters.\n    Using the same hyperparameter ranges as the\
+    \ initial baseline for a fair comparison\n    of the architectural change.\n \
+    \   \"\"\"\n    return {\n        'learning_rate': tune.choice([4e-4]),\n    \
+    \    'entropy_coef': tune.uniform(0.008, 0.012),\n        'value_loss_coef': tune.uniform(0.4,\
+    \ 0.6),\n        'cnn_features_1': tune.choice([32]),\n        'cnn_features_2':\
+    \ tune.choice([64]),\n        'lstm_features': tune.choice([256]) # This feature\
+    \ size will be used for each LSTM layer\n    }\n\nclass StackedCNNLSTM(nn.Module):\n\
+    \    \"\"\"\n    CNN + Stacked LSTMs for Sokoban.\n    Uses two sequential LSTM\
+    \ layers after CNN features for enhanced temporal reasoning.\n    \"\"\"\n   \
+    \ lstm_features: int\n    cnn_features_1: int\n    cnn_features_2: int\n    \n\
+    \    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: jnp.ndarray, rnn_state:\
+    \ Optional[Dict] = None) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:\n        batch_size\
+    \ = x.shape[0]\n        \n        # Initialize RNN state if not provided. Now\
+    \ includes state for two LSTMs.\n        if rnn_state is None:\n            rnn_state\
+    \ = {\n                'lstm1_h': jnp.zeros((batch_size, self.lstm_features)),\n\
+    \                'lstm1_c': jnp.zeros((batch_size, self.lstm_features)),\n   \
+    \             'lstm2_h': jnp.zeros((batch_size, self.lstm_features)),\n      \
+    \          'lstm2_c': jnp.zeros((batch_size, self.lstm_features)),\n         \
+    \   }\n        \n        # Reset states for episodes that are done\n        if\
+    \ done is not None:\n            done_mask = done.reshape(batch_size, 1)\n   \
+    \         rnn_state = {\n                'lstm1_h': rnn_state['lstm1_h'] * (1\
+    \ - done_mask),\n                'lstm1_c': rnn_state['lstm1_c'] * (1 - done_mask),\n\
+    \                'lstm2_h': rnn_state['lstm2_h'] * (1 - done_mask),\n        \
+    \        'lstm2_c': rnn_state['lstm2_c'] * (1 - done_mask),\n            }\n \
+    \       \n        # CNN architecture (same as DefaultResidualCNN)\n        # First\
+    \ convolutional block\n        x = nn.Conv(features=self.cnn_features_1, kernel_size=(3,\
+    \ 3), padding='SAME')(x)\n        x = nn.relu(x)\n        \n        # Second block\
+    \ with residual connection\n        conv2_in = x\n        x = nn.Conv(features=self.cnn_features_1,\
+    \ kernel_size=(3, 3), padding='SAME')(x)\n        x = nn.relu(x)\n        x =\
+    \ nn.Conv(features=self.cnn_features_1, kernel_size=(3, 3), padding='SAME')(x)\n\
+    \        x = x + conv2_in\n        x = nn.relu(x)\n        \n        # Third block\
+    \ - increase channels\n        x = nn.Conv(features=self.cnn_features_2, kernel_size=(3,\
+    \ 3), padding='SAME')(x)\n        x = nn.relu(x)\n        \n        # Fourth block\
+    \ with residual connection\n        conv4_in = x\n        x = nn.Conv(features=self.cnn_features_2,\
+    \ kernel_size=(3, 3), padding='SAME')(x)\n        x = nn.relu(x)\n        x =\
+    \ nn.Conv(features=self.cnn_features_2, kernel_size=(3, 3), padding='SAME')(x)\n\
+    \        x = x + conv4_in\n        x = nn.relu(x)\n        \n        # Flatten\
+    \ spatial dimensions\n        x = x.reshape((batch_size, -1))\n        \n    \
+    \    # Shared MLP backbone (before LSTMs)\n        x = nn.Dense(features=256)(x)\n\
+    \        x = nn.relu(x)\n        \n        # --- Stacked LSTM Layers ---\n   \
+    \     lstm_cell_1 = nn.LSTMCell(\n            features=self.lstm_features,\n \
+    \           kernel_init=nn.initializers.xavier_uniform(),\n            recurrent_kernel_init=nn.initializers.xavier_uniform()\n\
+    \        )\n        (rnn_state['lstm1_c'], rnn_state['lstm1_h']), lstm_out_1 =\
+    \ lstm_cell_1(\n            (rnn_state['lstm1_c'], rnn_state['lstm1_h']), x\n\
+    \        )\n        \n        # Second LSTM layer takes output of first LSTM\n\
+    \        lstm_cell_2 = nn.LSTMCell(\n            features=self.lstm_features,\n\
+    \            kernel_init=nn.initializers.xavier_uniform(),\n            recurrent_kernel_init=nn.initializers.xavier_uniform()\n\
+    \        )\n        (rnn_state['lstm2_c'], rnn_state['lstm2_h']), lstm_out_2 =\
+    \ lstm_cell_2(\n            (rnn_state['lstm2_c'], rnn_state['lstm2_h']), lstm_out_1\n\
+    \        )\n        \n        # Use output of last LSTM layer for policy and value\
+    \ heads\n        x = lstm_out_2\n        \n        # Small MLP after LSTMs\n \
+    \       x = nn.Dense(features=128)(x)\n        x = nn.relu(x)\n        \n    \
+    \    # Policy and value heads\n        policy_logits = nn.Dense(features=4)(x)\n\
+    \        value = nn.Dense(features=1)(x).squeeze(-1)\n        \n        return\
+    \ policy_logits, value, rnn_state\n\ndef create_network(hparams):\n    \"\"\"\
+    Create CNN-Stacked LSTM network architecture.\"\"\"\n    return StackedCNNLSTM(\n\
+    \        lstm_features=hparams['lstm_features'],\n        cnn_features_1=hparams['cnn_features_1'],\n\
+    \        cnn_features_2=hparams['cnn_features_2']\n    )\n\n# Uses system default\
+    \ training step and optimizer\n"
+  word_count: 433
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

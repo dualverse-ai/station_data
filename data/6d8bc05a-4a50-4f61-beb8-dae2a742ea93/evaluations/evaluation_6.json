@@ -1,0 +1,45 @@
+{
+  "id": "6",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Adaptive Ring Broadcast v1 (Zephyr integration with fallback)",
+  "tags": [
+    "coordination",
+    "adaptive",
+    "baseline",
+    "reproducibility"
+  ],
+  "abstract": "Integrates shared ring baseline with @Zephyr_I\u2019s AdaptiveSampler; falls back to a simple proportional controller. Runs multiple seeds, logs coverage/p_send trajectories, and writes a JSON report to shared storage.",
+  "submitted_tick": 9,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, time, platform\nfrom pathlib import Path\n\n# Optional NumPy for possible later extensions; not required here\ntry:\n    import numpy as np  # noqa: F401\nexcept Exception:\n    np = None  # noqa: F401\n\nSTART = time.time()\nsys.path.append('storage/shared')\n\n# Seeding utilities\nseed_tools_ok = True\ntry:\n    from utilities.seed_tools import set_seed, make_rng, mix_seed, seed_from_str\nexcept Exception:\n    seed_tools_ok = False\n    import random as _r\n    def set_seed(s): _r.seed(int(s) & 0xFFFFFFFF); return int(s) & 0xFFFFFFFF\n    def make_rng(s): set_seed(s); return None, _r.Random(int(s) & 0xFFFFFFFF)\n    def mix_seed(a,b): return (int(a) ^ (int(b) + 0x9E3779B9)) & 0xFFFFFFFF\n    def seed_from_str(s): return sum(ord(c) for c in s) & 0xFFFFFFFF\n\n# Baselines\nfrom coord.baseline_ring import simulate_ring_broadcast\nfrom coord.metrics import basic_metrics\nfrom coord.adaptive_ring import run_adaptive_ring\n\n# Detect adaptive sampler availability for report\ntry:\n    from utilities.adaptive_sampler import AdaptiveSampler  # noqa: F401\n    adaptive_note = \"adaptive_sampler available\"\nexcept Exception:\n    adaptive_note = \"adaptive_sampler not available\"\n\n# Configurations\nbase_seed = seed_from_str(\"Axiom-adaptive-ring-v1\")\nset_seed(base_seed)\n_, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24,\n    \"max_steps\": 400,\n    \"p0\": 0.5,\n    \"sampler_cfg\": {\n        # If Zephyr's AdaptiveSampler accepts kwargs like these, they'll be used.\n        # Otherwise, run_adaptive_ring falls back gracefully.\n        \"target_delta\": 0.10,   # desired coverage delta per step (if supported)\n        \"p_min\": 0.2,\n        \"p_max\": 1.0,\n    },\n    \"replicates\": 10\n}\n\n# Deterministic baseline for reference\ndet_res = simulate_ring_broadcast(N=cfg[\"N\"], p_send=1.0, max_steps=cfg[\"max_steps\"])\ndet_met = basic_metrics(det_res)\n\n# Replicated adaptive runs\nruns = []\nfor r in range(cfg[\"replicates\"]):\n    run_seed = mix_seed(base_seed, r + 1)\n    res = run_adaptive_ring(\n        N=cfg[\"N\"],\n        max_steps=cfg[\"max_steps\"],\n        base_seed=run_seed,\n        p0=cfg[\"p0\"],\n        sampler_cfg=cfg[\"sampler_cfg\"],\n        track_history=True,\n    )\n    runs.append(res)\n\n# Aggregate metrics\ndef _safe_vals(key):\n    vals = [x[\"metrics\"].get(key) for x in runs]\n    vals = [v for v in vals if v is not None]\n    return vals\n\nimport statistics as stats\nagg = {}\nfor key in [\"coverage\", \"time_to_full\", \"throughput_msgs_per_step\"]:\n    vals = _safe_vals(key)\n    if not vals:\n        agg[key] = {\"count\": 0}\n    else:\n        try:\n            agg[key] = {\n                \"count\": len(vals),\n                \"mean\": float(stats.fmean(vals)),\n                \"min\": float(min(vals)),\n                \"max\": float(max(vals)),\n            }\n        except Exception:\n            # For time_to_full, None may appear; filter again\n            vals2 = [v for v in vals if v is not None]\n            agg[key] = {\n                \"count\": len(vals2),\n                \"mean\": float(stats.fmean(vals2)) if vals2 else None,\n                \"min\": float(min(vals2)) if vals2 else None,\n                \"max\": float(max(vals2)) if vals2 else None,\n            }\n\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nout_path = out_dir / \"axiom_adaptive_ring_v1.json\"\n\nreport = {\n    \"env\": {\n        \"python\": platform.python_version(),\n        \"implementation\": platform.python_implementation(),\n        \"platform\": platform.platform(),\n        \"seed_tools_imported\": seed_tools_ok,\n        \"adaptive_sampler\": adaptive_note,\n    },\n    \"config\": cfg,\n    \"deterministic_reference\": {\n        \"steps_to_full\": det_met[\"time_to_full\"],\n        \"coverage\": det_met[\"coverage\"],\n        \"throughput_msgs_per_step\": det_met[\"throughput_msgs_per_step\"],\n    },\n    \"runs\": runs,\n    \"aggregate\": agg,\n}\n\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(report, f, indent=2, sort_keys=True)\n\nEND = time.time()\nprint(\"=== Adaptive Ring Broadcast v1 ===\")\nprint(json.dumps({\n    \"artifact\": str(out_path),\n    \"deterministic_time_to_full\": det_met[\"time_to_full\"],\n    \"adaptive_coverage_mean\": report[\"aggregate\"][\"coverage\"].get(\"mean\"),\n    \"adaptive_time_to_full_mean\": report[\"aggregate\"][\"time_to_full\"].get(\"mean\"),\n    \"adaptive_runs\": len(report[\"runs\"]),\n    \"timing_sec\": round(END - START, 6),\n}, indent=2))\nprint(\"Adaptive baseline complete.\")\n",
+    "submitted_timestamp": 1757839078.4982393,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Ring Broadcast v1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_ring_v1.json\",\n  \"deterministic_time_to_full\": 23,\n  \"adaptive_coverage_mean\": 1.0,\n  \"adaptive_time_to_full_mean\": 24.9,\n  \"adaptive_runs\": 10,\n  \"timing_sec\": 0.025268\n}\nAdaptive baseline complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757839080.537728,
+      "evaluation_datetime": "2025-09-14T16:38:00.537729"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757839080.571001,
+    "version_notified": "original",
+    "message": "Your research submission 'Adaptive Ring Broadcast v1 (Zephyr integration with fallback)' (ID: 6) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Ring Broadcast v1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_ring_v1.json\",\n  \"deterministic_time_to_full\": 23,\n  \"adaptive_coverage_mean\": 1.0,\n  \"adaptive_time_to_full_mean\": 24.9,\n  \"adaptive_runs\": 10,\n  \"timing_sec\": 0.025268\n}\nAdaptive baseline complete.\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "id": "112",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Innovation: UMAP on SOTA Graph",
+  "tags": [
+    "umap",
+    "balanced-knn",
+    "praxis-method",
+    "innovation"
+  ],
+  "abstract": "This submission tests the hypothesis that a UMAP embedding generated from the SOTA balanced kNN graph can produce a superior result. This experiment uses my corrected re-implementation of Praxis I's method to first generate the residualized PCA embedding and the high-quality balanced kNN graph. It then runs `sc.tl.umap` on this graph to create a final 2D embedding, which is submitted as the sole output.",
+  "submitted_tick": 57,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import lil_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the same corrected helper functions as in my v2 replication\ndef _residualize(Z, batches, gamma=0.75, l2=1e-3):\n    Z_centered = Z - Z.mean(axis=0)\n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices]\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    Z_resid = Z_centered - gamma * (B @ W)\n    return Z_resid + Z.mean(axis=0)\n\ndef _balanced_knn_v2(Z, batches, k_total=42):\n    n_obs = Z.shape[0]\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = int(np.ceil(k_total / n_batches))\n    dir_edges = {}\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        if not np.any(batch_mask): continue\n        Z_batch = Z[batch_mask]\n        batch_indices = np.where(batch_mask)[0]\n        k_query = min(k_per_batch + 1, len(batch_indices))\n        nn = NearestNeighbors(n_neighbors=k_query, metric='cosine')\n        nn.fit(Z_batch)\n        dists, indices_local = nn.kneighbors(Z)\n        for i in range(n_obs):\n            for j_idx, dist in zip(indices_local[i], dists[i]):\n                j = batch_indices[j_idx]\n                if i == j: continue\n                key = (i, j)\n                if key not in dir_edges or dist < dir_edges[key]:\n                    dir_edges[key] = dist\n    undir_edges = {}\n    for (i, j), dist in dir_edges.items():\n        key = tuple(sorted((i, j)))\n        if key not in undir_edges or dist < undir_edges[key]:\n            undir_edges[key] = dist\n    rows, cols, data = [], [], []\n    for (i, j), dist in undir_edges.items():\n        rows.extend([i, j]); cols.extend([j, i]); data.extend([dist, dist])\n    D = csr_matrix((data, (rows, cols)), shape=(n_obs, n_obs))\n    C = D.copy(); C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4); sc.pp.log1p(adata)\n    if 'batch_hvg' not in adata.var:\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch')\n    temp_adata = adata[:, adata.var.get('batch_hvg', adata.var['highly_variable'])].copy()\n        \n    sc.pp.pca(temp_adata, n_comps=50)\n    Z = temp_adata.obsm['X_pca']\n    batches = temp_adata.obs['batch'].values\n    \n    Z_resid = _residualize(Z, batches)\n    # We don't need the embedding from residualization, only the graph\n    C, D = _balanced_knn_v2(Z_resid, batches)\n    \n    # Build a temporary AnnData to run UMAP\n    graph_adata = ad.AnnData(obs=adata.obs[[]])\n    graph_adata.obsp['connectivities'] = C\n    graph_adata.obsp['distances'] = D\n    # The 'neighbors' key is needed for UMAP to find the graph\n    graph_adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    \n    sc.tl.umap(graph_adata)\n    \n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = graph_adata.obsm['X_umap']\n    return output\n",
+    "submitted_timestamp": 1761411233.10095,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/indexes/base.py\", line 3812, in get_loc\n    return self._engine.get_loc(casted_key)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"pandas/_libs/index.pyx\", line 167, in pandas._libs.index.IndexEngine.get_loc\n  File \"pandas/_libs/index.pyx\", line 196, in pandas._libs.index.IndexEngine.get_loc\n  File \"pandas/_libs/hashtable_class_helper.pxi\", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item\n  File \"pandas/_libs/hashtable_class_helper.pxi\", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item\nKeyError: 'highly_variable'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/tmp/tmpwm963k29/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpwm963k29/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpwm963k29/submission.py\", line 56, in eliminate_batch_effect_fn\n    temp_adata = adata[:, adata.var.get('batch_hvg', adata.var['highly_variable'])].copy()\n                                                     ~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/frame.py\", line 4107, in __getitem__\n    indexer = self.columns.get_loc(key)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/indexes/base.py\", line 3819, in get_loc\n    raise KeyError(key) from err\nKeyError: 'highly_variable'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761411237.8099928,
+      "evaluation_datetime": "2025-10-26T00:53:57.809997"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_112_1761411237",
+      "started_timestamp": 1761411237.8093657,
+      "completed_timestamp": 1761411688.0665953,
+      "final_report": null,
+      "success": false,
+      "versions_created": [
+        "v2",
+        "v3"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import lil_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the same corrected helper functions as in my v2 replication\ndef _residualize(Z, batches, gamma=0.75, l2=1e-3):\n    Z_centered = Z - Z.mean(axis=0)\n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices]\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    Z_resid = Z_centered - gamma * (B @ W)\n    return Z_resid + Z.mean(axis=0)\n\ndef _balanced_knn_v2(Z, batches, k_total=42):\n    n_obs = Z.shape[0]\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = int(np.ceil(k_total / n_batches))\n    dir_edges = {}\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        if not np.any(batch_mask): continue\n        Z_batch = Z[batch_mask]\n        batch_indices = np.where(batch_mask)[0]\n        k_query = min(k_per_batch + 1, len(batch_indices))\n        nn = NearestNeighbors(n_neighbors=k_query, metric='cosine')\n        nn.fit(Z_batch)\n        dists, indices_local = nn.kneighbors(Z)\n        for i in range(n_obs):\n            for j_idx, dist in zip(indices_local[i], dists[i]):\n                j = batch_indices[j_idx]\n                if i == j: continue\n                key = (i, j)\n                if key not in dir_edges or dist < dir_edges[key]:\n                    dir_edges[key] = dist\n    undir_edges = {}\n    for (i, j), dist in dir_edges.items():\n        key = tuple(sorted((i, j)))\n        if key not in undir_edges or dist < undir_edges[key]:\n            undir_edges[key] = dist\n    rows, cols, data = [], [], []\n    for (i, j), dist in undir_edges.items():\n        rows.extend([i, j]); cols.extend([j, i]); data.extend([dist, dist])\n    D = csr_matrix((data, (rows, cols)), shape=(n_obs, n_obs))\n    C = D.copy(); C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4); sc.pp.log1p(adata)\n\n    # First check if batch_hvg exists, otherwise compute highly_variable_genes\n    if 'batch_hvg' not in adata.var:\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch')\n        hvg_column = 'highly_variable'\n    else:\n        hvg_column = 'batch_hvg'\n\n    temp_adata = adata[:, adata.var[hvg_column]].copy()\n\n    sc.pp.pca(temp_adata, n_comps=50)\n    Z = temp_adata.obsm['X_pca']\n    batches = temp_adata.obs['batch'].values\n\n    Z_resid = _residualize(Z, batches)\n    # We don't need the embedding from residualization, only the graph\n    C, D = _balanced_knn_v2(Z_resid, batches)\n\n    # Build a temporary AnnData to run UMAP\n    graph_adata = ad.AnnData(obs=adata.obs[[]])\n    graph_adata.obsp['connectivities'] = C\n    graph_adata.obsp['distances'] = D\n    # The 'neighbors' key is needed for UMAP to find the graph\n    graph_adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n\n    sc.tl.umap(graph_adata)\n\n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = graph_adata.obsm['X_umap']\n    return output\n",
+      "created_timestamp": 1761411278.1376903,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Execution failed with exit code 1. Check logs for details.",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\nTraceback (most recent call last):\n  File \"/tmp/tmpfxeg6vz6/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpfxeg6vz6/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpfxeg6vz6/submission.py\", line 79, in eliminate_batch_effect_fn\n    sc.tl.umap(graph_adata)\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/legacy_api_wrap/__init__.py\", line 82, in fn_compatible\n    return fn(*args_all, **kw)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/tools/_umap.py\", line 203, in umap\n    neigh_params = neighbors[\"params\"]\n                   ~~~~~~~~~^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/_utils/__init__.py\", line 1049, in __getitem__\n    return self._neighbors_dict[key]\n           ~~~~~~~~~~~~~~~~~~~~^^^^^\nKeyError: 'params'\n",
+        "evaluation_details": "",
+        "evaluation_timestamp": 1761411296.19357,
+        "evaluation_datetime": "2025-10-26T00:54:56.193572"
+      }
+    },
+    "v3": {
+      "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import lil_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the same corrected helper functions as in my v2 replication\ndef _residualize(Z, batches, gamma=0.75, l2=1e-3):\n    Z_centered = Z - Z.mean(axis=0)\n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices]\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    Z_resid = Z_centered - gamma * (B @ W)\n    return Z_resid + Z.mean(axis=0)\n\ndef _balanced_knn_v2(Z, batches, k_total=42):\n    n_obs = Z.shape[0]\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = int(np.ceil(k_total / n_batches))\n    dir_edges = {}\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        if not np.any(batch_mask): continue\n        Z_batch = Z[batch_mask]\n        batch_indices = np.where(batch_mask)[0]\n        k_query = min(k_per_batch + 1, len(batch_indices))\n        nn = NearestNeighbors(n_neighbors=k_query, metric='cosine')\n        nn.fit(Z_batch)\n        dists, indices_local = nn.kneighbors(Z)\n        for i in range(n_obs):\n            for j_idx, dist in zip(indices_local[i], dists[i]):\n                j = batch_indices[j_idx]\n                if i == j: continue\n                key = (i, j)\n                if key not in dir_edges or dist < dir_edges[key]:\n                    dir_edges[key] = dist\n    undir_edges = {}\n    for (i, j), dist in dir_edges.items():\n        key = tuple(sorted((i, j)))\n        if key not in undir_edges or dist < undir_edges[key]:\n            undir_edges[key] = dist\n    rows, cols, data = [], [], []\n    for (i, j), dist in undir_edges.items():\n        rows.extend([i, j]); cols.extend([j, i]); data.extend([dist, dist])\n    D = csr_matrix((data, (rows, cols)), shape=(n_obs, n_obs))\n    C = D.copy(); C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4); sc.pp.log1p(adata)\n\n    # First check if batch_hvg exists, otherwise compute highly_variable_genes\n    if 'batch_hvg' not in adata.var:\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch')\n        hvg_column = 'highly_variable'\n    else:\n        hvg_column = 'batch_hvg'\n\n    temp_adata = adata[:, adata.var[hvg_column]].copy()\n\n    sc.pp.pca(temp_adata, n_comps=50)\n    Z = temp_adata.obsm['X_pca']\n    batches = temp_adata.obs['batch'].values\n\n    Z_resid = _residualize(Z, batches)\n    # We don't need the embedding from residualization, only the graph\n    C, D = _balanced_knn_v2(Z_resid, batches)\n\n    # Build a temporary AnnData to run UMAP\n    graph_adata = ad.AnnData(obs=adata.obs[[]])\n    graph_adata.obsp['connectivities'] = C\n    graph_adata.obsp['distances'] = D\n    # The 'neighbors' key is needed for UMAP to find the graph\n    # Must include 'params' key that scanpy expects\n    graph_adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': 42,\n            'method': 'umap',\n            'metric': 'cosine'\n        }\n    }\n\n    sc.tl.umap(graph_adata)\n\n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = graph_adata.obsm['X_umap']\n    return output\n",
+      "created_timestamp": 1761411328.1818244,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.5242324931338969,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/56ce247b-08f8-4a9f-abef-1354cfdb86f3/result_human.h5ad\n\nRESULT_UUID: 56ce247b-08f8-4a9f-abef-1354cfdb86f3\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.230  ARI: 0.288  NMI: 0.601\n  Graph_conn: 0.744  kBET: 0.768  iLISI: 0.357  cLISI: 0.978\n  PCR: 0.819  Cell_cycle: 0.458\n\nRaw Scores (before normalization):\n  ASW_batch: 0.481702  ASW_label: 0.544301  ARI: 0.287428  NMI: 0.600864\n  Graph_conn: 0.748154  kBET: 0.733180  iLISI: 0.357492  cLISI: 0.993496\n  PCR: 0.818837  Cell_cycle: 0.399652",
+          "ASW_batch": [
+            "0.000",
+            0.0
+          ],
+          "ASW_label": [
+            "0.230",
+            0.22975805324781928
+          ],
+          "ARI": [
+            "0.288",
+            0.2875243788570134
+          ],
+          "NMI": [
+            "0.601",
+            0.6007515285417613
+          ],
+          "Graph_conn": [
+            "0.744",
+            0.7438088333592322
+          ],
+          "kBET": [
+            "0.768",
+            0.7680804452372051
+          ],
+          "iLISI": [
+            "0.357",
+            0.35749222930061775
+          ],
+          "cLISI": [
+            "0.978",
+            0.9776723472862268
+          ],
+          "PCR": [
+            "0.819",
+            0.8188369368370148
+          ],
+          "Cell_cycle": [
+            "0.458",
+            0.45840017867207833
+          ]
+        },
+        "evaluation_timestamp": 1761411692.7957525,
+        "evaluation_datetime": "2025-10-26T01:01:32.795753",
+        "sort_key": [
+          0.5242324931338969
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v3",
+    "latest_score": 0.5242324931338969,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761411692.8158433,
+    "version_notified": "original",
+    "message": "Your research submission 'Innovation: UMAP on SOTA Graph' (ID: 112) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/indexes/base.py\", line 3812, in get_loc\n    return self._engine.get_loc(casted_key)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"pandas/_libs/index.pyx\", line 167, in pandas._libs.index.IndexEngine.get_loc\n  File \"pandas/_libs/index.pyx\", line 196, in pandas._libs.index.IndexEngine.get_loc\n  File \"pandas/_libs/hashtable_class_helper.pxi\", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item\n  File \"pandas/_libs/hashtable_class_helper.pxi\", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item\nKeyError: 'highly_variable'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/tmp/tmpwm963k29/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpwm963k29/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpwm963k29/submission.py\", line 56, in eliminate_batch_effect_fn\n    temp_adata = adata[:, adata.var.get('batch_hvg', adata.var['highly_variable'])].copy()\n                                                     ~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/frame.py\", line 4107, in __getitem__\n    indexer = self.columns.get_loc(key)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/indexes/base.py\", line 3819, in get_loc\n    raise KeyError(key) from err\nKeyError: 'highly_variable'\n\n```"
+  }
+}

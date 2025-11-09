@@ -1,0 +1,38 @@
+{
+  "id": "948",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Fix v2: Enriched Feature Fusion (RNG Key Logic)",
+  "tags": [
+    "fix",
+    "feature-fusion",
+    "siamese-network",
+    "sota-synthesis",
+    "cri-off"
+  ],
+  "abstract": "This is a resubmission of ID 944, which failed due to a `ValueError` in the RNG key handling for dropout layers. The error was caused by using the `or` operator on a JAX array. This version corrects the bug by using a proper `is not None` check for the `rng_key`. The underlying \"Enriched Feature Fusion\" architecture, designed to address feature entanglement in the CRI-Off task, remains unchanged.",
+  "submitted_tick": 600,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nimport optax\nfrom typing import Dict, Any, Sequence\n\nBASE_SEED = 7\n\ndef _define_hyperparameters():\n    return {\n        'peak_learning_rate': 0.001, 'total_train_steps': 200000, 'warmup_steps': 2000,\n        'd_model': 256, 'dropout_rate': 0.1, 'kernel_size': 7,\n        'dilations': [1, 2, 4, 8, 16], 'motif_kernel_size': 5,\n        'head_intermediate_dim': 128, 'sgrna_len': 20\n    }\n\ndef create_optimizer(learning_rate: float = 0.001):\n    hparams = _define_hyperparameters()\n    lr_schedule = optax.warmup_cosine_decay_schedule(init_value=0.0, peak_value=hparams.get('peak_learning_rate', learning_rate), warmup_steps=hparams.get('warmup_steps'), decay_steps=hparams.get('total_train_steps'))\n    return optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate=lr_schedule, weight_decay=0.01))\n\nclass DSConvBlock(nn.Module):\n    d_model: int; kernel_size: int; dilation: int; dropout_rate: float\n    @nn.compact\n    def __call__(self, x, deterministic=True):\n        residual = x; x = nn.LayerNorm()(x)\n        x = nn.Conv(self.d_model, (self.kernel_size,), feature_group_count=self.d_model, kernel_dilation=(self.dilation,))(x)\n        x = nn.gelu(x); x = nn.Dense(self.d_model)(x)\n        return residual + nn.Dropout(self.dropout_rate)(x, deterministic=deterministic)\n\nclass Backbone(nn.Module):\n    hparams: Dict[str, Any]\n    @nn.compact\n    def __call__(self, x, deterministic=True):\n        x = nn.Dense(self.hparams['d_model'])(x)\n        for d in self.hparams['dilations']:\n            x = DSConvBlock(self.hparams['d_model'], self.hparams['kernel_size'], d, self.hparams['dropout_rate'])(x, deterministic)\n        return x\n\nclass EnrichedFusionModel(nn.Module):\n    hparams: Dict[str, Any]\n    @nn.compact\n    def __call__(self, x, deterministic=True):\n        task_type, d_output, dataset = self.hparams.get('task_type'), self.hparams.get('d_output'), self.hparams.get('dataset')\n\n        def apply_head(features, out_dim):\n            y = nn.Dense(features=self.hparams['head_intermediate_dim'])(features)\n            y = nn.gelu(y)\n            y = nn.Dropout(rate=self.hparams['dropout_rate'])(y, deterministic=deterministic)\n            y = nn.Dense(features=out_dim)(y)\n            return y\n\n        if dataset == 'CRI-Off':\n            sgrna_len = self.hparams['sgrna_len']\n            sgrna_x, target_x = x[:, :sgrna_len, :], x[:, sgrna_len:, :]\n            \n            encoder = Backbone(hparams=self.hparams, name=\"SharedBackbone\")\n            holistic_features = encoder(x, deterministic=deterministic)\n            sgrna_features = encoder(sgrna_x, deterministic=deterministic)\n            target_features = encoder(target_x, deterministic=deterministic)\n\n            holistic_pooled = jnp.concatenate([jnp.mean(holistic_features, 1), jnp.max(holistic_features, 1)], -1)\n            sgrna_pooled = jnp.concatenate([jnp.mean(sgrna_features, 1), jnp.max(sgrna_features, 1)], -1)\n            target_pooled = jnp.concatenate([jnp.mean(target_features, 1), jnp.max(target_features, 1)], -1)\n            \n            holistic_cal = holistic_pooled / (jnp.linalg.norm(holistic_pooled, -1, keepdims=True) + 1e-6)\n            sgrna_cal = sgrna_pooled / (jnp.linalg.norm(sgrna_pooled, -1, keepdims=True) + 1e-6)\n            target_cal = target_pooled / (jnp.linalg.norm(target_pooled, -1, keepdims=True) + 1e-6)\n            \n            diff = jnp.abs(sgrna_cal - target_cal)\n            prod = sgrna_cal * target_cal\n            \n            enriched_features = jnp.concatenate([holistic_cal, sgrna_cal, target_cal, diff, prod], axis=-1)\n\n            output = apply_head(enriched_features, 1)\n            return output.squeeze(-1)\n\n        else: # General Path\n            backbone = Backbone(hparams=self.hparams)(x, deterministic=deterministic)\n            main_p = jnp.concatenate([jnp.mean(backbone, 1), jnp.max(backbone, 1)], -1)\n            motif_p = jnp.max(nn.Conv(self.hparams['d_model'], (self.hparams['motif_kernel_size'],))(backbone), 1)\n            fused = nn.LayerNorm()(jnp.concatenate([main_p, motif_p], -1))\n            calibrated = fused / (jnp.linalg.norm(fused, -1, keepdims=True) + 1e-6) if 'regression' in task_type else fused\n            \n            output = apply_head(calibrated, d_output)\n            return output.squeeze(-1) if task_type == 'regression' else output\n\nclass NetworkWrapper:\n    def __init__(self, m): self.module = m\n    def init(self, r, d): return self.module.init({'params': r, 'dropout': jax.random.PRNGKey(0)}, d, deterministic=True)['params']\n    # --- FIX APPLIED HERE ---\n    def apply(self, p, x, deterministic=True, rng_key=None):\n        rng = rng_key if rng_key is not None else jax.random.PRNGKey(0)\n        return self.module.apply({'params': p}, x, deterministic=deterministic, rngs={'dropout': rng})\n    # --- END FIX ---\n\ndef create_network(hparams):\n    hparams.update({'task_type': hparams.get('task_type'), 'd_output': hparams.get('d_output'), 'dataset': hparams.get('dataset')})\n    return NetworkWrapper(EnrichedFusionModel(hparams=hparams))\n",
+    "submitted_timestamp": 1761581458.662344,
+    "evaluation_result": {
+      "status": "pending"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "pending",
+    "latest_status": "pending",
+    "claude_active": false,
+    "all_evaluations_complete": false
+  },
+  "notification": {
+    "sent": false,
+    "sent_timestamp": null,
+    "version_notified": null
+  }
+}

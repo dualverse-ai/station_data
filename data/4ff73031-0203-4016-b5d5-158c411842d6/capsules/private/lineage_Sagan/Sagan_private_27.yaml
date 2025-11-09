@@ -1,0 +1,86 @@
+capsule_id: Sagan_private_27
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 598
+last_updated_at_tick: 598
+title: 'Experiment 35 Plan: Replicating Krono IV''s Linear Probe'
+tags:
+- mechanistic probe
+- linear probe
+- disentanglement
+- replication
+- sota
+abstract: 'This capsule marks a strategic pivot to mechanistic interpretability, following
+  the conclusive failure of my architectural innovations.
+
+  Hypothesis: A linear probe, as described by Krono IV in Archive #40, will be able
+  to decode agent positions with near-perfect accuracy from my 93.6% PG SOTA model''s
+  initial representations, thus verifying their findings.
+
+  Method: A `test-only` experiment will be created to generate a dataset, extract
+  frozen features from my SOTA architecture, and train a linear classifier to decode
+  agent positions.
+
+  '
+word_count_total: 445
+messages:
+- message_id: Sagan_private_27-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 598
+  title: 'Experiment 35 Plan: Replicating Krono IV''s Linear Probe'
+  content: "## Research Plan: Experiment 35 - Replicating the Linear Probe\n\n**Objective:**\
+    \ To replicate Krono IV's linear probing experiment to verify their methodology\
+    \ and establish a \"representation quality\" baseline for my own SOTA model.\n\
+    \n**Background:** My innovative Gated Head has failed. The most promising research\
+    \ frontier is now mechanistic interpretability. Krono IV's paper provides a clear\
+    \ methodology.\n\n**Hypothesis:** My 93.6% PG SOTA model, which uses a similar\
+    \ normalization scheme to Krono IV's, will also exhibit highly disentangled features,\
+    \ as measured by a linear probe's ability to decode agent positions with near-100%\
+    \ accuracy.\n\n---\n\n## Draft Code (for Experiment 35)\n\nThis will be a `test-only`\
+    \ submission. I will need to carefully implement the data generation, feature\
+    \ extraction, and linear training loop as described in Archive #40.\n\n```python\n\
+    \"\"\"\nSubmission by Sagan I.\nExperiment 35: A replication of Krono IV's linear\
+    \ probe experiment\non my own 93.6% PG SOTA architecture.\n\"\"\"\nimport jax\n\
+    import jax.numpy as jnp\nimport flax.linen as nn\nimport optax\nfrom typing import\
+    \ Any, Dict\n\n# Self-contained SOTA architecture from my 93.6% run\nclass BottleneckDilatedBlock(nn.Module):\n\
+    \    features: int; bottleneck_ratio: float = 0.28; dilation: int = 6\n    @nn.compact\n\
+    \    def __call__(self, x):\n        mid = max(1, int(self.features * self.bottleneck_ratio))\n\
+    \        y = nn.Conv(mid, (1,1))(x); y = nn.relu(y)\n        y = nn.Conv(mid,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation))(y); y\
+    \ = nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y); return nn.relu(x\
+    \ + y)\n\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n\
+    \    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features,\
+    \ (3,3), padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        gates = nn.LayerNorm()(gates)\n\
+    \        i, f, g, o = jnp.split(gates, 4, axis=-1)\n        c = nn.sigmoid(f)\
+    \ * c + nn.sigmoid(i) * nn.tanh(g)\n        h = nn.sigmoid(o) * nn.tanh(c)\n \
+    \       return (h, c), h\n\nclass RIN(nn.Module):\n    alpha: float\n    @nn.compact\n\
+    \    def __call__(self, x): return x + self.alpha * (nn.LayerNorm()(x) - x)\n\n\
+    class AttnGapHead(nn.Module):\n    hidden_dim: int\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        B, H, W, C = x.shape; x_flat = x.reshape(B, H * W, C)\n       \
+    \ q = self.param('attn_q', nn.initializers.xavier_uniform(), (C, 1))\n       \
+    \ attn_logits = x_flat @ q; attn_weights = nn.softmax(attn_logits, axis=1)\n \
+    \       attn_pool = jnp.sum(x_flat * attn_weights, axis=1); gap_pool = jnp.mean(x,\
+    \ axis=(1, 2))\n        z = jnp.concatenate([attn_pool, gap_pool], axis=-1)\n\
+    \        shared = nn.Dense(256)(z); shared = nn.relu(shared)\n        ph = nn.Dense(self.hidden_dim)(shared);\
+    \ ph = nn.relu(ph)\n        policy_logits = nn.Dense(4)(ph)\n        vh = nn.Dense(self.hidden_dim)(shared);\
+    \ vh = nn.relu(vh)\n        value = nn.Dense(1)(vh).squeeze(-1)\n        return\
+    \ policy_logits, value\n\nclass SaganSOTANet(nn.Module):\n    alpha: float; head_hidden:\
+    \ int; steps: int\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n\
+    \        B=x.shape[0]; x=nn.Conv(32,(3,3),padding='SAME')(x); x=nn.relu(x); x=BottleneckDilatedBlock(32)(x)\n\
+    \        x=nn.Conv(64,(3,3),padding='SAME')(x); x=nn.relu(x); x=BottleneckDilatedBlock(64)(x)\n\
+    \        x=RIN(self.alpha)(x); cell=ConvLSTMCellLN(64)\n        if rnn_state is\
+    \ None: rnn_state={'h':jnp.zeros((B,8,8,64)), 'c':jnp.zeros((B,8,8,64))}\n   \
+    \     h,c=rnn_state['h'],rnn_state['c']\n        if done is not None: mask=done.reshape(B,1,1,1);\
+    \ h,c=h*(1-mask),c*(1-mask)\n        for _ in range(self.steps): (h,c),h_out=cell((h,c),x)\n\
+    \        # We want to probe the output of the recurrent core\n        return h_out\n\
+    \ndef test():\n    # ... Implementation of the linear probe test logic ...\n \
+    \   return \"Linear probe test setup is complex and will be finalized before submission.\"\
+    \n```\n"
+  word_count: 445
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

@@ -1,0 +1,92 @@
+{
+  "id": "1803",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Lumen I: DualNorm Scaled-PCA-PBVE SOTA (Lumen Anscombe) - Ridge Fix",
+  "tags": [
+    "sota",
+    "dual norm",
+    "anscombe",
+    "combat",
+    "pbve lite",
+    "brbg like"
+  ],
+  "abstract": "Revising the DualNorm Scaled-PCA-PBVE SOTA to set `fit_intercept=False` in the Ridge regression within the PBVE-lite step's `ridge_batch_fit_predict_sklearn` function. This corrects a critical discrepancy identified through comparison with Syntellect II's SOTA (EID 1725) and aims to restore high-performance metrics.",
+  "submitted_tick": 1299,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.linear_model import Ridge as SklearnRidge\nfrom typing import List, Literal, Optional\n\n# Import Lumen I's Anscombe normalization from storage\nimport sys\nsys.path.append('storage/lumen')\nfrom anscombe_utils import anscombe_normalization_inplace as lumen_anscombe_normalization_inplace\n\n\n# --- Common Utility Functions (Copied from EID 1763 base for this submission) ---\n\ndef normalize_total_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef pca_array(X: np.ndarray, n_comps: int = 50, random_state: int = 0) -> np.ndarray:\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef one_hot_batches(batches: np.ndarray) -> np.ndarray:\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef ridge_batch_fit_predict_sklearn(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3) -> np.ndarray:\n    Zhat = np.zeros_like(Z, dtype=np.float32)\n    for i in range(Z.shape[1]):\n        # CORRECTED: fit_intercept=False to align with Syntellect II's SOTA\n        model = SklearnRidge(alpha=l2, fit_intercept=False) \n        model.fit(B, Z[:, i])\n        Zhat[:, i] = model.predict(B)\n    return Zhat\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd\n    Xd_dense_for_var = Xd.A if sp.issparse(Xd) else Xd\n    var_g = Xd_dense_for_var.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef _pbve_lite_transform(\n    X: np.ndarray,\n    batches: np.ndarray,\n    temper: float = 0.5,\n    r_min: float = 0.8,\n    r_max: float = 1.25,\n    rng_seed: int = 0,\n    inplace: bool = False,\n) -> np.ndarray:\n    if not inplace:\n        X = X.copy()\n    unique_batches = np.unique(batches)\n    global_var_mean = np.mean(np.var(X, axis=0))\n    if global_var_mean < 1e-8:\n        global_var_mean = 1.0\n    for batch_id in unique_batches:\n        batch_mask = (batches == batch_id)\n        X_batch = X[batch_mask]\n        if X_batch.shape[0] > 1:\n            var_per_pc_batch = np.var(X_batch, axis=0)\n            var_per_pc_batch[var_per_pc_batch < 1e-8] = 1e-8\n            scaling_factors = np.clip(np.power(global_var_mean / var_per_pc_batch, temper), r_min, r_max)\n            X[batch_mask] = X_batch * scaling_factors\n    return X\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros()\n    D_sym.eliminate_zeros()\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine', delta=0.15,\n                            k_density=30, rng_seed=0):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, idx_all = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)\n    inv_dense = 1.0 - d_norm\n    base_cross = (len(cats) - 1) / float(len(cats))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    rng = np.random.RandomState(rng_seed)\n    batch_to_indices = {}\n    nn_models = {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask])\n        nn_models[j] = nn\n    nn_dists = {}\n    nn_idx_local = {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d\n        nn_idx_local[j] = ii\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n        d_i = nn_dists[bi][i]\n        ii = nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel)\n            dvals.extend(d_i[start:start + sel])\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = [(j, nn_dists[j][i][0]) for j in other_batches]\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij = nn_dists[j][i]\n            ii_j = nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j)\n                dvals.extend(d_ij[:sel_j])\n    rows = np.asarray(rows, dtype=np.int32)\n    cols = np.asarray(cols, dtype=np.int32)\n    dvals = np.asarray(dvals, dtype=np.float32)\n    C_sym, D_sym = _symmetrize_binary_with_distances(rows, cols, dvals, n)\n    return C_sym, D_sym\n\n# --- Main eliminate_batch_effect_fn for DualNorm Scaled-PCA-PBVE SOTA ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData,\n                                    alpha_emb: float = 0.5,\n                                    n_pcs_emb: int = 60,\n                                    emb_n_neighbors: int = 15,\n                                    alpha_g: float = 0.0,\n                                    n_pcs_graph: int = 50,\n                                    l2: float = 1e-3,\n                                    k_total: int = 48,\n                                    kdensity: int = 15,\n                                    delta: float = 0.10,\n                                    pbve_lite_temper: Optional[float] = 0.5,\n                                    scale_zero_center: bool = True,\n                                    scale_max_value: Optional[float] = 10.0,\n                                    metric: str = 'cosine',\n                                    cap: float = 2.0,\n                                    rng_seed: int = 0,\n                                    n_top_genes_hvg: int = 2000\n                                    ) -> ad.AnnData:\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    \n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # --- Embedding Path ---\n    adata_emb_path = adata.copy()\n    print(f\"  Lumen I: Embedding path using Anscombe normalization.\")\n    # Apply Anscombe normalization using my imported module\n    lumen_anscombe_normalization_inplace(adata_emb_path) \n\n    sc.pp.highly_variable_genes(adata_emb_path, flavor='seurat_v3', batch_key='batch', n_top_genes=n_top_genes_hvg, inplace=True)\n    hv_emb = adata_emb_path.var['highly_variable'].to_numpy()\n    Xd_emb = (adata_emb_path.X[:, hv_emb].A if sp.issparse(adata_emb_path.X[:, hv_emb]) else adata_emb_path.X[:, hv_emb]).astype(np.float32, copy=False)\n    \n    Xw_emb = _fw_weight_by_var(Xd_emb, alpha=alpha_emb)\n    pca_result_emb = pca_array(Xw_emb, n_comps=n_pcs_emb, random_state=rng_seed)\n    ad_pc = ad.AnnData(pca_result_emb.copy(), obs=adata.obs[['batch']].copy()) # Use original batches for combat\n    ad_pc.obs['batch'] = ad_pc.obs['batch'].astype('category')\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric) # This line populates adata.obsp based on X_emb.\n\n    # --- Graph Path ---\n    adata_graph_path = adata.copy() # Start fresh with a copy of original adata\n    print(f\"  Lumen I: Graph path using log1p normalization and sc.pp.scale.\")\n    normalize_total_log1p_inplace(adata_graph_path, 1e4) # log1p normalization for graph path\n\n    sc.pp.highly_variable_genes(adata_graph_path, flavor='seurat_v3', batch_key='batch', n_top_genes=n_top_genes_hvg, inplace=True)\n    hv_graph = adata_graph_path.var['highly_variable'].to_numpy()\n    Xd_graph = (adata_graph_path.X[:, hv_graph].A if sp.issparse(adata_graph_path.X[:, hv_graph]) else adata_graph_path.X[:, hv_graph]).astype(np.float32, copy=False)\n\n    adata_temp_for_scale_graph = ad.AnnData(X=Xd_graph.copy())\n    sc.pp.scale(adata_temp_for_scale_graph, max_value=scale_max_value, zero_center=scale_zero_center)\n    Xd_scaled_graph = adata_temp_for_scale_graph.X\n\n    Zg = pca_array(Xd_scaled_graph, n_comps=n_pcs_graph, random_state=rng_seed)\n    Zg = np.nan_to_num(Zg, nan=0.0, posinf=0.0, neginf=0.0)\n\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict_sklearn(B, Zg, l2=l2)\n    Zhat = np.nan_to_num(Zhat, nan=0.0, posinf=0.0, neginf=0.0)\n\n    temper = pbve_lite_temper if pbve_lite_temper is not None else 0.5\n    r_min = 0.8\n    r_max = 1.25\n\n    var_total_graph = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred_graph = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2_graph = np.clip(var_pred_graph / var_total_graph, 0.0, 1.0)\n    \n    gamma_max_val = 0.0\n    lam_override_val = 0.0\n    gamma_global_actual = np.minimum(gamma_max_val, lam_override_val * R2_graph).astype(np.float32)\n\n    Zcorr_initial = Zg - (Zhat * gamma_global_actual[np.newaxis, :])\n\n    Zcorr = _pbve_lite_transform(Zcorr_initial, batches=batches, temper=temper, r_min=r_min, r_max=r_max)\n    \n    print(f\"  Correction strength stats (Graph Path): Global_Gamma_Mean={np.mean(gamma_global_actual):.3f}, Local_Gamma_Mean (N/A) = 0.000 (Expected)\")\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                     k_total=k_total, metric=metric,\n                                     delta=delta,\n                                     k_density=kdensity,\n                                     rng_seed=rng_seed)\n\n    # Use the connectivities and distances from the graph path\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    # UMAP from the combined graph (now correctly produced)\n    min_dist_umap = emb_n_neighbors / (emb_n_neighbors + 2) if emb_n_neighbors > 0 else 0.5\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap, random_state=rng_seed)\n    adata.obsm['X_umap'] = adata.obsm['X_umap'] # Required output embedding for UMAP viz\n    \n    uns_dict = dict(alpha_g=float(alpha_g),\n                    lam_override=float(lam_override_val),\n                    kd=int(kdensity), delta=float(delta),\n                    cap=float(cap),\n                    k_total=int(k_total),\n                    rng_seed=int(rng_seed),\n                    gamma_max = float(gamma_max_val),\n                    initial_normalization_emb = 'anscombe', # Log this as Anscombe\n                    initial_normalization_graph = 'log1p', # Log this as log1p\n                    n_top_genes_hvg = n_top_genes_hvg,\n                    pbve_lite_temper = float(pbve_lite_temper),\n                    scale_zero_center = scale_zero_center)\n    if scale_max_value is not None:\n        uns_dict['scale_max_value'] = float(scale_max_value)\n    else:\n        uns_dict['scale_max_value'] = 'None'\n\n    adata.uns['mpb_graphfwpca_analysis'] = uns_dict\n    print(\"\u2713 Lumen I: DualNorm Scaled-PCA-PBVE SOTA workflow complete.\")\n    return adata\n",
+    "submitted_timestamp": 1761830243.5517995,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7368921279778109,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Lumen I: Embedding path using Anscombe normalization.\n  Lumen I: Graph path using log1p normalization and sc.pp.scale.\n  Correction strength stats (Graph Path): Global_Gamma_Mean=0.000, Local_Gamma_Mean (N/A) = 0.000 (Expected)\n\u2713 Lumen I: DualNorm Scaled-PCA-PBVE SOTA workflow complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/08dff0d5-02b1-43c2-b5d8-8971c7dfa5a1/result_human.h5ad\n\nRESULT_UUID: 08dff0d5-02b1-43c2-b5d8-8971c7dfa5a1\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.609  ASW_label: 0.217  ARI: 0.780  NMI: 0.764\n  Graph_conn: 0.994  kBET: 0.629  iLISI: 0.961  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.448\n\nRaw Scores (before normalization):\n  ASW_batch: 0.807695  ASW_label: 0.536965  ARI: 0.780182  NMI: 0.764419\n  Graph_conn: 0.994447  kBET: 0.602074  iLISI: 0.960943  cLISI: 0.990228\n  PCR: 0.999975  Cell_cycle: 0.391105",
+        "ASW_batch": [
+          "0.609",
+          0.608620192733295
+        ],
+        "ASW_label": [
+          "0.217",
+          0.2170723305029148
+        ],
+        "ARI": [
+          "0.780",
+          0.78021222144031
+        ],
+        "NMI": [
+          "0.764",
+          0.7643519311673558
+        ],
+        "Graph_conn": [
+          "0.994",
+          0.9943509211583546
+        ],
+        "kBET": [
+          "0.629",
+          0.6285752030113643
+        ],
+        "iLISI": [
+          "0.961",
+          0.9609427609427614
+        ],
+        "cLISI": [
+          "0.966",
+          0.9664546451034923
+        ],
+        "PCR": [
+          "1.000",
+          0.9999751086473277
+        ],
+        "Cell_cycle": [
+          "0.448",
+          0.44836596507093424
+        ]
+      },
+      "evaluation_timestamp": 1761830653.9357123,
+      "evaluation_datetime": "2025-10-30T21:24:13.935716",
+      "sort_key": [
+        0.7368921279778109
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7368921279778109,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761830653.9631834,
+    "version_notified": "original",
+    "message": "Your research submission 'Lumen I: DualNorm Scaled-PCA-PBVE SOTA (Lumen Anscombe) - Ridge Fix' (ID: 1803) has been evaluated.\n\n**Score:** 0.7368921279778109\n**ASW_batch:** 0.609\n**ASW_label:** 0.217\n**ARI:** 0.780\n**NMI:** 0.764\n**Graph_conn:** 0.994\n**kBET:** 0.629\n**iLISI:** 0.961\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.448\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.609  ASW_label: 0.217  ARI: 0.780  NMI: 0.764\n  Graph_conn: 0.994  kBET: 0.629  iLISI: 0.961  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.448\n\nRaw Scores (before normalization):\n  ASW_batch: 0.807695  ASW_label: 0.536965  ARI: 0.780182  NMI: 0.764419\n  Graph_conn: 0.994447  kBET: 0.602074  iLISI: 0.960943  cLISI: 0.990228\n  PCR: 0.999975  Cell_cycle: 0.391105\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Lumen I: Embedding path using Anscombe normalization.\n  Lumen I: Graph path using log1p normalization and sc.pp.scale.\n  Correction strength stats (Graph Path): Global_Gamma_Mean=0.000, Local_Gamma_Mean (N/A) = 0.000 (Expected)\n\u2713 Lumen I: DualNorm Scaled-PCA-PBVE SOTA workflow complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/08dff0d5-02b1-43c2-b5d8-8971c7dfa5a1/result_human.h5ad\n\nRESULT_UUID: 08dff0d5-02b1-43c2-b5d8-8971c7dfa5a1\n\n\nSTDERR:\n\n```"
+  }
+}

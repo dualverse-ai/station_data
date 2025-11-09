@@ -1,0 +1,92 @@
+{
+  "id": "189",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Aether-Praxis Dual BRBG (Adaptive Residualization + BIVG)",
+  "tags": [
+    "praxis",
+    "dual-output",
+    "sota",
+    "combat",
+    "residualization",
+    "adaptive"
+  ],
+  "abstract": "This experiment integrates Batch-Invariant HVG (BIVG) selection with the SOTA-achieving 'Aether-Praxis Dual BRBG (Adaptive Residualization)' framework (ID 180, 0.7199). Replacing the standard HVG selection with BIVG aims to provide a more robust set of input features for both the Combat-corrected PCA embedding (`X_emb`) and the adaptively residualized graph. This refinement in feature selection, combined with the established dual-output strategy, is hypothesized to further enhance balanced performance across batch mixing and biological preservation metrics, potentially leading to a new state-of-the-art score.",
+  "submitted_tick": 109,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis') # Append Praxis I's modules path\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# CORRECTED IMPORTS from auto_gamma_brbg.py\nfrom auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    # _get_hvg_mask, # Will be replaced by compute_bivg_mask\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _build_balanced_knn,\n)\n# NEW IMPORTS: For adaptive residualization and BIVG\nfrom per_pc_resid import adaptive_residualize \nfrom hvg_bivg import compute_bivg_mask # Import Batch-Invariant HVG selection\n\ndef _ensure_dense_X(adata):\n    # Helper function from Praxis I's code\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef dual_output_brbg_adaptive_bivg(adata: ad.AnnData, n_pcs_emb=64, n_pcs_graph=50, gamma_max_adapt=0.75, lam_adapt=1.0, l2=1e-3, k_total=48, metric='cosine', n_top_hvg=2000) -> ad.AnnData:\n    \"\"\"\n    Aether-Praxis Dual BRBG with Adaptive Residualization in the graph path AND Batch-Invariant HVG Selection.\n    \"\"\"\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] required.\"\n\n    # Normalize/log1p (shared for both paths)\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    \n    # MODIFICATION: Use compute_bivg_mask for HVG selection\n    hvg_mask = compute_bivg_mask(adata, batch_key='batch', n_top=n_top_hvg)\n    if hvg_mask.sum() < 10: # Fallback if BIVG selects too few\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph path: adaptively residualized PCs on BIVG HVGs\n    X_hvg_filtered = adata.X[:, hvg_mask]\n    if not sp.issparse(X_hvg_filtered):\n        X_hvg_filtered = sp.csr_matrix(X_hvg_filtered)\n    Z_graph_pca = _pca_truncated_svd(X_hvg_filtered, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    \n    Z_corr_graph_input, r2, gamma_j_applied = adaptive_residualize(\n        Z_graph_pca, batches, l2=l2, gamma_max=gamma_max_adapt, lam=lam_adapt\n    )\n\n    C, D = _build_balanced_knn(Z_corr_graph_input, batches, k_total=k_total, metric=metric)\n\n    # Embedding path: ComBat \u2192 PCA(BIVG HVGs)\n    adata_for_combat = adata.copy() \n    _ensure_dense_X(adata_for_combat)\n    sc.pp.combat(adata_for_combat, key='batch')\n    adata_for_combat.var['highly_variable'] = hvg_mask # Ensure HVG flag exists for PCA\n    sc.pp.pca(adata_for_combat, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    adata.obsm['X_emb'] = adata_for_combat.obsm['X_pca']\n\n    # Initialize neighbor keys then override with BalancedGraph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=0)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    # Add metadata for reproducibility and clarity\n    adata.uns['brbg_dual'] = {\n        'gamma_max_adaptive': float(gamma_max_adapt),\n        'lam_adaptive': float(lam_adapt),\n        'l2': float(l2),\n        'k_total': int(k_total),\n        'metric': metric,\n        'pcs_graph': int(n_pcs_graph),\n        'pcs_emb': int(n_pcs_emb),\n        'embedding_source': 'ComBat PCA on BIVG HVGs', # Updated source\n        'graph_source': 'Adaptively Residualized PCA on BIVG HVGs', # Updated source\n        'n_top_hvg_bivg': int(n_top_hvg), # Add BIVG parameter\n        'r2_per_pc': r2.tolist(), \n        'gamma_j_applied': gamma_j_applied.tolist() \n    }\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Default parameters based on previous SOTA and Praxis I's EID 156/177\n    return dual_output_brbg_adaptive_bivg(adata, n_pcs_emb=64, n_pcs_graph=50, gamma_max_adapt=0.75, lam_adapt=1.0, l2=1e-3, k_total=48, metric='cosine', n_top_hvg=2000)\n",
+    "submitted_timestamp": 1761424929.1557965,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7181257048887144,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e6cd0646-89fa-4d79-b03d-2bb0d18c856e/result_human.h5ad\n\nRESULT_UUID: e6cd0646-89fa-4d79-b03d-2bb0d18c856e\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.693  ASW_label: 0.217  ARI: 0.736  NMI: 0.700\n  Graph_conn: 0.972  kBET: 0.638  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.318\n\nRaw Scores (before normalization):\n  ASW_batch: 0.845561  ASW_label: 0.536886  ARI: 0.736436  NMI: 0.700563\n  Graph_conn: 0.972128  kBET: 0.611247  iLISI: 0.935143  cLISI: 0.991751\n  PCR: 0.999946  Cell_cycle: 0.280020",
+        "ASW_batch": [
+          "0.693",
+          0.6926771311535409
+        ],
+        "ASW_label": [
+          "0.217",
+          0.21693538061364293
+        ],
+        "ARI": [
+          "0.736",
+          0.7364712573943306
+        ],
+        "NMI": [
+          "0.700",
+          0.7004779966837957
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9716474193786363
+        ],
+        "kBET": [
+          "0.638",
+          0.6383354459600482
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844643
+        ],
+        "cLISI": [
+          "0.972",
+          0.9716812540436036
+        ],
+        "PCR": [
+          "1.000",
+          0.9999460399003627
+        ],
+        "Cell_cycle": [
+          "0.318",
+          0.3179418356747181
+        ]
+      },
+      "evaluation_timestamp": 1761425341.5551424,
+      "evaluation_datetime": "2025-10-26T04:49:01.555143",
+      "sort_key": [
+        0.7181257048887144
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7181257048887144,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761425341.5736816,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether-Praxis Dual BRBG (Adaptive Residualization + BIVG)' (ID: 189) has been evaluated.\n\n**Score:** 0.7181257048887144\n**ASW_batch:** 0.693\n**ASW_label:** 0.217\n**ARI:** 0.736\n**NMI:** 0.700\n**Graph_conn:** 0.972\n**kBET:** 0.638\n**iLISI:** 0.935\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.318\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.693  ASW_label: 0.217  ARI: 0.736  NMI: 0.700\n  Graph_conn: 0.972  kBET: 0.638  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.318\n\nRaw Scores (before normalization):\n  ASW_batch: 0.845561  ASW_label: 0.536886  ARI: 0.736436  NMI: 0.700563\n  Graph_conn: 0.972128  kBET: 0.611247  iLISI: 0.935143  cLISI: 0.991751\n  PCR: 0.999946  Cell_cycle: 0.280020\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e6cd0646-89fa-4d79-b03d-2bb0d18c856e/result_human.h5ad\n\nRESULT_UUID: e6cd0646-89fa-4d79-b03d-2bb0d18c856e\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

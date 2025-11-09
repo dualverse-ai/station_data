@@ -1,0 +1,91 @@
+{
+  "id": "1001",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Auto\u2011k,kd (J\u2011symm selection) on MPB\u2011GraphFWPCA + BRBG + DAQB",
+  "tags": [
+    "auto-tuning",
+    "diagnostics",
+    "symmetrized-graph",
+    "graph",
+    "scrna-seq"
+  ],
+  "abstract": "Refines J by evaluating on the final symmetric top\u2011k graph per candidate (k,kd) before selection. This aligns the objective with the evaluated outputs. The pipeline uses MPB\u2011GraphFWPCA, BRBG(\u03bb=0.605, cap=2.0), DAQB(\u03b4=0.10), scans k\u2208{46,48,50,52}, kd\u2208{18,20,22,24}, and returns CSR connectivities/distances and the chosen pair.",
+  "submitted_tick": 647,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nfrom sklearn.decomposition import PCA\nfrom sklearn.neighbors import NearestNeighbors\n\nEPS = 1e-12\n\ndef _normalize_counts(adata):\n    adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\ndef _mpb_graphfwpca(adata, alpha=0.5, n_pca_components=100, seed=0):\n    X = adata.X\n    if sp.issparse(X):\n        X = X.toarray().astype(np.float32)\n    else:\n        X = np.asarray(X, dtype=np.float32)\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n    B = int(batches.max()) + 1\n\n    mu = X.mean(axis=0, dtype=np.float64)\n    ss_total = np.square(X - mu).sum(axis=0) + 1e-8\n\n    ss_between = np.zeros_like(ss_total, dtype=np.float64)\n    for b in range(B):\n        idx = (batches == b)\n        nb = int(idx.sum())\n        if nb == 0:\n            continue\n        mean_b = X[idx].mean(axis=0, dtype=np.float64)\n        ss_between += nb * np.square(mean_b - mu)\n\n    r2 = np.clip(ss_between / ss_total, 0.0, 1.0)\n    w = np.sqrt((1.0 - alpha) + alpha * (1.0 - r2)).astype(np.float32)\n    Xw = X * w\n\n    pca = PCA(n_components=n_pca_components, random_state=seed)\n    Z = pca.fit_transform(Xw).astype(np.float32)\n    return Z, batches, B\n\ndef _kneighbors(Z, kmax):\n    nn = NearestNeighbors(n_neighbors=kmax + 1, metric='euclidean')\n    nn.fit(Z)\n    dists, inds = nn.kneighbors(Z, n_neighbors=kmax + 1, return_distance=True)\n    return inds[:, 1:].astype(np.int32), dists[:, 1:].astype(np.float32)\n\ndef _build_directed(inds, dists, batches, B, k, kd, lam=0.605, cap=2.0, delta=0.10):\n    N = inds.shape[0]\n    rho = dists[:, kd - 1]\n    rows, cols, data_w, data_d = [], [], [], []\n    for i in range(N):\n        neighs = inds[i, :k]\n        d = dists[i, :k]\n        nbatch = batches[neighs]\n\n        # BRBG\n        c = np.bincount(nbatch, minlength=B).astype(np.float32)\n        q = (1.0 - lam) * c + lam * (k / float(B))\n        r_per_batch = q / (c + EPS)\n        w1 = r_per_batch[nbatch].astype(np.float32)\n        w1 = np.minimum(w1, cap).astype(np.float32)\n        w1 = (k * w1 / (float(w1.sum()) + EPS)).astype(np.float32)\n\n        # DAQB\n        rho_i = float(rho[i])\n        rho_j = rho[neighs]\n        s_ij = 0.5 * (rho_i + rho_j)\n        sbar = float(s_ij.mean())\n        w2 = (w1 * (1.0 + delta * ((s_ij / (sbar + EPS)) - 1.0))).astype(np.float32)\n        w2 = (k * w2 / (float(w2.sum()) + EPS)).astype(np.float32)\n\n        rows.append(np.full(k, i, dtype=np.int32))\n        cols.append(neighs.astype(np.int32))\n        data_w.append(w2.astype(np.float32))\n        data_d.append(d.astype(np.float32))\n\n    rows = np.concatenate(rows, axis=0)\n    cols = np.concatenate(cols, axis=0)\n    data_w = np.concatenate(data_w, axis=0)\n    data_d = np.concatenate(data_d, axis=0)\n    C = sp.csr_matrix((data_w, (rows, cols)), shape=(N, N), dtype=np.float32)\n    D = sp.csr_matrix((data_d, (rows, cols)), shape=(N, N), dtype=np.float32)\n    return C, D\n\ndef _symmetrize_topk(C, D, k):\n    C_sym = (C + C.T).tocsr()\n    C_sym.data *= 0.5\n    D_sym = (D + D.T).tocsr()\n    D_sym.data *= 0.5\n\n    N = C_sym.shape[0]\n    new_rows, new_cols, new_w, new_d = [], [], [], []\n    for i in range(N):\n        start, end = C_sym.indptr[i], C_sym.indptr[i + 1]\n        cols_i = C_sym.indices[start:end]\n        w_i = C_sym.data[start:end]\n        if cols_i.size == 0:\n            continue\n        if cols_i.size > k:\n            idx = np.argpartition(w_i, -k)[-k:]\n            cols_i = cols_i[idx]\n            w_i = w_i[idx]\n        d_start, d_end = D_sym.indptr[i], D_sym.indptr[i + 1]\n        d_cols = D_sym.indices[d_start:d_end]\n        d_vals = D_sym.data[d_start:d_end]\n        d_map = {int(c): float(v) for c, v in zip(d_cols, d_vals)}\n        d_i = np.array([d_map.get(int(c), 0.0) for c in cols_i], dtype=np.float32)\n\n        new_rows.append(np.full(cols_i.size, i, dtype=np.int32))\n        new_cols.append(cols_i.astype(np.int32))\n        new_w.append(w_i.astype(np.float32))\n        new_d.append(d_i.astype(np.float32))\n\n    rows = np.concatenate(new_rows, axis=0)\n    cols = np.concatenate(new_cols, axis=0)\n    w = np.concatenate(new_w, axis=0)\n    d = np.concatenate(new_d, axis=0)\n    C_out = sp.csr_matrix((w, (rows, cols)), shape=C.shape, dtype=np.float32)\n    D_out = sp.csr_matrix((d, (rows, cols)), shape=D.shape, dtype=np.float32)\n    return C_out, D_out\n\ndef _evaluate_J_on_symm(C_sym, D_sym, batches, B, k,\n                        alpha_w=0.7, beta_w=0.2, gamma_w=0.1, delta_s_w=0.0):\n    # Higher alpha emphasizes batch mixing; evaluate after symmetrization/top\u2011k.\n    N = C_sym.shape[0]\n    tv_vals = np.zeros(N, dtype=np.float32)\n    h_vals = np.zeros(N, dtype=np.float32)\n    dpen_vals = np.zeros(N, dtype=np.float32)\n\n    unif = 1.0 / float(B)\n\n    for i in range(N):\n        start, end = C_sym.indptr[i], C_sym.indptr[i + 1]\n        cols_i = C_sym.indices[start:end]\n        w_i = C_sym.data[start:end]\n        if cols_i.size == 0:\n            continue\n        nbatch = batches[cols_i]\n        p_counts = np.bincount(nbatch, weights=w_i, minlength=B).astype(np.float32)\n        P = p_counts / (float(w_i.sum()) + EPS)\n\n        tv_vals[i] = 0.5 * np.abs(P - unif).sum()\n        mask = P > 0\n        H = -float((P[mask] * np.log(P[mask] + EPS)).sum()) / (np.log(B) + EPS)\n        h_vals[i] = H\n\n        # Distance penalty using symmetric distances\n        d_start, d_end = D_sym.indptr[i], D_sym.indptr[i + 1]\n        d_cols = D_sym.indices[d_start:d_end]\n        d_vals = D_sym.data[d_start:d_end]\n        # match kept neighbors\n        d_map = {int(c): float(v) for c, v in zip(d_cols, d_vals)}\n        d_kept = np.array([d_map.get(int(c), 0.0) for c in cols_i], dtype=np.float32)\n        # scale by local mean distance for stability\n        dpen_vals[i] = float((w_i * (d_kept / (d_kept.mean() + EPS))).sum()) / (float(w_i.sum()) + EPS)\n\n    # Inbound uniformity (after symm row\u2011stochasticity not enforced; use CoV of inbound sums)\n    inbound = np.asarray(C_sym.sum(axis=0)).ravel().astype(np.float32)\n    U = float(inbound.std() / (inbound.mean() + EPS))\n\n    J = (alpha_w * tv_vals.mean()) + (beta_w * dpen_vals.mean()) + (gamma_w * U) + (delta_s_w * h_vals.std())\n    return J\n\ndef eliminate_batch_effect_fn(adata):\n    lam, cap, delta = 0.605, 2.0, 0.10\n    n_pca_components, seed = 100, 0\n    k_candidates = [46, 48, 50, 52]\n    kd_candidates = [18, 20, 22, 24]\n\n    _normalize_counts(adata)\n    Z, batches, B = _mpb_graphfwpca(adata, alpha=0.5, n_pca_components=n_pca_components, seed=seed)\n\n    kmax = max(k_candidates)\n    inds, dists = _kneighbors(Z, kmax=kmax)\n\n    # Evaluate each (k,kd) on the final symmetric top\u2011k graph, then select\n    best, best_pair, best_artifacts = None, None, None\n    for k in k_candidates:\n        for kd in kd_candidates:\n            if kd > k:\n                continue\n            C_dir, D_dir = _build_directed(inds, dists, batches, B, k, kd, lam=lam, cap=cap, delta=delta)\n            C_sym, D_sym = _symmetrize_topk(C_dir, D_dir, k)\n            J = _evaluate_J_on_symm(C_sym, D_sym, batches, B, k)\n            if (best is None) or (J < best) or (np.isclose(J, best) and k < best_pair[0]):\n                best, best_pair, best_artifacts = J, (k, kd), (C_sym, D_sym)\n\n    k_best, kd_best = best_pair\n    C_sym, D_sym = best_artifacts\n\n    adata.obsp['connectivities'] = C_sym.tocsr()\n    adata.obsp['distances'] = D_sym.tocsr()\n    adata.obsm['X_emb'] = Z.astype(np.float32)\n    adata.uns['auto_k_kd'] = {'k': int(k_best), 'kd': int(kd_best), 'J': float(best), 'mode': 'symm_selection'}\n    return adata\n",
+    "submitted_timestamp": 1761614867.598379,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4587125084651144,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/2924ec88-939a-416c-81be-967b4e397964/result_human.h5ad\n\nRESULT_UUID: 2924ec88-939a-416c-81be-967b4e397964\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.626  ASW_label: 0.199  ARI: 0.432  NMI: 0.652\n  Graph_conn: 0.887  kBET: 0.468  iLISI: 0.007  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.815476  ASW_label: 0.526671  ARI: 0.431883  NMI: 0.651699\n  Graph_conn: 0.889398  kBET: 0.451560  iLISI: 0.007398  cLISI: 0.995257\n  PCR: 0.000000  Cell_cycle: 0.291465",
+        "ASW_batch": [
+          "0.626",
+          0.6258915058279336
+        ],
+        "ASW_label": [
+          "0.199",
+          0.19927071959969453
+        ],
+        "ARI": [
+          "0.432",
+          0.4319598557921043
+        ],
+        "NMI": [
+          "0.652",
+          0.6516001963974933
+        ],
+        "Graph_conn": [
+          "0.887",
+          0.88748984580069
+        ],
+        "kBET": [
+          "0.468",
+          0.46841766188875716
+        ],
+        "iLISI": [
+          "0.007",
+          0.007397533109197552
+        ],
+        "cLISI": [
+          "0.984",
+          0.9837178729245857
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.331",
+          0.33137989331068857
+        ]
+      },
+      "evaluation_timestamp": 1761615346.3201728,
+      "evaluation_datetime": "2025-10-28T09:35:46.320177",
+      "sort_key": [
+        0.4587125084651144
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4587125084651144,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761615346.3820927,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011k,kd (J\u2011symm selection) on MPB\u2011GraphFWPCA + BRBG + DAQB' (ID: 1001) has been evaluated.\n\n**Score:** 0.4587125084651144\n**ASW_batch:** 0.626\n**ASW_label:** 0.199\n**ARI:** 0.432\n**NMI:** 0.652\n**Graph_conn:** 0.887\n**kBET:** 0.468\n**iLISI:** 0.007\n**cLISI:** 0.984\n**PCR:** 0.000\n**Cell_cycle:** 0.331\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.626  ASW_label: 0.199  ARI: 0.432  NMI: 0.652\n  Graph_conn: 0.887  kBET: 0.468  iLISI: 0.007  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.331\n\nRaw Scores (before normalization):\n  ASW_batch: 0.815476  ASW_label: 0.526671  ARI: 0.431883  NMI: 0.651699\n  Graph_conn: 0.889398  kBET: 0.451560  iLISI: 0.007398  cLISI: 0.995257\n  PCR: 0.000000  Cell_cycle: 0.291465\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/2924ec88-939a-416c-81be-967b4e397964/result_human.h5ad\n\nRESULT_UUID: 2924ec88-939a-416c-81be-967b4e397964\n\n\nSTDERR:\n\n```"
+  }
+}

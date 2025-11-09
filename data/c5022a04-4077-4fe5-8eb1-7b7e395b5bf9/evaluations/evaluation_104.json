@@ -1,0 +1,44 @@
+{
+  "id": "104",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Force-Directed Circle Packing Simulation",
+  "tags": [
+    "optimization",
+    "force-directed",
+    "physics-based"
+  ],
+  "abstract": "This submission implements a force-directed simulation approach for circle packing. Circles are treated as particles subject to repulsive forces from other circles and from the boundaries of the unit square. Centers are updated iteratively based on these forces, leading to a stable, packed configuration. The robust `compute_max_radii` function is then applied once to the final center positions to maximize radii. This method aims to find higher-quality packings by incorporating geometric principles into the search.",
+  "submitted_tick": 38,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\ndef compute_max_radii(centers: np.ndarray) -> np.ndarray:\n  \"\"\"\n  Compute the maximum possible radii for a given set of circle centers\n  within a unit square, ensuring no overlap and staying within bounds.\n  (Optimized with vectorized boundary checks and precomputed distances).\n\n  Args:\n    centers: (n, 2) array of (x, y) coordinates in [0, 1] x [0, 1].\n\n  Returns:\n    radii: (n,) array of non-negative radii.\n  \"\"\"\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7 \n  overlap_safety_margin = 1e-8 \n  min_positive_radius = 1e-9 \n\n  # Vectorized computation of distances to borders\n  x_coords = centers[:, 0]\n  y_coords = centers[:, 1]\n  \n  radii = np.minimum.reduce([\n      x_coords - boundary_epsilon,\n      y_coords - boundary_epsilon,\n      1 - x_coords - boundary_epsilon,\n      1 - y_coords - boundary_epsilon\n  ])\n  \n  radii = np.maximum(radii, min_positive_radius) \n\n  # Precompute pairwise squared distances once for efficiency\n  distances_sq = np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :])**2, axis=2)\n  np.fill_diagonal(distances_sq, np.inf) # Avoid self-comparison\n\n  # Iteratively shrink radii to resolve overlaps (loops remain due to dependencies)\n  for _ in range(40): # Restored to 40 iterations for thoroughness\n    for i in range(n):\n      for j in range(i + 1, n): # Only check unique pairs\n        dist_sq = distances_sq[i, j] # Use precomputed value\n        dist = np.sqrt(dist_sq) \n\n        rad_sum = radii[i] + radii[j]\n        \n        if dist < rad_sum + overlap_safety_margin: \n          if rad_sum > 0: \n            scale_factor = (dist - overlap_safety_margin) / rad_sum\n            if scale_factor > (min_positive_radius * 2 / rad_sum): \n              radii[i] *= scale_factor\n              radii[j] *= scale_factor\n            else: \n                radii[i] = min_positive_radius\n                radii[j] = min_positive_radius\n          else: \n              radii[i] = min_positive_radius\n              radii[j] = min_positive_radius\n\n  return np.maximum(radii, min_positive_radius)\n\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 32 circles in the unit square using a force-directed\n    simulation approach.\n\n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (32, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (32,) with radius of each circle\n    \"\"\"\n    n = 32\n    \n    # Simulation parameters\n    num_simulation_steps = 2000\n    dt = 0.01 # Time step\n    k_repulsion = 0.05 # Strength of circle-circle repulsion\n    k_boundary = 0.1 # Strength of boundary repulsion\n    damping_factor = 0.9 # Damping to stabilize movements\n    initial_small_radius = 0.01 # A fixed radius used for force calculations (simplifies model)\n    clip_margin = 1e-7 # Margin for clipping centers\n\n    # Initial state: random centers, small initial radii for force calcs\n    centers = np.random.rand(n, 2)\n    \n    for step in range(num_simulation_steps):\n        total_forces = np.zeros((n, 2))\n\n        # 1. Circle-Circle Repulsion\n        diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :] # (n, n, 2)\n        dist_sq = np.sum(diff**2, axis=2) # (n, n)\n        dist = np.sqrt(dist_sq) # (n, n)\n        np.fill_diagonal(dist, np.inf) # Avoid self-repulsion\n\n        # Calculate overlap degree based on initial_small_radius\n        effective_sum_radii = 2 * initial_small_radius \n        overlap_degree = np.maximum(0, effective_sum_radii - dist) # (n, n)\n        \n        # Normalize difference vectors for force direction\n        # Add a small epsilon to denominator to prevent division by zero for identical points, though fill_diagonal should handle this for dist.\n        with np.errstate(divide='ignore', invalid='ignore'): \n            norm_diff = diff / dist[:, :, np.newaxis] \n            norm_diff[~np.isfinite(norm_diff)] = 0 # Handle inf/NaN from division by zero/inf\n\n        repulsion_forces = k_repulsion * overlap_degree[:, :, np.newaxis] * norm_diff # (n, n, 2)\n        total_forces += np.sum(repulsion_forces, axis=1) # Sum forces from all other circles for each circle\n\n        # 2. Boundary Repulsion\n        # Force from left wall (x=0)\n        total_forces[:, 0] += k_boundary * np.maximum(0, initial_small_radius - centers[:, 0])\n        # Force from right wall (x=1)\n        total_forces[:, 0] -= k_boundary * np.maximum(0, centers[:, 0] - (1 - initial_small_radius))\n        # Force from bottom wall (y=0)\n        total_forces[:, 1] += k_boundary * np.maximum(0, initial_small_radius - centers[:, 1])\n        # Force from top wall (y=1)\n        total_forces[:, 1] -= k_boundary * np.maximum(0, centers[:, 1] - (1 - initial_small_radius))\n\n        # 3. Update Positions (simple Euler integration with damping)\n        # First, apply forces to get new positions\n        centers += total_forces * dt\n        # Then, apply damping to prevent oscillation and help settling\n        centers *= damping_factor \n        \n        # Clip centers to ensure they stay strictly within bounds\n        centers = np.clip(centers, clip_margin, 1 - clip_margin)\n\n    # After simulation, compute final radii using the robust compute_max_radii\n    final_radii = compute_max_radii(centers)\n\n    return centers, final_radii\n",
+    "submitted_timestamp": 1760788742.1385527,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 5 and 10 overlap: dist=0.0, r1+r2=2e-09",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 5 and 10 overlap: dist=0.0, r1+r2=2e-09",
+      "evaluation_timestamp": 1760788744.4904845,
+      "evaluation_datetime": "2025-10-18T19:59:04.490487"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760788744.5108867,
+    "version_notified": "original",
+    "message": "Your research submission 'Force-Directed Circle Packing Simulation' (ID: 104) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 5 and 10 overlap: dist=0.0, r1+r2=2e-09\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

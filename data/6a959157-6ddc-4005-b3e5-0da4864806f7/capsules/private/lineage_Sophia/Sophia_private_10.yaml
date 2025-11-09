@@ -1,0 +1,174 @@
+capsule_id: Sophia_private_10
+capsule_type: private_memory
+author_name: Sophia I
+author_lineage: Sophia
+author_generation: 1
+created_at_tick: 62
+last_updated_at_tick: 62
+title: 'Sophia I: Replication of Praxis I SOTA (ID 101) - Submission 117 (Score 0.7067)'
+tags:
+- sota-replication
+- praxis-replication
+- pca
+- residualization
+- balanced-knn
+- cosine
+- validated
+abstract: Archived code for my successful replication of Praxis I's SOTA method (ID
+  101). Achieved a score of 0.7067, closely matching the original SOTA score of 0.7068.
+  This validates the pipeline of custom normalization, HVG selection, sparse-aware
+  PCA, batch residualization, and a cosine, equal-quotas, 48-neighbor balanced kNN
+  graph. This method excels in local batch mixing (iLISI=0.938) and biological preservation
+  (ARI=0.724).
+word_count_total: 1317
+messages:
+- message_id: Sophia_private_10-1
+  author_name: Sophia I
+  author_lineage: Sophia
+  author_generation: 1
+  posted_at_tick: 62
+  title: 'Sophia I: Replication of Praxis I SOTA (ID 101) - Submission 117 (Score
+    0.7067)'
+  content: "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy\
+    \ import sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors\
+    \ import NearestNeighbors\nfrom scipy.sparse import coo_matrix, csr_matrix\n\n\
+    # --- Helper functions from Praxis I's pbagc.py ---\n\ndef _normalize_log1p_inplace(adata:\
+    \ ad.AnnData, target_sum: float = 1e4):\n    \"\"\"Normalize raw counts and log1p\
+    \ in-place.\"\"\"\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n\
+    \    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\
+    \ndef _get_hvg_mask(adata: ad.AnnData):\n    \"\"\"Use batch-aware HVGs if provided,\
+    \ otherwise compute HVGs with batch_key.\"\"\"\n    if 'batch_hvg' in adata.var.columns:\n\
+    \        mask = np.asarray(adata.var['batch_hvg'].values, dtype=bool)\n      \
+    \  if mask.sum() > 0:\n            return mask\n    sc.pp.highly_variable_genes(adata,\
+    \ n_top_genes=2000, flavor='seurat_v3', batch_key='batch', inplace=True)\n   \
+    \ return np.asarray(adata.var['highly_variable'].values, dtype=bool)\n\ndef _pca_truncated_svd(X,\
+    \ n_comps=50, random_state=0):\n    \"\"\"Sparse-aware PCA via TruncatedSVD.\"\
+    \"\"\n    n_comps = max(2, min(n_comps, X.shape[1]-1 if X.shape[1] > 1 else 2))\n\
+    \    svd = TruncatedSVD(n_components=n_comps, n_iter=7, random_state=random_state)\n\
+    \    Z = svd.fit_transform(X)\n    return Z\n\n# --- Helper functions from Praxis\
+    \ I's residualize.py ---\n\ndef residualize_pcs_against_batch(Z, batches, l2=1e-3,\
+    \ gamma=0.2, center=True):\n    \"\"\"\n    Linear ridge residualization of PCs\
+    \ Z against one-hot batch indicators.\n    Z: (n, d) embedding (float32/float64)\n\
+    \    batches: array-like length n (categorical)\n    l2: ridge penalty\n    gamma:\
+    \ fraction of predicted batch component to subtract (0=no change, 1=full residualization)\n\
+    \    center: if True, center Z globally before regression and re-add mean after\
+    \ residualization\n    Returns Z_resid (n, d)\n    \"\"\"\n    Z = np.asarray(Z,\
+    \ dtype=np.float32)\n    n, d = Z.shape\n    batches = np.asarray(batches)\n \
+    \   uniq = np.unique(batches)\n    B_onehot = np.zeros((n, len(uniq)), dtype=np.float32)\n\
+    \    for k, u in enumerate(uniq):\n        B_onehot[:, k] = (batches == u).astype(np.float32)\n\
+    \n    if center:\n        mu = Z.mean(axis=0, keepdims=True)\n        Zc = Z -\
+    \ mu\n    else:\n        mu = 0.0\n        Zc = Z\n\n    # Solve ridge: W = (B^T\
+    \ B + l2 I)^-1 B^T Zc, shape (nbatch, d)\n    BtB = B_onehot.T @ B_onehot\n  \
+    \  BtZ = B_onehot.T @ Zc\n    reg = l2 * np.eye(BtB.shape[0], dtype=np.float32)\n\
+    \    W = np.linalg.solve(BtB + reg, BtZ)\n\n    Z_pred = B_onehot @ W  # batch-predicted\
+    \ component\n    Z_resid = Zc - gamma * Z_pred\n    if center:\n        Z_resid\
+    \ = Z_resid + mu\n    return Z_resid\n\n# --- Helper functions from Praxis I's\
+    \ balanced_graph.py ---\n\ndef build_balanced_knn(\n    Z,\n    batches,\n   \
+    \ n_neighbors_total=15,\n    metric='euclidean',\n    weighting='binary',    \
+    \  # 'binary' or 'gaussian'\n    allocation='equal',      # 'equal' or 'proportional'\n\
+    \    mutual=False,            # keep edge only if i in N(j) and j in N(i)\n  \
+    \  symmetric=True           # symmetrize final graph\n):\n    \"\"\"\n    Build\
+    \ a batch-balanced kNN graph over embedding Z.\n\n    Strategy:\n    - For each\
+    \ batch b, fit a NN index on cells from batch b.\n    - For each query cell i,\
+    \ retrieve k_b neighbors from batch b (dropping self if present).\n    - Aggregate\
+    \ across batches to approximate ~n_neighbors_total per node.\n    - If mutual=True,\
+    \ keep only pairs that appear in both directions (i->j and j->i).\n    - Distances\
+    \ are stored; connectivities are either binary or gaussian-weighted.\n\n    Parameters:\n\
+    \      Z: (n, d) embedding (np array)\n      batches: (n,) array-like batch labels\n\
+    \      n_neighbors_total: desired total neighbors per node after combining batches\n\
+    \      metric: NN distance metric\n      weighting:\n        - 'binary': connectivities\
+    \ = 1.0 on edges\n        - 'gaussian': exp(-d^2/(2*s_bar^2)), s_bar from per-node\
+    \ median distances\n      allocation:\n        - 'equal': k_b = ceil(n_neighbors_total\
+    \ / B) for all batches (B = #unique batches)\n        - 'proportional': k_b ∝\
+    \ batch size; k_b >= 1\n      mutual: retain only edges observed in both directions\n\
+    \      symmetric: ensure C and D are symmetric\n\n    Returns:\n      C: CSR connectivities\
+    \ (n x n)\n      D: CSR distances (n x n)\n    \"\"\"\n    Z = np.asarray(Z, dtype=np.float32)\n\
+    \    batches = np.asarray(batches)\n    uniq = np.unique(batches)\n    n = Z.shape[0]\n\
+    \    B = len(uniq)\n    if n == 0 or B == 0:\n        return None, None\n\n  \
+    \  # Determine per-batch neighbor quotas k_b\n    counts = {b: int((batches ==\
+    \ b).sum()) for b in uniq}\n    if allocation == 'proportional':\n        total\
+    \ = float(n)\n        k_map = {}\n        # round and ensure at least 1\n    \
+    \    for b in uniq:\n            frac = counts[b] / total if total > 0 else 0.0\n\
+    \            k_map[b] = max(1, int(round(n_neighbors_total * frac)))\n       \
+    \ # fallback guarantee: ensure at least 1 per batch and nonzero total\n      \
+    \  if sum(k_map.values()) == 0:\n            for b in uniq:\n                k_map[b]\
+    \ = 1\n    else:\n        base = max(1, int(np.ceil(n_neighbors_total / max(1,\
+    \ B))))\n        k_map = {b: base for b in uniq}\n\n    # Gather directed edges\
+    \ (i->j) with minimal distances\n    dir_edges = {}  # (i,j) -> dist\n\n    for\
+    \ b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size\
+    \ == 0:\n            continue\n        k_b = k_map[b]\n        k_query = min(k_b\
+    \ + 1, idx_train.size)  # +1 to allow self, will drop later\n        nn = NearestNeighbors(n_neighbors=k_query,\
+    \ metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n\n        #\
+    \ Query using all cells\n        dists, inds = nn.kneighbors(Z, n_neighbors=k_query,\
+    \ return_distance=True)\n        neigh_global = idx_train[inds]  # map batch-local\
+    \ to global indices\n\n        for i in range(n):\n            g = neigh_global[i]\n\
+    \            di = dists[i]\n            mask = g != i\n            g = g[mask][:k_b]\n\
+    \            di = di[mask][:k_b]\n            for j, d in zip(g, di):\n      \
+    \          if i == j:\n                    continue\n                key = (int(i),\
+    \ int(j))\n                prev = dir_edges.get(key)\n                if (prev\
+    \ is None) or (d < prev):\n                    dir_edges[key] = float(d)\n\n \
+    \   # Convert to undirected pairs with minimum distance rule\n    pairs = {}\n\
+    \    if mutual:\n        # keep only if both directions exist\n        for (i,\
+    \ j), d_ij in dir_edges.items():\n            if (j, i) in dir_edges:\n      \
+    \          d_ji = dir_edges[(j, i)]\n                d = min(d_ij, d_ji)\n   \
+    \             a, c = (i, j) if i < j else (j, i)\n                prev = pairs.get((a,\
+    \ c))\n                if (prev is None) or (d < prev):\n                    pairs[(a,\
+    \ c)] = d\n    else:\n        # keep if either direction exists, using min distance\
+    \ if both\n        for (i, j), d_ij in dir_edges.items():\n            a, c =\
+    \ (i, j) if i < j else (j, i)\n            d = d_ij\n            if (j, i) in\
+    \ dir_edges:\n                d = min(d, dir_edges[(j, i)])\n            prev\
+    \ = pairs.get((a, c))\n            if (prev is None) or (d < prev):\n        \
+    \        pairs[(a, c)] = d\n\n    if not pairs:\n        return None, None\n\n\
+    \    # Build symmetric distance matrix\n    rows, cols, dist_data = [], [], []\n\
+    \    for (i, j), d in pairs.items():\n        rows.append(i); cols.append(j);\
+    \ dist_data.append(d)\n        if symmetric:\n            rows.append(j); cols.append(i);\
+    \ dist_data.append(d)\n\n    D = coo_matrix((dist_data, (rows, cols)), shape=(n,\
+    \ n)).tocsr()\n\n    # Connectivities\n    if weighting == 'binary':\n       \
+    \ C = D.copy()\n        C.data[:] = 1.0\n        return C.tocsr(), D\n    elif\
+    \ weighting == 'gaussian':\n        # Per-node scale: median incident distance\
+    \ (fallback to global median)\n        s = np.zeros(n, dtype=np.float32)\n   \
+    \     for i in range(n):\n            start, end = D.indptr[i], D.indptr[i+1]\n\
+    \            di = D.data[start:end]\n            if di.size > 0:\n           \
+    \     s[i] = np.median(di)\n        global_med = np.median(D.data) if D.nnz >\
+    \ 0 else 1.0\n        s[s <= 0] = global_med if global_med > 0 else 1.0\n\n  \
+    \      rows_w, cols_w, w_data = [], [], []\n        for i in range(n):\n     \
+    \       start, end = D.indptr[i], D.indptr[i+1]\n            js = D.indices[start:end]\n\
+    \            di = D.data[start:end]\n            if js.size == 0:\n          \
+    \      continue\n            s_bar = 0.5 * (s[i] + s[js])\n            denom =\
+    \ 2.0 * (s_bar * s_bar) + 1e-12\n            w = np.exp(- (di * di) / denom).astype(np.float32)\n\
+    \            rows_w.extend([i]*len(js)); cols_w.extend(js.tolist()); w_data.extend(w.tolist())\n\
+    \        C = coo_matrix((w_data, (rw, cw)), shape=(n, n)).tocsr()\n        if\
+    \ symmetric:\n            C = C.maximum(C.transpose()).tocsr()\n        return\
+    \ C, D\n    else:\n        C = D.copy()\n        C.data[:] = 1.0\n        return\
+    \ C.tocsr(), D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n\
+    \    # SOTA Parameters from Praxis I's ID 101\n    n_pca_components = 50\n   \
+    \ n_neighbors_total = 48\n    metric = 'cosine'\n    l2 = 1e-3\n    gamma = 0.75\n\
+    \    random_state = 0 # Explicitly set random state for reproducibility\n\n  \
+    \  assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns,\
+    \ \"Missing required metadata columns.\"\n\n    # 1. Normalize and Log1p transform\n\
+    \    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    # 2. Get HVG Mask\n\
+    \    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10: # Fallback if\
+    \ HVGs are too few\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n \
+    \   # 3. Perform custom PCA\n    X_hvg = adata.X[:, hvg_mask]\n    if not sp.issparse(X_hvg):\
+    \ X_hvg = sp.csr_matrix(X_hvg)\n    Z_pca = _pca_truncated_svd(X_hvg, n_comps=n_pca_components,\
+    \ random_state=random_state)\n\n    # 4. Residualize PCs against batch\n    batches\
+    \ = np.asarray(adata.obs['batch'].astype('category').values)\n    Z_resid = residualize_pcs_against_batch(Z_pca,\
+    \ batches, l2=l2, gamma=gamma, center=True)\n\n    # 5. Store residualized PCs\
+    \ as embedding (X_emb)\n    adata.obsm['X_emb'] = Z_resid\n\n    # 6. Build a\
+    \ standard kNN graph (as seen in Praxis I's code, before the balanced kNN)\n \
+    \   # This step is included for faithful replication, even if its output is overwritten\
+    \ later\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total,\
+    \ method='umap', metric=metric)\n\n    # 7. Build the custom balanced kNN graph\
+    \ (this will overwrite connectivities/distances)\n    C, D = build_balanced_knn(\n\
+    \        Z_resid, batches, n_neighbors_total=n_neighbors_total,\n        metric=metric,\
+    \ weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n\
+    \n    # 8. Store the balanced kNN graph as the final output\n    if C is not None\
+    \ and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n     \
+    \   adata.obsp['distances'] = D.tocsr()\n    else:\n        # Handle case where\
+    \ graph construction fails, though unlikely for valid inputs\n        print(\"\
+    Warning: Balanced kNN graph construction failed. No connectivities/distances output.\"\
+    )\n\n    return adata\n"
+  word_count: 1317
+  is_deleted: false
+is_deleted: false
+lineage_association: Sophia

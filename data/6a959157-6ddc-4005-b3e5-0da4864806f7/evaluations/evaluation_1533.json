@@ -1,0 +1,91 @@
+{
+  "id": "1533",
+  "author": "Fathom I",
+  "research_task_id": "1",
+  "title": "Hybrid BBKNN Graph + Diffusion Map Embedding",
+  "tags": [
+    "bbknn",
+    "diffusion-map",
+    "graph-based",
+    "embedding",
+    "spectral"
+  ],
+  "abstract": "An efficient version of the graph-to-embedding approach. This method first constructs a batch-corrected nearest-neighbor graph using the BBKNN algorithm. To avoid the computational cost of UMAP, it then uses a spectral method, Diffusion Maps (via scanpy.tl.diffmap), to generate a low-dimensional embedding from this graph. This aims to achieve high batch mixing (iLISI) while remaining computationally feasible.",
+  "submitted_tick": 1078,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hybrid method:\n    1. Build a batch-corrected graph using BBKNN logic.\n    2. Generate a Diffusion Map embedding from that graph.\n    \"\"\"\n    print(\"Starting Hybrid BBKNN Graph + Diffusion Map Embedding method...\")\n\n    # --- Part 1: BBKNN Graph Construction ---\n    neighbors_within_batch = 3\n    n_pcs = 50\n\n    print(\"  Normalizing and logging data...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    print(\"  Using batch-aware HVGs...\")\n    if 'batch_hvg' in adata.var.columns:\n        adata = adata[:, adata.var['batch_hvg']].copy()\n\n    print(f\"  Computing PCA with {n_pcs} components...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n\n    X_pca = adata.obsm['X_pca']\n    n_cells = adata.n_obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    \n    batch_to_indices = {\n        batch: np.where(batches == batch)[0] for batch in unique_batches\n    }\n\n    all_neighbors = [[] for _ in range(n_cells)]\n    \n    print(\"  Finding neighbors within each batch...\")\n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        if len(batch_indices) == 0: continue\n        \n        batch_pca = X_pca[batch_indices]\n        k_neighbors = min(neighbors_within_batch + 1, len(batch_indices))\n\n        nn_model = NearestNeighbors(n_neighbors=k_neighbors, metric='euclidean', n_jobs=-1)\n        nn_model.fit(batch_pca)\n        \n        distances_all, indices_all = nn_model.kneighbors(X_pca, n_neighbors=k_neighbors)\n\n        for i in range(n_cells):\n            global_indices = batch_indices[indices_all[i]]\n            mask = global_indices != i\n            all_neighbors[i].extend(global_indices[mask][:neighbors_within_batch])\n            \n    print(\"  Creating connectivity matrix from neighbors...\")\n    connectivities_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    for i in range(n_cells):\n        # Assign connectivity of 1 to all neighbors\n        connectivities_matrix[i, all_neighbors[i]] = 1\n    \n    connectivities_matrix = connectivities_matrix.tocsr().maximum(connectivities_matrix.T)\n\n    # Store the computed graph in the AnnData object\n    adata.obsp['connectivities'] = connectivities_matrix\n    # Diffusion map doesn't need a distance matrix, but needs the neighbors uns dict\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities'}\n\n    # --- Part 2: Diffusion Map Embedding from the Graph ---\n    print(\"  Computing Diffusion Map embedding from the BBKNN graph...\")\n    # Use the precomputed graph to generate the embedding\n    # n_comps=16 because component 0 is trivial\n    sc.tl.diffmap(adata, n_comps=16)\n\n    # --- Part 3: Return the Result ---\n    print(\"  Constructing final AnnData object...\")\n    # Exclude the first trivial component\n    X_diffmap = adata.obsm['X_diffmap'][:, 1:]\n\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'method_id': 'bbknn_diffmap_hybrid',\n        },\n        obsm={\n            'X_emb': X_diffmap\n        }\n    )\n\n    print(\"\u2713 Hybrid BBKNN Graph + Diffusion Map Embedding complete.\")\n    return output\n",
+    "submitted_timestamp": 1761756874.2693427,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5661446406916115,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Hybrid BBKNN Graph + Diffusion Map Embedding method...\n  Normalizing and logging data...\n  Using batch-aware HVGs...\n  Computing PCA with 50 components...\n  Finding neighbors within each batch...\n  Creating connectivity matrix from neighbors...\n  Computing Diffusion Map embedding from the BBKNN graph...\n  Constructing final AnnData object...\n\u2713 Hybrid BBKNN Graph + Diffusion Map Embedding complete.\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/f6c9ae8b-195b-44f4-ab4e-12851f81ea27/result_human.h5ad\n\nRESULT_UUID: f6c9ae8b-195b-44f4-ab4e-12851f81ea27\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.293  ASW_label: 0.386  ARI: 0.515  NMI: 0.677\n  Graph_conn: 0.835  kBET: 0.915  iLISI: 0.267  cLISI: 0.991\n  PCR: 0.649  Cell_cycle: 0.134\n\nRaw Scores (before normalization):\n  ASW_batch: 0.665515  ASW_label: 0.634391  ARI: 0.514980  NMI: 0.677513\n  Graph_conn: 0.837536  kBET: 0.870884  iLISI: 0.266937  cLISI: 0.997453\n  PCR: 0.648657  Cell_cycle: 0.123553",
+        "ASW_batch": [
+          "0.293",
+          0.29299398992741205
+        ],
+        "ASW_label": [
+          "0.386",
+          0.3855550960576771
+        ],
+        "ARI": [
+          "0.515",
+          0.5150458791211774
+        ],
+        "NMI": [
+          "0.677",
+          0.6774221149958811
+        ],
+        "Graph_conn": [
+          "0.835",
+          0.8347327089720801
+        ],
+        "kBET": [
+          "0.915",
+          0.9146073550663582
+        ],
+        "iLISI": [
+          "0.267",
+          0.26693739289845136
+        ],
+        "cLISI": [
+          "0.991",
+          0.9912581625038175
+        ],
+        "PCR": [
+          "0.649",
+          0.6486572054832023
+        ],
+        "Cell_cycle": [
+          "0.134",
+          0.13423650189005787
+        ]
+      },
+      "evaluation_timestamp": 1761757252.3874161,
+      "evaluation_datetime": "2025-10-30T01:00:52.387420",
+      "sort_key": [
+        0.5661446406916115
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5661446406916115,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761757252.3972418,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid BBKNN Graph + Diffusion Map Embedding' (ID: 1533) has been evaluated.\n\n**Score:** 0.5661446406916115\n**ASW_batch:** 0.293\n**ASW_label:** 0.386\n**ARI:** 0.515\n**NMI:** 0.677\n**Graph_conn:** 0.835\n**kBET:** 0.915\n**iLISI:** 0.267\n**cLISI:** 0.991\n**PCR:** 0.649\n**Cell_cycle:** 0.134\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.293  ASW_label: 0.386  ARI: 0.515  NMI: 0.677\n  Graph_conn: 0.835  kBET: 0.915  iLISI: 0.267  cLISI: 0.991\n  PCR: 0.649  Cell_cycle: 0.134\n\nRaw Scores (before normalization):\n  ASW_batch: 0.665515  ASW_label: 0.634391  ARI: 0.514980  NMI: 0.677513\n  Graph_conn: 0.837536  kBET: 0.870884  iLISI: 0.266937  cLISI: 0.997453\n  PCR: 0.648657  Cell_cycle: 0.123553\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Hybrid BBKNN Graph + Diffusion Map Embedding method...\n  Normalizing and logging data...\n  Using batch-aware HVGs...\n  Computing PCA with 50 components...\n  Finding neighbors within each batch...\n  Creating connectivity matrix from neighbors...\n  Computing Diffusion Map embedding from the BBKNN graph...\n  Constructing final AnnData object...\n\u2713 Hybrid BBKNN Graph + Diffusion Map Embedding complete.\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/f6c9ae8b-195b-44f4-ab4e-12851f81ea27/result_human.h5ad\n\nRESULT_UUID: f6c9ae8b-195b-44f4-ab4e-12851f81ea27\n\n\nSTDERR:\n\n```"
+  }
+}

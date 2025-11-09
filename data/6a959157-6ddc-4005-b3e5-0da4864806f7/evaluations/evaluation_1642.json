@@ -1,0 +1,117 @@
+{
+  "id": "1642",
+  "author": "Nous I",
+  "research_task_id": "1",
+  "title": "Generalization Test 2 (2/2): CLEAN Vanilla BRBG with alpha_g=0.6",
+  "tags": [
+    "generalization-test",
+    "fwpca",
+    "brbg",
+    "alpha-g",
+    "bugfix"
+  ],
+  "abstract": "Second part of a clean generalization test. This experiment tests if `alpha_g=0.6` improves performance on a purpose-built, \"vanilla\" BRBG pipeline. A positive result would provide the unambiguous evidence of generalizability required for publication.",
+  "submitted_tick": 1139,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\n\nsys.path.append('storage/nous')\nfrom vanilla_brbg_pipeline import eliminate_vanilla_brbg\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n  return eliminate_vanilla_brbg(adata, alpha_g=0.6)\n",
+    "submitted_timestamp": 1761779951.2511458,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Running CLEAN Vanilla BRBG with alpha_g=0.6\n  Applied global correction. Gamma Mean=0.034\nFound 33 genes with zero variance.\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\nTraceback (most recent call last):\n  File \"/tmp/tmpdqlltxub/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpdqlltxub/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpdqlltxub/submission.py\", line 8, in eliminate_batch_effect_fn\n    return eliminate_vanilla_brbg(adata, alpha_g=0.6)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpdqlltxub/storage/nous/vanilla_brbg_pipeline.py\", line 53, in eliminate_vanilla_brbg\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: build_density_adaptive_bbsg() got an unexpected keyword argument 'cap'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761779987.1480916,
+      "evaluation_datetime": "2025-10-30T07:19:47.148095"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1642_1761779987",
+      "started_timestamp": 1761779987.1471503,
+      "completed_timestamp": 1761780380.2880144,
+      "final_report": "# Debug Report for Evaluation 1642\n\n## Summary\n**SUCCESS** - Fixed the code by removing an invalid parameter from a function call. The submission now runs without crashing.\n\n## Root Cause\nThe original code imported `eliminate_vanilla_brbg` from `storage/nous/vanilla_brbg_pipeline.py`, which called `build_density_adaptive_bbsg()` with an invalid keyword argument `cap=2.0` on line 56:\n\n```python\nCg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                       k_total=k_total, metric='cosine',\n                                       delta=delta, k_density=20,\n                                       cap=2.0, rng_seed=0)  # cap parameter doesn't exist!\n```\n\nThe actual function signature in `storage/praxis/bbsg_density_adaptive.py` is:\n\n```python\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine',\n                                delta=0.15, k_density=30, rng_seed=0):\n```\n\nThis function does not accept a `cap` parameter, causing a `TypeError: build_density_adaptive_bbsg() got an unexpected keyword argument 'cap'`.\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Copied the buggy function**: Copied the entire `eliminate_vanilla_brbg` function from the lineage file into the submission\n2. **Removed invalid parameter**: Changed line 56 from:\n   ```python\n   cap=2.0, rng_seed=0)\n   ```\n   to:\n   ```python\n   rng_seed=0)\n   ```\n3. **Kept all other functionality**: The rest of the code remains unchanged, including all the BRBG pipeline logic\n\nThe fixed code now calls `build_density_adaptive_bbsg()` with only the valid parameters it accepts.\n\n## Verification\nRan `monitor_evaluation.py 2` which confirmed the code ran successfully for over 300 seconds without crashing. The submission is now executing the batch integration algorithm correctly.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage')\nsys.path.append('storage/praxis')\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\n# Fixed version of eliminate_vanilla_brbg - removed invalid 'cap' parameter\ndef eliminate_vanilla_brbg(adata: ad.AnnData,\n                           alpha_g: float = 0.5,\n                           n_pcs_graph: int = 50,\n                           l2: float = 1e-3,\n                           gamma_max: float = 0.74,\n                           lam_override: float = 0.70,\n                           k_total: int = 48,\n                           delta: float = 0.04) -> ad.AnnData:\n    print(f\"[Nous I] Running CLEAN Vanilla BRBG with alpha_g={alpha_g}\")\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # FWPCA on the graph path\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha_g).astype(np.float32)\n    Xw_graph = Xd * w\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # Standard BRBG (Global Gamma)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n    print(f\"  Applied global correction. Gamma Mean={np.mean(gamma):.3f}\")\n\n    # For compatibility, I need an X_emb. I will use a simple Combat-on-PCA.\n    ad_emb = ad.AnnData(Xd, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=50)\n    sc.pp.combat(ad_emb, key='batch')\n    adata.obsm['X_emb'] = ad_emb.X\n\n    # Build graph using BBSG - FIXED: removed invalid 'cap' parameter\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                           k_total=k_total, metric='cosine',\n                                           delta=delta, k_density=20,\n                                           rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    return eliminate_vanilla_brbg(adata, alpha_g=0.6)\n",
+      "created_timestamp": 1761780048.816076,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.5535871952920361,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Running CLEAN Vanilla BRBG with alpha_g=0.6\n  Applied global correction. Gamma Mean=0.034\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/545185d3-9d0e-4830-99ae-165d23ebe082/result_human.h5ad\n\nRESULT_UUID: 545185d3-9d0e-4830-99ae-165d23ebe082\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.892  ASW_label: 0.152  ARI: 0.316  NMI: 0.450\n  Graph_conn: 0.664  kBET: 0.553  iLISI: 0.329  cLISI: 0.879\n  PCR: 1.000  Cell_cycle: 0.300\n\nRaw Scores (before normalization):\n  ASW_batch: 0.935532  ASW_label: 0.499346  ARI: 0.315919  NMI: 0.450447\n  Graph_conn: 0.669794  kBET: 0.531317  iLISI: 0.328923  cLISI: 0.964657\n  PCR: 0.999945  Cell_cycle: 0.264931",
+          "ASW_batch": [
+            "0.892",
+            0.8924035376541236
+          ],
+          "ASW_label": [
+            "0.152",
+            0.15201661423886947
+          ],
+          "ARI": [
+            "0.316",
+            0.31601130061717553
+          ],
+          "NMI": [
+            "0.450",
+            0.45029149835008053
+          ],
+          "Graph_conn": [
+            "0.664",
+            0.6640965257995518
+          ],
+          "kBET": [
+            "0.553",
+            0.5532841675536637
+          ],
+          "iLISI": [
+            "0.329",
+            0.3289233010630241
+          ],
+          "cLISI": [
+            "0.879",
+            0.8786734609603003
+          ],
+          "PCR": [
+            "1.000",
+            0.9999454533744273
+          ],
+          "Cell_cycle": [
+            "0.300",
+            0.30022609330914507
+          ]
+        },
+        "evaluation_timestamp": 1761780705.829324,
+        "evaluation_datetime": "2025-10-30T07:31:45.829328",
+        "sort_key": [
+          0.5535871952920361
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.5535871952920361,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761780705.8768644,
+    "version_notified": "v2",
+    "message": "Your research submission 'Generalization Test 2 (2/2): CLEAN Vanilla BRBG with alpha_g=0.6' (ID: 1642) succeeded after automatic debugging.\n\n**Score:** 0.5535871952920361\n**ASW_batch:** 0.892\n**ASW_label:** 0.152\n**ARI:** 0.316\n**NMI:** 0.450\n**Graph_conn:** 0.664\n**kBET:** 0.553\n**iLISI:** 0.329\n**cLISI:** 0.879\n**PCR:** 1.000\n**Cell_cycle:** 0.300\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.892  ASW_label: 0.152  ARI: 0.316  NMI: 0.450\n  Graph_conn: 0.664  kBET: 0.553  iLISI: 0.329  cLISI: 0.879\n  PCR: 1.000  Cell_cycle: 0.300\n\nRaw Scores (before normalization):\n  ASW_batch: 0.935532  ASW_label: 0.499346  ARI: 0.315919  NMI: 0.450447\n  Graph_conn: 0.669794  kBET: 0.531317  iLISI: 0.328923  cLISI: 0.964657\n  PCR: 0.999945  Cell_cycle: 0.264931\n\n**Debugger Report:** # Debug Report for Evaluation 1642\n\n## Summary\n**SUCCESS** - Fixed the code by removing an invalid parameter from a function call. The submission now runs without crashing.\n\n## Root Cause\nThe original code imported `eliminate_vanilla_brbg` from `storage/nous/vanilla_brbg_pipeline.py`, which called `build_density_adaptive_bbsg()` with an invalid keyword argument `cap=2.0` on line 56:\n\n```python\nCg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                       k_total=k_total, metric='cosine',\n                                       delta=delta, k_density=20,\n                                       cap=2.0, rng_seed=0)  # cap parameter doesn't exist!\n```\n\nThe actual function signature in `storage/praxis/bbsg_density_adaptive.py` is:\n\n```python\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=48, metric='cosine',\n                                delta=0.15, k_density=30, rng_seed=0):\n```\n\nThis function does not accept a `cap` parameter, causing a `TypeError: build_density_adaptive_bbsg() got an unexpected keyword argument 'cap'`.\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Copied the buggy function**: Copied the entire `eliminate_vanilla_brbg` function from the lineage file into the submission\n2. **Removed invalid parameter**: Changed line 56 from:\n   ```python\n   cap=2.0, rng_seed=0)\n   ```\n   to:\n   ```python\n   rng_seed=0)\n   ```\n3. **Kept all other functionality**: The rest of the code remains unchanged, including all the BRBG pipeline logic\n\nThe fixed code now calls `build_density_adaptive_bbsg()` with only the valid parameters it accepts.\n\n## Verification\nRan `monitor_evaluation.py 2` which confirmed the code ran successfully for over 300 seconds without crashing. The submission is now executing the batch integration algorithm correctly.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage')\nsys.path.append('storage/praxis')\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\n# Fixed version of eliminate_vanilla_brbg - removed invalid 'cap' parameter\ndef eliminate_vanilla_brbg(adata: ad.AnnData,\n                           alpha_g: float = 0.5,\n                           n_pcs_graph: int = 50,\n                           l2: float = 1e-3,\n                           gamma_max: float = 0.74,\n                           lam_override: float = 0.70,\n                           k_total: int = 48,\n                           delta: float = 0.04) -> ad.AnnData:\n    print(f\"[Nous I] Running CLEAN Vanilla BRBG with alpha_g={alpha_g}\")\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # FWPCA on the graph path\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha_g).astype(np.float32)\n    Xw_graph = Xd * w\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # Standard BRBG (Global Gamma)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n    print(f\"  Applied global correction. Gamma Mean={np.mean(gamma):.3f}\")\n\n    # For compatibility, I need an X_emb. I will use a simple Combat-on-PCA.\n    ad_emb = ad.AnnData(Xd, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=50)\n    sc.pp.combat(ad_emb, key='batch')\n    adata.obsm['X_emb'] = ad_emb.X\n\n    # Build graph using BBSG - FIXED: removed invalid 'cap' parameter\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                           k_total=k_total, metric='cosine',\n                                           delta=delta, k_density=20,\n                                           rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    return eliminate_vanilla_brbg(adata, alpha_g=0.6)\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Running CLEAN Vanilla BRBG with alpha_g=0.6\n  Applied global correction. Gamma Mean=0.034\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/545185d3-9d0e-4830-99ae-165d23ebe082/result_human.h5ad\n\nRESULT_UUID: 545185d3-9d0e-4830-99ae-165d23ebe082\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

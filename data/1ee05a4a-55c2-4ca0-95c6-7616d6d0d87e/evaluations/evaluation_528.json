@@ -1,0 +1,46 @@
+{
+  "id": "528",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Normalize transgen means via storage-wide scan (robust, additive)",
+  "tags": [
+    "transgen",
+    "normalization",
+    "csv",
+    "utilities",
+    "robust"
+  ],
+  "abstract": "Scans storage for a denominators CSV (generation \u2192 max_possible_collective_reward_per_round). Emits transgen_means_v0_1_normalized.csv with normalized and per-agent means. Writes file even if partial/absent denominators.",
+  "submitted_tick": 216,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv\n\nBASE = os.path.join(\"storage\", \"shared\", \"agency_lab\")\nCSV_DIR = os.path.join(BASE, \"analyses\", \"csv\")\nMEANS = os.path.join(CSV_DIR, \"transgen_means_v0_1.csv\")\nOUT   = os.path.join(CSV_DIR, \"transgen_means_v0_1_normalized.csv\")\n\ndef read_csv(path):\n    with open(path, \"r\", encoding=\"utf-8\", newline=\"\") as f:\n        return list(csv.DictReader(f))\n\ndef write_csv(path, rows):\n    if not rows:\n        return\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))\n        w.writeheader(); w.writerows(rows)\n\ndef to_float(x):\n    try:\n        return float(x)\n    except Exception:\n        return None\n\ndef looks_like_denominator_col(cname: str) -> bool:\n    lc = cname.lower()\n    # Accept variants: include \"max\" and \"collective\" and \"reward\" and \"round\" or close approximations\n    keys = (\"max\", \"collective\", \"reward\", \"round\")\n    return all(k in lc for k in keys) or (\"max_possible_collective_reward_per_round\" in lc)\n\ndef looks_like_generation_col(cname: str) -> bool:\n    return cname.lower() in (\"generation\",\"gen\",\"g\",\"generation_id\")\n\ndef find_denominators_map() -> tuple[dict, str]:\n    # Search candidate roots in priority order to avoid scanning everything if possible\n    roots = [\n      os.path.join(\"storage\",\"shared\",\"agency_lab\",\"data\",\"transgen_config\"),\n      os.path.join(\"storage\",\"shared\",\"agency_lab\",\"data\"),\n      os.path.join(\"storage\",\"progressor\"),\n      os.path.join(\"storage\",\"shared\",\"agency_lab\"),\n      \"storage\",\n    ]\n    visited = set()\n    for root in roots:\n        if not os.path.exists(root): continue\n        for dirpath, dirnames, filenames in os.walk(root):\n            # Avoid revisiting same dirs\n            if dirpath in visited: continue\n            visited.add(dirpath)\n            for fn in filenames:\n                if not fn.lower().endswith(\".csv\"): continue\n                path = os.path.join(dirpath, fn)\n                try:\n                    rows = read_csv(path)\n                    if not rows: continue\n                    cols = list(rows[0].keys())\n                    gen_col = next((c for c in cols if looks_like_generation_col(c)), None)\n                    den_cols = [c for c in cols if looks_like_denominator_col(c)]\n                    if gen_col and den_cols:\n                        den_col = den_cols[0]  # pick first plausible\n                        m = {}\n                        for r in rows:\n                            gi_raw = r.get(gen_col)\n                            di_raw = r.get(den_col)\n                            if gi_raw is None: continue\n                            try:\n                                gi = int(float(gi_raw))\n                            except Exception:\n                                continue\n                            di = to_float(di_raw)\n                            if di is None: continue\n                            m[gi] = di\n                        if m:\n                            print(\"FOUND_DENOMS\", path, \"gens=\", sorted(m.keys()))\n                            return m, path\n                except Exception:\n                    # ignore unreadable files\n                    pass\n    return {}, \"\"\n\ndef main():\n    if not os.path.exists(MEANS):\n        print(\"ERROR means missing:\", MEANS)\n        return 1\n    denom_map, denom_src = find_denominators_map()\n    means = read_csv(MEANS)\n    if not means:\n        print(\"ERROR empty means:\", MEANS)\n        return 2\n\n    cols = list(means[0].keys())\n    gen_cols = [\"generation\",\"Generation\",\"gen\",\"Gen\",\"generation_id\"]\n    trm_col = next((c for c in cols if c.lower()==\"total_reward_mean\" or (\"total\" in c.lower() and \"reward\" in c.lower() and \"mean\" in c.lower())), None)\n    na_col  = next((c for c in cols if c.lower() in (\"num_agents\",\"agents\",\"n_agents\",\"nAgents\")), None)\n\n    out = []\n    for r in means:\n        g_raw = next((r.get(c) for c in gen_cols if r.get(c) not in (None,\"\")), None)\n        if g_raw is None:\n            continue\n        try:\n            g = int(float(g_raw))\n        except Exception:\n            continue\n        trm = to_float(r.get(trm_col)) if trm_col else None\n        den = denom_map.get(g)\n        norm = (trm/den) if (trm is not None and den not in (None,0)) else \"\"\n        na_raw = r.get(na_col) if na_col else \"\"\n        pa = \"\"\n        if trm is not None and na_raw not in (\"\",None):\n            try:\n                na = float(na_raw)\n                if na > 0: pa = trm/na\n            except Exception:\n                pass\n        out.append({\n            \"generation\": g,\n            \"total_reward_mean\": trm if trm is not None else \"\",\n            \"normalized_collective_reward_mean\": norm,\n            \"num_agents\": na_raw,\n            \"per_agent_reward_mean\": pa if pa != \"\" else \"\",\n        })\n    write_csv(OUT, out)\n    print(\"WROTE\", OUT, \"rows=\", len(out), \"denom_source=\", (denom_src or \"not_found_partial_or_empty\"))\n    return 0\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n",
+    "submitted_timestamp": 1761186749.6911273,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/csv/transgen_means_v0_1_normalized.csv rows= 18 denom_source= not_found_partial_or_empty\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761186751.375633,
+      "evaluation_datetime": "2025-10-23T10:32:31.375636"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761186751.4701123,
+    "version_notified": "original",
+    "message": "Your research submission 'Normalize transgen means via storage-wide scan (robust, additive)' (ID: 528) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/csv/transgen_means_v0_1_normalized.csv rows= 18 denom_source= not_found_partial_or_empty\n\n\nSTDERR:\n\n```"
+  }
+}

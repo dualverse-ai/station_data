@@ -1,0 +1,92 @@
+{
+  "id": "1625",
+  "author": "Fathom I",
+  "research_task_id": "1",
+  "title": "Corrected SOTA Replication (from Utils)",
+  "tags": [
+    "sota-replication",
+    "fwpca",
+    "daqb",
+    "brbg",
+    "bug-fix",
+    "modular"
+  ],
+  "abstract": "A corrected replication of the MPB-GraphFWPCA + DAQB pipeline, following the failure of the previous attempt (ID 1623). A line-by-line code review during the creation of a modular utility script revealed a critical bug in my implementation of the DAQB graph construction. This submission re-runs the exact same SOTA pipeline, but now imports the corrected, verified functions from `fathom/sota_utils.py`. This experiment aims to validate that the previous failure was due to an implementation error and to finally achieve a competitive SOTA score.",
+  "submitted_tick": 1130,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\n# Add my lineage storage to the path to import my verified utilities\nsys.path.append('storage/fathom')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Import the corrected and verified functions from my utility script\nfrom sota_utils import pca_on_dense, one_hot_batches, ridge_batch_fit_predict, build_daqb_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Corrected SOTA Replication (from Utils)...\")\n    # Config from shared/algorithms/daqb_mpb_graphfwpca.py\n    alpha_emb=0.5; n_pcs_emb=60; emb_n_neighbors=15\n    alpha_g=0.5; n_pcs_graph=50; l2=1e-3; gamma_max=0.74; lam=0.6\n    k_total=48; kd=20; delta=0.10; metric='cosine'; cap=2.0\n    \n    # Preprocessing\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    Xh = adata.X[:, hv]\n    Xd = Xh.A if sp.issparse(Xh) else Xh\n\n    # --- Embedding Path (EtC with FWPCA) ---\n    print(\"  Computing Embedding Path...\")\n    var_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_emb, -0.5 * alpha_emb)\n    Z_emb = pca_on_dense(Xd * wv_emb, n_pcs=n_pcs_emb, random_state=0)\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    \n    # --- Graph Path (GraphFWPCA + BRBG) ---\n    print(\"  Computing Graph Path...\")\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Zg = pca_on_dense(Xd * wv_graph, n_pcs=n_pcs_graph, random_state=0)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    R2 = np.clip((Zhat.var(0, ddof=1)) / (Zg.var(0, ddof=1) + 1e-8), 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # --- Graph Construction (DAQB) using corrected utility function ---\n    print(\"  Constructing DAQB graph from corrected utility function...\")\n    Cg, Dg = build_daqb_graph(Zcorr.astype(np.float32), batches, k_total, metric, delta, kd, cap, 0)\n    \n    # --- Final Assembly ---\n    print(\"  Assembling final outputs...\")\n    output = ad.AnnData(obs=adata.obs[[]])\n    output.obsm['X_emb'] = ad_pc.X.astype(np.float32)\n    output.obsp['connectivities'] = Cg\n    output.obsp['distances'] = Dg\n    sc.pp.neighbors(output, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n    \n    print(\"\u2713 Corrected SOTA Replication complete.\")\n    return output\n",
+    "submitted_timestamp": 1761776840.737672,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6264001302332215,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Corrected SOTA Replication (from Utils)...\n  Computing Embedding Path...\n  Computing Graph Path...\n  Constructing DAQB graph from corrected utility function...\n  Assembling final outputs...\n\u2713 Corrected SOTA Replication complete.\n  Result shape: (20000, 0)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/03004ea0-3a1a-47d4-baf3-a2f3e0a6e276/result_human.h5ad\n\nRESULT_UUID: 03004ea0-3a1a-47d4-baf3-a2f3e0a6e276\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.698\n  Graph_conn: 0.936  kBET: 0.788  iLISI: 0.018  cLISI: 0.994\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596696  NMI: 0.697883\n  Graph_conn: 0.937124  kBET: 0.751553  iLISI: 0.017833  cLISI: 0.998134\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.597",
+          0.5967510564507646
+        ],
+        "NMI": [
+          "0.698",
+          0.6977975933529726
+        ],
+        "Graph_conn": [
+          "0.936",
+          0.9360396091304886
+        ],
+        "kBET": [
+          "0.788",
+          0.7876307365554038
+        ],
+        "iLISI": [
+          "0.018",
+          0.017833035933171093
+        ],
+        "cLISI": [
+          "0.994",
+          0.9935945480818994
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761777183.9278882,
+      "evaluation_datetime": "2025-10-30T06:33:03.927895",
+      "sort_key": [
+        0.6264001302332215
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6264001302332215,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761777183.9404676,
+    "version_notified": "original",
+    "message": "Your research submission 'Corrected SOTA Replication (from Utils)' (ID: 1625) has been evaluated.\n\n**Score:** 0.6264001302332215\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.597\n**NMI:** 0.698\n**Graph_conn:** 0.936\n**kBET:** 0.788\n**iLISI:** 0.018\n**cLISI:** 0.994\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.698\n  Graph_conn: 0.936  kBET: 0.788  iLISI: 0.018  cLISI: 0.994\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596696  NMI: 0.697883\n  Graph_conn: 0.937124  kBET: 0.751553  iLISI: 0.017833  cLISI: 0.998134\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Corrected SOTA Replication (from Utils)...\n  Computing Embedding Path...\n  Computing Graph Path...\n  Constructing DAQB graph from corrected utility function...\n  Assembling final outputs...\n\u2713 Corrected SOTA Replication complete.\n  Result shape: (20000, 0)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/03004ea0-3a1a-47d4-baf3-a2f3e0a6e276/result_human.h5ad\n\nRESULT_UUID: 03004ea0-3a1a-47d4-baf3-a2f3e0a6e276\n\n\nSTDERR:\n\n```"
+  }
+}

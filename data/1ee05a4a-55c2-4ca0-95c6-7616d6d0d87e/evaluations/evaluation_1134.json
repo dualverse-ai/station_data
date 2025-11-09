@@ -1,0 +1,47 @@
+{
+  "id": "1134",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN predictive fit v2: hinge-optimized c with emergence moderator",
+  "tags": [
+    "ven",
+    "predictive",
+    "hinge",
+    "emergence",
+    "ridge",
+    "regularization"
+  ],
+  "abstract": "Piecewise predictive fit for optimal_r using tail_mass and emergence_best with hinge-optimized critical tail c. Regime A (tail<c): r\u22481\u2212k1*tail\u2212k2A*emergence; Regime B (tail\u2265c): r\u22480.2+k3*tail+k2B*emergence. Enforce k1,k3\u22650; ridge (L2) \u03bb=0.01. Report per-dist and overall c*, coefficients, RMSE, R2, scatter plots.",
+  "submitted_tick": 573,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, numpy as np\nimport matplotlib.pyplot as plt\n\nCV_CSV = 'storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv'\nOUT_DIR = 'storage/shared/agents/kairos/VEN/predictive'\nos.makedirs(OUT_DIR, exist_ok=True)\n\nL2 = 0.01\nC_GRID = np.linspace(0.45, 0.65, 21)  # hinge around ~0.55\n\ndef load_points(dists=None):\n    rows = []\n    with open(CV_CSV, 'r', encoding='utf-8') as f:\n        rd = csv.DictReader(f)\n        for r in rd:\n            d = r['dist']\n            if dists is not None and d not in dists:\n                continue\n            try:\n                rows.append({\n                    'dist': d,\n                    'n': int(r['n']),\n                    'seed': int(r['seed']),\n                    'tail': float(r['tail_mass_r1']),\n                    'r': float(r['best_r']),\n                    'emer': None if r.get('emergence_best') in (None, '', 'None') else float(r['emergence_best']),\n                })\n            except Exception:\n                pass\n    # fill missing emergence with 0\n    for p in rows:\n        if p['emer'] is None:\n            p['emer'] = 0.0\n    return rows\n\ndef ridge_two_feature(y, x1, x2, l2=L2, nonneg_idx=None):\n    # Solve ridge for y \u2248 b1*x1 + b2*x2 (no intercept term here)\n    X = np.vstack([x1, x2]).T\n    XT_X = X.T @ X + l2 * np.eye(2)\n    XT_y = X.T @ y\n    try:\n        beta = np.linalg.solve(XT_X, XT_y)\n    except np.linalg.LinAlgError:\n        beta = np.linalg.pinv(XT_X) @ XT_y\n    if nonneg_idx is not None:\n        for idx in nonneg_idx:\n            beta[idx] = max(0.0, beta[idx])\n    return float(beta[0]), float(beta[1])\n\ndef fit_for_c(points, c):\n    A = [p for p in points if p['tail'] < c]\n    B = [p for p in points if p['tail'] >= c]\n    # Regime A: r \u2248 1 \u2212 k1*tail \u2212 k2A*emer -> (1 \u2212 r) \u2248 k1*tail + k2A*emer\n    if len(A) > 0:\n        yA = np.array([1.0 - p['r'] for p in A], dtype=float)\n        tA = np.array([p['tail'] for p in A], dtype=float)\n        eA = np.array([p['emer'] for p in A], dtype=float)\n        k1, k2A = ridge_two_feature(yA, tA, eA, L2, nonneg_idx=[0])  # enforce k1>=0\n    else:\n        k1, k2A = 0.0, 0.0\n    # Regime B: r \u2248 0.2 + k3*tail + k2B*emer -> (r \u2212 0.2) \u2248 k3*tail + k2B*emer\n    if len(B) > 0:\n        yB = np.array([p['r'] - 0.2 for p in B], dtype=float)\n        tB = np.array([p['tail'] for p in B], dtype=float)\n        eB = np.array([p['emer'] for p in B], dtype=float)\n        k3, k2B = ridge_two_feature(yB, tB, eB, L2, nonneg_idx=[0])  # enforce k3>=0\n    else:\n        k3, k2B = 0.0, 0.0\n    return k1, k2A, k3, k2B\n\ndef predict(p, c, k1, k2A, k3, k2B):\n    if p['tail'] < c:\n        return 1.0 - k1 * p['tail'] - k2A * p['emer']\n    else:\n        return 0.2 + k3 * p['tail'] + k2B * p['emer']\n\ndef eval_points(points, c, k1, k2A, k3, k2B):\n    y = np.array([p['r'] for p in points], dtype=float)\n    yhat = np.array([predict(p, c, k1, k2A, k3, k2B) for p in points], dtype=float)\n    resid = y - yhat\n    mse = float(np.mean(resid**2)) if len(resid) else None\n    rmse = float(np.sqrt(mse)) if mse is not None else None\n    if len(y) > 1:\n        ss_tot = float(np.sum((y - y.mean())**2))\n        ss_res = float(np.sum((y - yhat)**2))\n        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None\n    else:\n        r2 = None\n    return rmse, r2, y, yhat\n\ndef scatter_pred(y, yhat, title, out_path):\n    if y is None or yhat is None or len(y) == 0: return\n    plt.figure(figsize=(5.0, 4.0))\n    plt.scatter(y, yhat, c='tab:blue', alpha=0.7, edgecolor='k', linewidths=0.3)\n    lims = [min(y.min(), yhat.min()), max(y.max(), yhat.max())]\n    plt.plot(lims, lims, 'k--', alpha=0.7)\n    plt.xlabel('observed optimal_r'); plt.ylabel('predicted optimal_r')\n    plt.title(title)\n    plt.tight_layout(); plt.savefig(out_path, dpi=120, bbox_inches='tight'); plt.close()\n\ndef grid_search(points, c_grid=C_GRID):\n    best = {'rmse': float('inf')}\n    for c in c_grid:\n        k1, k2A, k3, k2B = fit_for_c(points, c)\n        rmse, r2, y, yhat = eval_points(points, c, k1, k2A, k3, k2B)\n        if rmse is not None and rmse < best['rmse']:\n            best.update({\n                'c': float(c), 'k1': float(k1), 'k2A': float(k2A), 'k3': float(k3), 'k2B': float(k2B),\n                'rmse': rmse, 'r2': r2, 'y': y, 'yhat': yhat\n            })\n    return best\n\ndef run_for(name, points):\n    best = grid_search(points, C_GRID)\n    rep = os.path.join(OUT_DIR, f'predictive_fit_v2_{name}.txt')\n    with open(rep, 'w', encoding='utf-8') as f:\n        f.write(f\"Predictive fit v2 (hinge-optimized c with emergence), name={name}\\n\")\n        f.write(f\"L2={L2}\\n\")\n        f.write(f\"c*={best.get('c')}, k1={best.get('k1')}, k2A={best.get('k2A')}, k3={best.get('k3')}, k2B={best.get('k2B')}\\n\")\n        f.write(f\"RMSE={best.get('rmse')}, R2={best.get('r2')}\\n\")\n    png = os.path.join(OUT_DIR, f'predictive_fit_v2_scatter_{name}.png')\n    scatter_pred(best.get('y'), best.get('yhat'), f'Predictive Fit v2 \u2014 {name}', png)\n    return best, rep, png\n\n# Load data\nall_points = load_points(dists=None)\ndists = sorted(set(p['dist'] for p in all_points))\n\n# Per-dist\nlines = []\nfor d in dists:\n    pts = [p for p in all_points if p['dist'] == d]\n    best, rep, png = run_for(d, pts)\n    lines.append(f\"- {d}: c*={best.get('c')}, k1={best.get('k1')}, k2A={best.get('k2A')}, k3={best.get('k3')}, k2B={best.get('k2B')}, RMSE={best.get('rmse')}, R2={best.get('r2')} | files: {rep}, {png}\")\n\n# Overall\nbest_all, rep_all, png_all = run_for('all', all_points)\n\n# Summary\nsum_path = os.path.join(OUT_DIR, 'predictive_fit_v2_summary.txt')\nwith open(sum_path, 'w', encoding='utf-8') as f:\n    f.write(\"Predictive fit v2 (hinge-optimized c with emergence moderator)\\n\")\n    f.write(f\"L2={L2}\\n\\n\")\n    for line in lines:\n        f.write(line + \"\\n\")\n    f.write(f\"- overall: c*={best_all.get('c')}, k1={best_all.get('k1')}, k2A={best_all.get('k2A')}, k3={best_all.get('k3')}, k2B={best_all.get('k2B')}, RMSE={best_all.get('rmse')}, R2={best_all.get('r2')} | files: {rep_all}, {png_all}\\n\")\n\nprint(f\"[artifacts] {sum_path} | detailed TXT/PNG under {OUT_DIR}\")\n",
+    "submitted_timestamp": 1761294569.7643616,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/predictive/predictive_fit_v2_summary.txt | detailed TXT/PNG under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761294572.9360127,
+      "evaluation_datetime": "2025-10-24T16:29:32.936017"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761294572.9882443,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN predictive fit v2: hinge-optimized c with emergence moderator' (ID: 1134) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/predictive/predictive_fit_v2_summary.txt | detailed TXT/PNG under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,145 @@
+capsule_id: Sagan_private_15
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 541
+last_updated_at_tick: 542
+title: 'Experiment 14 Plan: PPO with a RIN-Stabilized ConvLSTM'
+tags:
+- draft
+- implementation
+- ppo
+- rin
+- convlstm
+- sota
+abstract: 'This capsule outlines the plan to combine my best architecture with the
+  SOTA training algorithm.
+
+  Hypothesis: My previous PPO failures were due to architectural instability. A correctly
+  implemented, multi-epoch PPO-Clip algorithm, when applied to my 87.0%-scoring RIN-stabilized
+  ConvLSTM architecture, will be stable and will significantly close the performance
+  gap to the ~95% SOTA.
+
+  Method: A multi-epoch PPO training_step will be implemented and used to train the
+  ZephyrNetWithRIN model.
+
+  '
+word_count_total: 798
+messages:
+- message_id: Sagan_private_15-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 541
+  title: 'Experiment 14 Plan: PPO with a RIN-Stabilized ConvLSTM'
+  content: "## Research Plan: Experiment 14 - PPO on a Stable Backbone (Final Code)\n\
+    \n**Objective:** To achieve a SOTA-level score by combining my best-performing,\
+    \ RIN-stabilized architecture with the PPO-Clip algorithm.\n\n**Hypothesis:**\
+    \ The RIN and LayerNorm components in my current architecture provide sufficient\
+    \ stability for PPO to train effectively. Applying a correct, multi-epoch PPO\
+    \ implementation will unlock further performance and significantly close the gap\
+    \ to the SOTA.\n\n---\n\n## Final Implementation Code\n\nThis version includes\
+    \ the full, recurrent-aware, multi-epoch PPO `training_step`.\n\n```python\n\"\
+    \"\"\nSubmission by Sagan I.\nExperiment 14: PPO with RIN-stabilized ConvLSTM.\n\
+    This is my attempt to combine the SOTA architecture with the SOTA algorithm.\n\
+    \"\"\"\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Any, Tuple, Optional\nfrom ray import tune\n\nclass RIN(nn.Module):\n\
+    \    alpha: float\n    @nn.compact\n    def __call__(self, x):\n        x_norm\
+    \ = nn.LayerNorm()(x)\n        return x + self.alpha * (x_norm - x)\n\nclass Bottleneck(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, x):\n        inner_features\
+    \ = int(self.features * 0.28)\n        y = nn.Conv(features=inner_features, kernel_size=(1,\
+    \ 1))(x); y = nn.relu(y)\n        y = nn.Conv(features=inner_features, kernel_size=(3,\
+    \ 3), padding='SAME', kernel_dilation=(2,2))(y); y = nn.relu(y)\n        y = nn.Conv(features=self.features,\
+    \ kernel_size=(1, 1))(y)\n        return x + y\n\nclass LNConvLSTMCell(nn.Module):\n\
+    \    features: int\n    kernel_size: Tuple[int, int]\n    @nn.compact\n    def\
+    \ __call__(self, carry, inputs):\n        h, c = carry\n        ih_conv = nn.Conv(features=4\
+    \ * self.features, kernel_size=self.kernel_size, padding='SAME')(jnp.concatenate([inputs,\
+    \ h], axis=-1))\n        gates = nn.LayerNorm()(ih_conv)\n        i, f, g, o =\
+    \ jnp.split(gates, 4, axis=-1)\n        new_c = nn.sigmoid(f) * c + nn.sigmoid(i)\
+    \ * nn.tanh(g)\n        new_h = nn.sigmoid(o) * nn.tanh(new_c)\n        return\
+    \ (new_h, new_c), new_h\n    def initialize_carry(self, rng, input_shape):\n \
+    \       h_shape = (*input_shape, self.features)\n        return (jnp.zeros(h_shape),\
+    \ jnp.zeros(h_shape))\n\nclass AttnGapHead(nn.Module):\n    hidden_dim: int\n\
+    \    @nn.compact\n    def __call__(self, x):\n        B, H, W, C = x.shape\n \
+    \       q = self.param('attn_q', nn.initializers.xavier_uniform(), (C, 1))\n \
+    \       x_flat = x.reshape(B, H * W, C)\n        attn_logits = x_flat @ q\n  \
+    \      attn_weights = nn.softmax(attn_logits, axis=1)\n        attn_pool = jnp.sum(x_flat\
+    \ * attn_weights, axis=1)\n        gap_pool = jnp.mean(x, axis=(1, 2))\n     \
+    \   x_pooled = jnp.concatenate([attn_pool, gap_pool], axis=-1)\n        x = nn.Dense(features=self.hidden_dim)(x_pooled);\
+    \ x = nn.relu(x)\n        return nn.Dense(features=4)(x), nn.Dense(features=1)(x).squeeze(-1)\n\
+    \nclass ZephyrNetWithRIN(nn.Module):\n    convlstm_features: int = 64\n    head_hidden:\
+    \ int = 64\n    num_steps: int = 4\n    alpha: float\n    @nn.compact\n    def\
+    \ __call__(self, x, done, rnn_state=None):\n        B = x.shape[0]\n        x\
+    \ = nn.Conv(features=32, kernel_size=(3,3), padding='SAME')(x); x=nn.relu(x)\n\
+    \        x = Bottleneck(features=32)(x)\n        x = nn.Conv(features=64, kernel_size=(3,3),\
+    \ padding='SAME')(x); x=nn.relu(x)\n        x = Bottleneck(features=64)(x)\n \
+    \       x = RIN(alpha=self.alpha)(x)\n        conv_lstm_cell = LNConvLSTMCell(features=self.convlstm_features,\
+    \ kernel_size=(3, 3))\n        if rnn_state is None:\n            rnn_state =\
+    \ conv_lstm_cell.initialize_carry(jax.random.PRNGKey(0), x.shape[:3])\n      \
+    \  h, c = rnn_state\n        if done is not None:\n            done_mask = done.reshape(B,\
+    \ 1, 1, 1)\n            h, c = h * (1 - done_mask), c * (1 - done_mask)\n    \
+    \    for _ in range(self.num_steps):\n            (h, c), h_out = conv_lstm_cell((h,\
+    \ c), x)\n        rnn_state = (h, c)\n        policy_logits, value = AttnGapHead(hidden_dim=self.head_hidden)(h_out)\n\
+    \        return policy_logits, value, rnn_state\n\ndef create_network(hparams):\n\
+    \    return ZephyrNetWithRIN(alpha=hparams['alpha'])\n    \ndef _define_hyperparameters():\n\
+    \    return {\n        'learning_rate': tune.choice([3.5e-4]),\n        'entropy_coef':\
+    \ tune.choice([0.01]),\n        'value_loss_coef': tune.choice([0.55]),\n    \
+    \    'clip_eps': tune.choice([0.2]),\n        'num_epochs': tune.choice([4]),\n\
+    \        'num_minibatches': tune.choice([4]),\n        'alpha': tune.choice([0.2]),\n\
+    \    }\n\n@jax.jit\ndef calculate_gae(rewards, values, dones, next_values, gamma=0.97,\
+    \ gae_lambda=0.97):\n    values_t_plus_1 = jnp.concatenate([values[:, 1:], next_values[:,\
+    \ None]], axis=1)\n    not_done_mask = (1.0 - dones.astype(jnp.float32))\n   \
+    \ deltas = rewards + gamma * values_t_plus_1 * not_done_mask - values\n    def\
+    \ scan_fn(adv, t):\n        adv = deltas[:, t] + gamma * gae_lambda * not_done_mask[:,\
+    \ t] * adv\n        return adv, adv\n    _, advantages = jax.lax.scan(scan_fn,\
+    \ jnp.zeros(rewards.shape[0]), jnp.arange(rewards.shape[1] - 1, -1, -1))\n   \
+    \ return advantages[::-1].T\n\ndef training_step(network, optimizer, params, opt_state,\
+    \ batch, hparams):\n    advantages = calculate_gae(batch['rewards'], batch['values'],\
+    \ batch['dones'], batch['final_values'])\n    returns = advantages + batch['values']\n\
+    \    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)\n\
+    \    \n    B, T = batch['observations'].shape[:2]\n    \n    def update_epoch(carry,\
+    \ _):\n        params, opt_state, key = carry\n        key, subkey = jax.random.split(key)\n\
+    \        \n        # Reshape and shuffle sequences, not individual steps\n   \
+    \     batch_seq = jax.tree.map(lambda x: x.reshape(B, T, *x.shape[2:]), batch)\n\
+    \        permutation = jax.random.permutation(subkey, B)\n        shuffled_batch\
+    \ = jax.tree.map(lambda x: x[permutation], batch_seq)\n        \n        minibatch_size\
+    \ = B // hparams['num_minibatches']\n        \n        def update_minibatch(carry,\
+    \ i):\n            params, opt_state = carry\n            start, end = i * minibatch_size,\
+    \ (i + 1) * minibatch_size\n            minibatch = jax.tree.map(lambda x: x[start:end],\
+    \ shuffled_batch)\n            \n            # Extract initial RNN state for this\
+    \ minibatch\n            initial_rnn_state = jax.tree.map(lambda x: x[start:end],\
+    \ batch['initial_rnn_states'])\n\n            def loss_fn(p):\n              \
+    \  # This function re-evaluates the whole trajectory for the minibatch\n     \
+    \           # with the current policy to get new log_probs and values.\n     \
+    \           def step_fn(carry, t):\n                    rnn_state = carry\n  \
+    \                  obs = minibatch['observations'][:, t]\n                   \
+    \ done = jnp.where(t > 0, minibatch['dones'][:, t-1], jnp.zeros_like(minibatch['dones'][:,0]))\n\
+    \                    logits, value, new_rnn_state = network.apply(p, obs, done,\
+    \ rnn_state)\n                    return new_rnn_state, (logits, value)\n    \
+    \            \n                _, (all_logits, all_values) = jax.lax.scan(step_fn,\
+    \ initial_rnn_state, jnp.arange(T))\n                all_logits = jnp.swapaxes(all_logits,\
+    \ 0, 1)\n                all_values = jnp.swapaxes(all_values, 0, 1)\n\n     \
+    \           log_probs_all = jax.nn.log_softmax(all_logits)\n                new_log_probs\
+    \ = jnp.take_along_axis(log_probs_all, minibatch['actions'][..., None], axis=-1).squeeze(-1)\n\
+    \                \n                ratio = jnp.exp(new_log_probs - minibatch['log_probs'])\n\
+    \                adv_d = jax.lax.stop_gradient(advantages[permutation][start:end])\n\
+    \                \n                surr1 = ratio * adv_d\n                surr2\
+    \ = jnp.clip(ratio, 1.0 - hparams['clip_eps'], 1.0 + hparams['clip_eps']) * adv_d\n\
+    \                policy_loss = -jnp.mean(jnp.minimum(surr1, surr2))\n\n      \
+    \          value_loss = 0.5 * jnp.mean((all_values - jax.lax.stop_gradient(returns[permutation][start:end]))\
+    \ ** 2)\n                entropy = -jnp.mean(jnp.sum(jax.nn.softmax(all_logits)\
+    \ * log_probs_all, axis=-1))\n                \n                return policy_loss\
+    \ + hparams['value_loss_coef'] * value_loss - hparams['entropy_coef'] * entropy\n\
+    \n            grad_fn = jax.value_and_grad(loss_fn)\n            loss, grads =\
+    \ grad_fn(params)\n            updates, opt_state = optimizer.update(grads, opt_state,\
+    \ params)\n            params = optax.apply_updates(params, updates)\n       \
+    \     return (params, opt_state), loss\n\n        (params, opt_state), _ = jax.lax.scan(update_minibatch,\
+    \ (params, opt_state), jnp.arange(hparams['num_minibatches']))\n        return\
+    \ (params, opt_state, key), None\n\n    (params, opt_state, _), _ = jax.lax.scan(update_epoch,\
+    \ (params, opt_state, jax.random.PRNGKey(0)), None, length=hparams['num_epochs'])\n\
+    \    return params, opt_state\n```\n"
+  word_count: 798
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

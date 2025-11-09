@@ -1,0 +1,90 @@
+{
+  "id": "732",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Synergistic Correction (Zcorr -> Harmony)",
+  "tags": [
+    "synthesis",
+    "zcorr",
+    "harmony",
+    "baseline-improvement"
+  ],
+  "abstract": "In response to an inactivity notice, this experiment tests a novel synergistic hypothesis: Can the SOTA's 'adaptive residualization' (Zcorr) improve the Harmony baseline? The pipeline is PCA -> Zcorr -> Harmony -> kNN. This explores whether combining a partial SOTA component with a classic method can yield performance gains.",
+  "submitted_tick": 469,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata):\n    # Parameters from SOTA and best Harmony baseline\n    params = {'n_pcs_graph': 50, 'l2': 1e-3, 'gamma_max': 0.74, 'lam': 0.7, \n              'k_total': 48, 'metric': 'cosine', 'theta': 4}\n\n    # Standard preprocessing\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Synergistic Correction Pipeline ---\n    # 1. Calculate Zcorr from the SOTA pipeline\n    Zg = _pca_array(Xd, n_comps=params['n_pcs_graph'], random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=params['l2'])\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(params['gamma_max'], params['lam'] * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # 2. Feed Zcorr into Harmony for further correction\n    adata.obsm['X_Zcorr'] = Zcorr\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_Zcorr', adjusted_basis='X_harmony', theta=params['theta'])\n    Z_final = adata.obsm['X_harmony']\n\n    # 3. Build a kNN graph on the final corrected representation\n    adata.obsm['X_final_corrected'] = Z_final\n    sc.pp.neighbors(adata, use_rep='X_final_corrected', n_neighbors=params['k_total'], metric=params['metric'])\n\n    return adata\n",
+    "submitted_timestamp": 1761540740.4582655,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.376531007715459,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/733957a1-7f46-4842-aac5-6a6d3bc28de5/result_human.h5ad\n\nRESULT_UUID: 733957a1-7f46-4842-aac5-6a6d3bc28de5\n\n\nSTDERR:\n2025-10-27 12:52:32,669 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 12:52:36,739 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 12:52:36,836 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 12:52:42,214 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 12:52:47,111 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 12:52:51,834 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 12:52:55,645 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 12:52:59,724 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 12:53:04,600 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 12:53:09,401 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 12:53:13,132 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 12:53:16,292 - harmonypy - INFO - Iteration 10 of 10\n2025-10-27 12:53:19,008 - harmonypy - INFO - Converged after 10 iterations\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.749  NMI: 0.716\n  Graph_conn: 0.969  kBET: 0.000  iLISI: 0.350  cLISI: 0.982\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.748917  NMI: 0.715587\n  Graph_conn: 0.969856  kBET: nan  iLISI: 0.349631  cLISI: 0.994723\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.749",
+          0.748950736333415
+        ],
+        "NMI": [
+          "0.716",
+          0.7155064519802098
+        ],
+        "Graph_conn": [
+          "0.969",
+          0.9693355700700672
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.350",
+          0.34963079757308346
+        ],
+        "cLISI": [
+          "0.982",
+          0.9818865211978143
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761540889.2666028,
+      "evaluation_datetime": "2025-10-27T12:54:49.266605",
+      "sort_key": [
+        0.376531007715459
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.376531007715459,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761540889.2793055,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: Synergistic Correction (Zcorr -> Harmony)' (ID: 732) has been evaluated.\n\n**Score:** 0.376531007715459\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.749\n**NMI:** 0.716\n**Graph_conn:** 0.969\n**kBET:** 0.000\n**iLISI:** 0.350\n**cLISI:** 0.982\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.749  NMI: 0.716\n  Graph_conn: 0.969  kBET: 0.000  iLISI: 0.350  cLISI: 0.982\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.748917  NMI: 0.715587\n  Graph_conn: 0.969856  kBET: nan  iLISI: 0.349631  cLISI: 0.994723\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/733957a1-7f46-4842-aac5-6a6d3bc28de5/result_human.h5ad\n\nRESULT_UUID: 733957a1-7f46-4842-aac5-6a6d3bc28de5\n\n\nSTDERR:\n2025-10-27 12:52:32,669 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 12:52:36,739 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 12:52:36,836 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 12:52:42,214 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 12:52:47,111 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 12:52:51,834 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 12:52:55,645 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 12:52:59,724 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 12:53:04,600 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 12:53:09,401 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 12:53:13,132 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 12:53:16,292 - harmonypy - INFO - Iteration 10 of 10\n2025-10-27 12:53:19,008 - harmonypy - INFO - Converged after 10 iterations\n\n```"
+  }
+}

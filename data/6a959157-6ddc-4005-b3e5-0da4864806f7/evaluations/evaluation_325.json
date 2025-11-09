@@ -1,0 +1,90 @@
+{
+  "id": "325",
+  "author": "Daedalus II",
+  "research_task_id": "1",
+  "title": "SOTA Replication v3 (Praxis Robust ComBat)",
+  "tags": [
+    "sota-replication",
+    "praxis-replication",
+    "robust-combat",
+    "location-only"
+  ],
+  "abstract": "After two failed replications, I have found what I believe to be the original 'Robust ComBat' implementation in Praxis I's storage (`robust_loc_combat.py`). This version uses robust statistics (median/MAD) and, crucially, is a location-only correction that does not scale variance. This submission directly uses Praxis I's function in the SOTA pipeline. This is a high-confidence attempt to finally replicate the 0.7383 score.",
+  "submitted_tick": 187,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/Daedalus')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom praxis_robust_combat import robust_location_combat_full\n# Import the rest of the logic from the consolidated file\nfrom sophia_sota_logic import _get_hvg_mask, _pca_truncated_svd, _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"--- Daedalus II: SOTA Replication v3 (using Praxis's robust_loc_combat.py) ---\")\n    \n    n_pcs_emb=64; n_pcs_graph=50; gamma=0.74; l2=1e-3; k_total=48; metric='cosine'; random_state = 0\n\n    adata_for_graph_path = adata.copy()\n    adata_for_embedding_path = adata.copy()\n\n    # --- Graph Path (unchanged) ---\n    sc.pp.normalize_total(adata_for_graph_path, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph_path)\n    hvg_mask = _get_hvg_mask(adata_for_graph_path)\n    X_graph = adata_for_graph_path.X[:, hvg_mask]\n    if not sp.issparse(X_graph): X_graph = sp.csr_matrix(X_graph)\n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    batches = np.asarray(adata_for_graph_path.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    Z_corr_graph = Z_graph - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Embedding Path (MODIFIED) ---\n    # Use Praxis I's robust_location_combat_full function directly\n    # This function handles normalization and log1p internally\n    X_combat_corrected_full_genes = robust_location_combat_full(adata_for_embedding_path)\n\n    adata_for_embedding_path.X = sp.csr_matrix(X_combat_corrected_full_genes)\n    adata_for_embedding_path.var['highly_variable'] = hvg_mask\n    \n    sc.pp.pca(adata_for_embedding_path, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z_emb = adata_for_embedding_path.obsm['X_pca']\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        adata_out.obsp['connectivities'] = C.tocsr(); adata_out.obsp['distances'] = D.tocsr()\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    return adata_out\n",
+    "submitted_timestamp": 1761453661.9505074,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6087792369670274,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Daedalus II: SOTA Replication v3 (using Praxis's robust_loc_combat.py) ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/aab61a10-f2e7-4860-8416-1a62d50e323e/result_human.h5ad\n\nRESULT_UUID: aab61a10-f2e7-4860-8416-1a62d50e323e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.618  ASW_label: 0.216  ARI: 0.742  NMI: 0.697\n  Graph_conn: 0.966  kBET: 0.653  iLISI: 0.932  cLISI: 0.966\n  PCR: 0.000  Cell_cycle: 0.299\n\nRaw Scores (before normalization):\n  ASW_batch: 0.811874  ASW_label: 0.536389  ARI: 0.741484  NMI: 0.696795\n  Graph_conn: 0.966437  kBET: 0.624856  iLISI: 0.931785  cLISI: 0.990227\n  PCR: 0.000000  Cell_cycle: 0.263615",
+        "ASW_batch": [
+          "0.618",
+          0.617895275128844
+        ],
+        "ASW_label": [
+          "0.216",
+          0.21607655444520163
+        ],
+        "ARI": [
+          "0.742",
+          0.7415194318513882
+        ],
+        "NMI": [
+          "0.697",
+          0.696709052969676
+        ],
+        "Graph_conn": [
+          "0.966",
+          0.9658581561909003
+        ],
+        "kBET": [
+          "0.653",
+          0.6528165385968723
+        ],
+        "iLISI": [
+          "0.932",
+          0.931785134861315
+        ],
+        "cLISI": [
+          "0.966",
+          0.966450554349089
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.299",
+          0.29868167127698775
+        ]
+      },
+      "evaluation_timestamp": 1761454075.40999,
+      "evaluation_datetime": "2025-10-26T12:47:55.409993",
+      "sort_key": [
+        0.6087792369670274
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6087792369670274,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761454075.4305804,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Replication v3 (Praxis Robust ComBat)' (ID: 325) has been evaluated.\n\n**Score:** 0.6087792369670274\n**ASW_batch:** 0.618\n**ASW_label:** 0.216\n**ARI:** 0.742\n**NMI:** 0.697\n**Graph_conn:** 0.966\n**kBET:** 0.653\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 0.000\n**Cell_cycle:** 0.299\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.618  ASW_label: 0.216  ARI: 0.742  NMI: 0.697\n  Graph_conn: 0.966  kBET: 0.653  iLISI: 0.932  cLISI: 0.966\n  PCR: 0.000  Cell_cycle: 0.299\n\nRaw Scores (before normalization):\n  ASW_batch: 0.811874  ASW_label: 0.536389  ARI: 0.741484  NMI: 0.696795\n  Graph_conn: 0.966437  kBET: 0.624856  iLISI: 0.931785  cLISI: 0.990227\n  PCR: 0.000000  Cell_cycle: 0.263615\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Daedalus II: SOTA Replication v3 (using Praxis's robust_loc_combat.py) ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/aab61a10-f2e7-4860-8416-1a62d50e323e/result_human.h5ad\n\nRESULT_UUID: aab61a10-f2e7-4860-8416-1a62d50e323e\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "649",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Probe (test\u2011only): Init Grad\u2011Norm Ratio R_vp (value:policy) \u2014 4\u2011step(64) vs 5\u2011step(56)",
+  "tags": [
+    "analysis",
+    "probes",
+    "gradients",
+    "convlstm"
+  ],
+  "abstract": "Test\u2011only probe that computes the initialization gradient\u2011norm ratio R_vp = ||\u2207 L_value|| / ||\u2207 L_policy|| for two configs: 4\u2011step(64ch) and 5\u2011step(56ch). Uses a synthetic batch and standard PG losses. No training runs.",
+  "submitted_tick": 377,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, jax, jax.numpy as jnp, numpy as np\nsys.path.append('storage/zephyr')\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\n\nBASE_SEED = 42\n\ndef _make_net(steps, convlstm_features):\n    return PG_Stepped_AttnGap(\n        cnn_features_1=32,\n        cnn_features_2=64,\n        convlstm_features=convlstm_features,\n        dilation=6,\n        bottleneck_ratio=0.28,\n        head_hidden=64,\n        steps=steps,\n    )\n\ndef _l2_tree_norm(tree):\n    leaves = jax.tree_util.tree_leaves(tree)\n    return jnp.sqrt(sum(jnp.sum(jnp.square(x)) for x in leaves if x is not None))\n\ndef _probe_config(rng_key, steps, convlstm_features, B=64, T=20):\n    net = _make_net(steps, convlstm_features)\n    # Synthetic batch (same shapes as default training; flat call for simplicity)\n    key_obs, key_act, key_adv = jax.random.split(rng_key, 3)\n    obs = jax.random.normal(key_obs, (B*T, 8, 8, 8))\n    dones = jnp.zeros((B*T,), dtype=bool)\n    params = net.init(jax.random.PRNGKey(123), obs, dones, None)\n    logits, values, _ = net.apply(params, obs, dones, None)  # logits: (B*T,4), values: (B*T,)\n\n    actions = jax.random.randint(key_act, (B*T,), 0, 4)\n    advantages = jax.random.normal(key_adv, (B*T,))\n    # Return target matching PG baseline: returns = values + advantages\n    returns = values + advantages\n\n    def policy_loss(p):\n        l, v, _ = net.apply(p, obs, dones, None)\n        logp_all = jax.nn.log_softmax(l, axis=-1)\n        idx = (jnp.arange(B*T), actions)\n        logp = logp_all[idx]\n        return -jnp.mean(jax.lax.stop_gradient(advantages) * logp)\n\n    def value_loss(p):\n        l, v, _ = net.apply(p, obs, dones, None)\n        return 0.5 * jnp.mean((v - jax.lax.stop_gradient(returns)) ** 2)\n\n    _, g_p = jax.value_and_grad(policy_loss)(params)\n    _, g_v = jax.value_and_grad(value_loss)(params)\n\n    norm_p = _l2_tree_norm(g_p)\n    norm_v = _l2_tree_norm(g_v)\n    R_vp = (norm_v / (norm_p + 1e-12)).item()\n    return R_vp, float(norm_p), float(norm_v)\n\ndef test():\n    print(\"Running init grad\u2011norm probe (test\u2011only)...\")\n    r4, np4, nv4 = _probe_config(jax.random.PRNGKey(BASE_SEED+0), steps=4, convlstm_features=64)\n    r5, np5, nv5 = _probe_config(jax.random.PRNGKey(BASE_SEED+1), steps=5, convlstm_features=56)\n    out = []\n    out.append(f\"4\u2011step(64): R_vp={r4:.3f}, ||grad_P||={np4:.2e}, ||grad_V||={nv4:.2e}\")\n    out.append(f\"5\u2011step(56): R_vp={r5:.3f}, ||grad_P||={np5:.2e}, ||grad_V||={nv5:.2e}\")\n    summary = \"\\\\n\".join(out)\n    print(summary)\n    return summary\n",
+    "submitted_timestamp": 1758104050.5885751,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nRunning init grad\u2011norm probe (test\u2011only)...\n4\u2011step(64): R_vp=0.773, ||grad_P||=6.70e-02, ||grad_V||=5.19e-02\\n5\u2011step(56): R_vp=1.293, ||grad_P||=6.85e-02, ||grad_V||=8.85e-02\nTest completed. Result: 4\u2011step(64): R_vp=0.773, ||grad_P||=6.70e-02, ||grad_V||=5.19e-02\\n5\u2011step(56): R_vp=1.293, ||grad_P||=6.85e-02, ||grad_V||=8.85e-02\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758104083.2391899,
+      "evaluation_datetime": "2025-09-17T18:14:43.239193"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758104083.2720902,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe (test\u2011only): Init Grad\u2011Norm Ratio R_vp (value:policy) \u2014 4\u2011step(64) vs 5\u2011step(56)' (ID: 649) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nRunning init grad\u2011norm probe (test\u2011only)...\n4\u2011step(64): R_vp=0.773, ||grad_P||=6.70e-02, ||grad_V||=5.19e-02\\n5\u2011step(56): R_vp=1.293, ||grad_P||=6.85e-02, ||grad_V||=8.85e-02\nTest completed. Result: 4\u2011step(64): R_vp=0.773, ||grad_P||=6.70e-02, ||grad_V||=5.19e-02\\n5\u2011step(56): R_vp=1.293, ||grad_P||=6.85e-02, ||grad_V||=8.85e-02\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

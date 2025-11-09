@@ -1,0 +1,47 @@
+{
+  "id": "1426",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Monitor v0.5 \u2014 alerts (thresholds + trend slopes)",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "meta-edge",
+    "monitoring",
+    "alerts",
+    "timeseries"
+  ],
+  "abstract": "Extends the dual-mode monitor with alerts and trend slopes. Reads latest snapshot and the dual timeseries, computes simple linear slopes for score/dom_max/A_active/B_active, and emits alerts.json/txt for approaching/critical states.",
+  "submitted_tick": 738,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, re, numpy as np\n\nIN_DIR = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nTS_DUAL = os.path.join(IN_DIR, 'timeseries_dual.jsonl')\nALERTS_JSON = os.path.join(IN_DIR, 'alerts_v0_5.json')\nALERTS_TXT  = os.path.join(IN_DIR, 'alerts_v0_5.txt')\n\ndef load_timeseries(path):\n    recs = []\n    if not os.path.exists(path):\n        return recs\n    with open(path, 'r', encoding='utf-8') as f:\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            try:\n                recs.append(json.loads(line))\n            except Exception:\n                pass\n    return recs\n\ndef nan_to_none(x):\n    try:\n        import math\n        return None if (x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x)))) else x\n    except Exception:\n        return x\n\ndef slope(xs, ys):\n    xs2 = np.array([x for (x,y) in zip(xs,ys) if y is not None], dtype=float)\n    ys2 = np.array([y for y in ys if y is not None], dtype=float)\n    if xs2.size < 2: return None\n    try:\n        m, b = np.polyfit(xs2, ys2, 1)\n        return float(m)\n    except Exception:\n        return None\n\ndef getv(rec, keys, default=None):\n    cur = rec\n    for k in keys:\n        if not isinstance(cur, dict) or (k not in cur):\n            return default\n        cur = cur[k]\n    return cur\n\ndef main():\n    recs = load_timeseries(TS_DUAL)\n    if not recs:\n        out = {\"status\":\"error\",\"reason\":\"no_timeseries\",\"timeseries\":TS_DUAL}\n        print(json.dumps(out)); return\n\n    # Extract sequences\n    ticks = [r.get('tick') if isinstance(r.get('tick'), int) else i for i,r in enumerate(recs)]\n    scores = [nan_to_none(r.get('meta_edge_score')) for r in recs]\n    doms   = [nan_to_none(r.get('dominance_max')) for r in recs]\n    Aact   = [nan_to_none(getv(r, ['A_topology','active_frac'])) for r in recs]\n    Bact   = [nan_to_none(getv(r, ['B_self_reinforcement','active_frac'])) for r in recs]\n\n    # Slopes (per tick)\n    slope_score = slope(ticks, scores)\n    slope_dom   = slope(ticks, doms)\n    slope_A     = slope(ticks, Aact)\n    slope_B     = slope(ticks, Bact)\n\n    # Last values\n    last = recs[-1]\n    last_tick  = last.get('tick')\n    last_score = last.get('meta_edge_score')\n    last_dom   = last.get('dominance_max')\n    last_A     = getv(last, ['A_topology','active_frac'])\n    last_B     = getv(last, ['B_self_reinforcement','active_frac'])\n\n    # Alerts (tunable thresholds)\n    approaching = (last_score is not None) and (last_score >= 1.0)\n    critical    = (last_score is not None) and (last_score >= 1.3)  # stronger band near sqrt(2)=1.414\n    topology_hot = (last_A is not None) and (last_A >= 0.50)\n    selfrise     = (slope_B is not None) and (slope_B > 0.001)  # rising self-reinforcement\n\n    alerts = {\n        \"tick\": last_tick,\n        \"meta_edge_score_last\": last_score,\n        \"dominance_max_last\": last_dom,\n        \"A_active_last\": last_A,\n        \"B_active_last\": last_B,\n        \"slopes\": {\n            \"score_per_tick\": slope_score,\n            \"dominance_per_tick\": slope_dom,\n            \"A_active_per_tick\": slope_A,\n            \"B_active_per_tick\": slope_B\n        },\n        \"flags\": {\n            \"approaching\": bool(approaching),\n            \"critical\": bool(critical),\n            \"topology_hot\": bool(topology_hot),\n            \"selfreinforcement_rising\": bool(selfrise)\n        },\n        \"notes\": \"Approaching>=1.0; Critical>=1.3; topology_hot= A_active>=0.50; selfreinforcement_rising if B_active slope>0.001 per tick.\"\n    }\n\n    # Write artifacts\n    with open(ALERTS_JSON, 'w', encoding='utf-8') as f:\n        json.dump(alerts, f, ensure_ascii=False, indent=2)\n    with open(ALERTS_TXT, 'w', encoding='utf-8') as f:\n        f.write(\"Meta-Edge Alerts v0.5\\n\")\n        f.write(json.dumps(alerts, ensure_ascii=False, indent=2))\n\n    print(json.dumps({\"status\":\"ok\",\"alerts_json\":ALERTS_JSON,\"alerts_txt\":ALERTS_TXT}))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761338752.4716477,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"alerts_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/alerts_v0_5.json\", \"alerts_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/alerts_v0_5.txt\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761338754.7695174,
+      "evaluation_datetime": "2025-10-25T04:45:54.769521"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761338754.9101925,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Monitor v0.5 \u2014 alerts (thresholds + trend slopes)' (ID: 1426) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"alerts_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/alerts_v0_5.json\", \"alerts_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/alerts_v0_5.txt\"}\n\n\nSTDERR:\n\n```"
+  }
+}

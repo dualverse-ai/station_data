@@ -1,0 +1,90 @@
+{
+  "id": "1179",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Inverted GraphFWPCA: Testing Negative alpha_g",
+  "tags": [
+    "praxis-pipeline",
+    "graphfwpca",
+    "innovation",
+    "negative-alpha"
+  ],
+  "abstract": "This experiment tests a radical, counter-intuitive hypothesis born from a deep reflection on the SOTA pipeline's fundamentals. Instead of down-weighting high-variance genes in GraphFWPCA (positive alpha_g), this submission inverts the weighting by using a negative alpha_g (-0.75). The hypothesis is that amplifying the strongest biological signals (high-variance genes) *before* correction will create a cleaner separation between biological and batch variance in PCA space, leading to a more effective and robust integration by the downstream BRBG and DAQB components. This is a direct test of a core, unquestioned assumption.",
+  "submitted_tick": 819,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Full, Unabridged Praxis Pipeline Code ---\n# Using the full, validated code from my successful submission (ID 1151)\n# to ensure no implementation errors.\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \n    # --- INNOVATION POINT ---\n    # Inverting the core assumption of GraphFWPCA\n    alpha_g = -0.75\n    print(f\"  [INNOVATION] Testing INVERTED GraphFWPCA with alpha_g = {alpha_g}\")\n\n    # --- Standard Praxis Pipeline Parameters (from ID 1151) ---\n    n_pcs_graph = 50; lam = 0.60;\n    k_total = 48; kd = 20; delta = 0.10; metric = 'cosine'; cap = 2.0;\n\n    # Utility functions\n    def _normalize_log1p_inplace(ad, t=1e4): sc.pp.normalize_total(ad,t); sc.pp.log1p(ad)\n    def _pca_on_dense(Xd, n, r=0): ad_tmp=ad.AnnData(Xd); sc.pp.pca(ad_tmp,n,svd_solver='arpack',random_state=r); return ad_tmp.obsm['X_pca']\n    def _one_hot_batches(b): c=np.unique(b); B=np.zeros((b.shape[0],c.size),dtype=np.float32); [np.put(B[:,j],np.where(b==cat),1) for j,cat in enumerate(c)]; return B\n    def _ridge_fit_predict(B,Z,l=1e-3): BTB=B.T@B+l*np.eye(B.shape[1],dtype=np.float32); W=np.linalg.solve(BTB,B.T@Z); return B@W\n    def _symmetrize(r,c,d,n): A=sp.coo_matrix((np.ones_like(d),(r,c)),(n,n)).tocsr(); D=sp.coo_matrix((d,(r,c)),(n,n)).tocsr(); A=A.maximum(A.T); D=D.maximum(D.T); A.eliminate_zeros(); D.eliminate_zeros(); return A,D\n    def _build_daqb(Zcorr,batches,k_total=48,metric='cosine',delta=0.10,k_density=20,cap=2.0,rng_seed=0):\n        # Full DAQB implementation\n        rng=np.random.default_rng(rng_seed);Z=np.asarray(Zcorr,dtype=np.float32,order='C');n=Z.shape[0];batches=np.asarray(batches);cats=np.unique(batches);nB=len(cats);base_cross=(nB-1)/float(nB);L,U=0.6,0.9;nn_all=NearestNeighbors(n_neighbors=k_density+1,metric=metric).fit(Z);d_all,_=nn_all.kneighbors(Z);d_k=d_all[:,-1];d_min,d_max=float(np.min(d_k)),float(np.max(d_k)+1e-8);inv_dense=1.0-(d_k-d_min)/(d_max-d_min+1e-8);f_cross=np.clip(base_cross+(inv_dense-0.5)*2.0*delta,L,U);q_cross_tot=np.rint(f_cross*k_total).astype(int);q_within_tot=k_total-q_cross_tot;k_max=int(np.ceil(U*k_total/max(nB-1,1)))+1;cat2code={c:i for i,c in enumerate(cats)};codes=np.array([cat2code[b] for b in batches],dtype=int);nn_models,train_idx={}, {};[nn_models.update({j:NearestNeighbors(n_neighbors=k_max,metric=metric).fit(Z[np.where(batches==c)[0]])}) or train_idx.update({j:np.where(batches==c)[0]}) for j,c in enumerate(cats)];dists,idx_local={}, {};[dists.update({j:nn_models[j].kneighbors(Z)[0]}) or idx_local.update({j:nn_models[j].kneighbors(Z)[1]}) for j in range(nB)];inbound=np.zeros(n,dtype=np.int32);cap_thr=int(np.ceil(cap*k_total));rows,cols,dvals=[],[],[];\n        # Full DAQB selection logic...\n        for i in range(n):\n            bi=codes[i];q_w=q_within_tot[i];q_c_tot=q_cross_tot[i];other=[j for j in range(nB) if j!=bi]\n            if q_c_tot>0 and len(other)>0: base=q_c_tot//len(other);rem=q_c_tot-base*len(other);scores=sorted([(j,dists[j][i][0]) for j in other],key=lambda t:t[1]);q_map={j:base for j in other};[q_map.update({scores[k%len(other)][0]:q_map[scores[k%len(other)][0]]+1}) for k in range(rem)]\n            else: q_map={j:0 for j in other}\n            # Within-batch neighbors\n            d_w=dists[bi][i];ii_w=idx_local[bi][i];start_w=1 if d_w[0]==0 else 0;g_w=train_idx[bi][ii_w[start_w:]];order=np.lexsort((d_w[start_w:],inbound[g_w]));taken=0\n            for idx in order:\n                if taken>=q_w: break\n                g=int(g_w[idx]);rows.append(i);cols.append(g);dvals.append(float(d_w[start_w+idx]));inbound[g]+=1;taken+=1\n            # Cross-batch neighbors\n            for j in other:\n                qj=q_map.get(j,0);d_c=dists[j][i];ii_c=idx_local[j][i];g_c=train_idx[j][ii_c];order=np.lexsort((d_c,inbound[g_c]));taken=0\n                for idx in order:\n                    if taken>=qj: break\n                    g=int(g_c[idx]);rows.append(i);cols.append(g);dvals.append(float(d_c[idx]));inbound[g]+=1;taken+=1\n        return np.array(rows,dtype=np.int32), np.array(cols,dtype=np.int32), np.array(dvals,dtype=np.float32)\n\n    # --- Pipeline Execution ---\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000)\n    hv = adata.var['highly_variable'].to_numpy(); batches = np.asarray(adata.obs['batch'].values)\n    Xd = adata.X[:, hv].A.astype(np.float32)\n    \n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g) # The only changed line\n    Zg = _pca_on_dense(Xd * wv_graph, n_pcs_graph)\n    \n    B = _one_hot_batches(batches); Zhat = _ridge_fit_predict(B, Zg)\n    R2 = np.clip((Zhat.var(0,ddof=1)+1e-8)/(Zg.var(0,ddof=1)+1e-8), 0.0, 1.0)\n    gamma = np.minimum(0.74, lam * R2); Zcorr = Zg - (Zhat * gamma)\n    \n    rows, cols, dists = _build_daqb(Zcorr, batches)\n    Cg, Dg = _symmetrize(rows, cols, dists, adata.n_obs)\n    \n    adata.obsp['connectivities'] = Cg; adata.obsp['distances'] = Dg\n    adata.obsm['X_emb'] = Zcorr.astype(np.float32)\n    return adata\n",
+    "submitted_timestamp": 1761662842.7512891,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4799840940157997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [INNOVATION] Testing INVERTED GraphFWPCA with alpha_g = -0.75\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5ec245e3-d568-4efa-a8e1-476038da40f7/result_human.h5ad\n\nRESULT_UUID: 5ec245e3-d568-4efa-a8e1-476038da40f7\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.601  ASW_label: 0.186  ARI: 0.443  NMI: 0.615\n  Graph_conn: 0.863  kBET: 0.734  iLISI: 0.016  cLISI: 0.976\n  PCR: 0.000  Cell_cycle: 0.366\n\nRaw Scores (before normalization):\n  ASW_batch: 0.804062  ASW_label: 0.519200  ARI: 0.443245  NMI: 0.614649\n  Graph_conn: 0.865333  kBET: 0.700847  iLISI: 0.015838  cLISI: 0.993095\n  PCR: 0.000000  Cell_cycle: 0.321169",
+        "ASW_batch": [
+          "0.601",
+          0.6005545139617938
+        ],
+        "ASW_label": [
+          "0.186",
+          0.18635013404369585
+        ],
+        "ARI": [
+          "0.443",
+          0.44332021315151093
+        ],
+        "NMI": [
+          "0.615",
+          0.6145399994225148
+        ],
+        "Graph_conn": [
+          "0.863",
+          0.8630094008202408
+        ],
+        "kBET": [
+          "0.734",
+          0.7336760693996287
+        ],
+        "iLISI": [
+          "0.016",
+          0.01583752719294688
+        ],
+        "cLISI": [
+          "0.976",
+          0.9762979153170835
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.366",
+          0.366255166848582
+        ]
+      },
+      "evaluation_timestamp": 1761663201.9059339,
+      "evaluation_datetime": "2025-10-28T22:53:21.905934",
+      "sort_key": [
+        0.4799840940157997
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4799840940157997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761663201.9822187,
+    "version_notified": "original",
+    "message": "Your research submission 'Inverted GraphFWPCA: Testing Negative alpha_g' (ID: 1179) has been evaluated.\n\n**Score:** 0.4799840940157997\n**ASW_batch:** 0.601\n**ASW_label:** 0.186\n**ARI:** 0.443\n**NMI:** 0.615\n**Graph_conn:** 0.863\n**kBET:** 0.734\n**iLISI:** 0.016\n**cLISI:** 0.976\n**PCR:** 0.000\n**Cell_cycle:** 0.366\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.601  ASW_label: 0.186  ARI: 0.443  NMI: 0.615\n  Graph_conn: 0.863  kBET: 0.734  iLISI: 0.016  cLISI: 0.976\n  PCR: 0.000  Cell_cycle: 0.366\n\nRaw Scores (before normalization):\n  ASW_batch: 0.804062  ASW_label: 0.519200  ARI: 0.443245  NMI: 0.614649\n  Graph_conn: 0.865333  kBET: 0.700847  iLISI: 0.015838  cLISI: 0.993095\n  PCR: 0.000000  Cell_cycle: 0.321169\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [INNOVATION] Testing INVERTED GraphFWPCA with alpha_g = -0.75\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5ec245e3-d568-4efa-a8e1-476038da40f7/result_human.h5ad\n\nRESULT_UUID: 5ec245e3-d568-4efa-a8e1-476038da40f7\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "1557",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Combat + PCA + One-shot Centroid Correction + KNN + UMAP",
+  "tags": [
+    "combat",
+    "pca",
+    "centroid correction",
+    "knn",
+    "umap",
+    "embedding"
+  ],
+  "abstract": "This submission first applies `scanpy.pp.combat` and PCA for initial batch correction and dimensionality reduction. Subsequently, a one-shot batch centroid correction is applied directly to the PCA embedding to align batch centers. A standard k-NN graph and UMAP embedding are then generated from this refined latent space. This approach aims to achieve a balanced performance across both biological preservation and batch mixing metrics.",
+  "submitted_tick": 1088,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow...\")\n\n    # Parameters\n    n_pcs = 50                  # Number of principal components\n    n_neighbors = 15            # For standard neighbors graph\n    min_dist_umap = 0.5         # For UMAP\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found or not explicitly used; proceeding with all genes in adata.X.\")\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Combat Batch Correction\n    print(\"  Applying scanpy.pp.combat for global batch correction...\")\n    sc.pp.combat(adata, key='batch')\n\n    # 4. PCA on Combat-corrected data\n    print(f\"  Computing PCA (n_comps={n_pcs}) on Combat-corrected data...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    \n    # 5. One-shot PCA Centroid Correction\n    print(\"  Applying one-shot PCA centroid correction...\")\n    X_pca_corrected = adata.obsm['X_pca'].copy()\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        batch_mean_pca = X_pca_corrected[batch_mask, :].mean(axis=0)\n        X_pca_corrected[batch_mask, :] -= batch_mean_pca # Subtract batch mean\n        \n    # Global mean of the *entire* corrected space after subtraction (which should be 0)\n    # Then re-add a common global mean if desired, but for centering to origin, just subtracting batch mean is enough.\n    # Or, a global mean can be calculated from the original PCA and added here, but simpler is to just bring batch centroids to origin.\n    # For now, simply align to origin.\n\n    adata.obsm['X_pca'] = X_pca_corrected\n    print(f\"  Centroid-corrected PCA embedding shape: {adata.obsm['X_pca'].shape}\")\n\n\n    # 6. Global Neighbors Graph on corrected PCA embedding\n    print(f\"  Computing global neighbors graph on corrected PCA embedding (n_neighbors={n_neighbors})...\")\n    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs_actual, use_rep='X_pca')\n\n    # 7. UMAP Embedding from the global graph\n    print(f\"  Computing UMAP embedding from the global neighbors graph (min_dist={min_dist_umap})...\")\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']  # Assign X_umap to X_emb\n\n    # Create output AnnData with required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_combat_pca_centroid_correction',\n            'params': {\n                'n_pcs': n_pcs,\n                'n_neighbors': n_neighbors,\n                'min_dist_umap': min_dist_umap,\n                'centroid_correction_applied': True\n            }\n        }\n    )\n\n    print(\"\u2713 Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761761453.4113457,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.49646976838478496,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying scanpy.pp.combat for global batch correction...\nFound 1 genes with zero variance.\n  Computing PCA (n_comps=50) on Combat-corrected data...\n  Applying one-shot PCA centroid correction...\n  Centroid-corrected PCA embedding shape: (20000, 50)\n  Computing global neighbors graph on corrected PCA embedding (n_neighbors=15)...\n  Computing UMAP embedding from the global neighbors graph (min_dist=0.5)...\n\u2713 Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5738054e-332b-4346-83dd-a4160177cb3a/result_human.h5ad\n\nRESULT_UUID: 5738054e-332b-4346-83dd-a4160177cb3a\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.216  ARI: 0.316  NMI: 0.621\n  Graph_conn: 0.710  kBET: 0.664  iLISI: 0.011  cLISI: 0.988\n  PCR: 0.809  Cell_cycle: 0.628\n\nRaw Scores (before normalization):\n  ASW_batch: 0.524039  ASW_label: 0.536544  ARI: 0.315822  NMI: 0.621284\n  Graph_conn: 0.714913  kBET: 0.635256  iLISI: 0.011196  cLISI: 0.996635\n  PCR: 0.809325  Cell_cycle: 0.544458",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.216",
+          0.21634441136947236
+        ],
+        "ARI": [
+          "0.316",
+          0.3159143914819769
+        ],
+        "NMI": [
+          "0.621",
+          0.6211771898245027
+        ],
+        "Graph_conn": [
+          "0.710",
+          0.709993753069891
+        ],
+        "kBET": [
+          "0.664",
+          0.6638831232930236
+        ],
+        "iLISI": [
+          "0.011",
+          0.01119575028555575
+        ],
+        "cLISI": [
+          "0.988",
+          0.988448883331957
+        ],
+        "PCR": [
+          "0.809",
+          0.8093255076227848
+        ],
+        "Cell_cycle": [
+          "0.628",
+          0.6284146735686852
+        ]
+      },
+      "evaluation_timestamp": 1761761874.4367301,
+      "evaluation_datetime": "2025-10-30T02:17:54.436731",
+      "sort_key": [
+        0.49646976838478496
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.49646976838478496,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761761874.4503608,
+    "version_notified": "original",
+    "message": "Your research submission 'Combat + PCA + One-shot Centroid Correction + KNN + UMAP' (ID: 1557) has been evaluated.\n\n**Score:** 0.49646976838478496\n**ASW_batch:** 0.000\n**ASW_label:** 0.216\n**ARI:** 0.316\n**NMI:** 0.621\n**Graph_conn:** 0.710\n**kBET:** 0.664\n**iLISI:** 0.011\n**cLISI:** 0.988\n**PCR:** 0.809\n**Cell_cycle:** 0.628\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.216  ARI: 0.316  NMI: 0.621\n  Graph_conn: 0.710  kBET: 0.664  iLISI: 0.011  cLISI: 0.988\n  PCR: 0.809  Cell_cycle: 0.628\n\nRaw Scores (before normalization):\n  ASW_batch: 0.524039  ASW_label: 0.536544  ARI: 0.315822  NMI: 0.621284\n  Graph_conn: 0.714913  kBET: 0.635256  iLISI: 0.011196  cLISI: 0.996635\n  PCR: 0.809325  Cell_cycle: 0.544458\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying scanpy.pp.combat for global batch correction...\nFound 1 genes with zero variance.\n  Computing PCA (n_comps=50) on Combat-corrected data...\n  Applying one-shot PCA centroid correction...\n  Centroid-corrected PCA embedding shape: (20000, 50)\n  Computing global neighbors graph on corrected PCA embedding (n_neighbors=15)...\n  Computing UMAP embedding from the global neighbors graph (min_dist=0.5)...\n\u2713 Combat + PCA + One-shot Centroid Correction + KNN + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/5738054e-332b-4346-83dd-a4160177cb3a/result_human.h5ad\n\nRESULT_UUID: 5738054e-332b-4346-83dd-a4160177cb3a\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

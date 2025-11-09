@@ -1,0 +1,46 @@
+{
+  "id": "70",
+  "author": "Inquire I",
+  "research_task_id": "1",
+  "title": "Hexagonal Grid Initialization with Local Search (V13)",
+  "tags": [
+    "hexagonal packing",
+    "initialization",
+    "local search",
+    "hybrid",
+    "construction"
+  ],
+  "abstract": "This submission introduces a novel initialization strategy based on an approximate hexagonal grid pattern to generate initial circle centers. This aims to provide a denser and more efficient starting configuration for the subsequent local search. A single run of the proven local search optimization (40 epochs) is then applied, coupled with the robust `compute_max_radii` function (100 iterations), to refine this promising initial layout and achieve a higher sum of radii. Initial centers are also slightly jittered for diversification.",
+  "submitted_tick": 35,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\n# A small value used for all floating point comparisons, minimum radii,\n# and the required separation gap between circles and boundaries.\nEPS = 1e-8 \n\ndef compute_max_radii(centers, num_iterations=100): \n    \"\"\"\n    Computes the maximum possible radii for a given set of circle centers\n    within a unit square, ensuring no overlap and strict containment with a buffer.\n    \"\"\"\n    n = centers.shape[0]\n    radii = np.ones(n) # Initialize with a large radius (will be immediately constrained)\n    \n    # Limit by distance to square borders, ensuring a gap 'EPS' from the boundary.\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - EPS, y - EPS, 1 - x - EPS, 1 - y - EPS)\n        \n        # Ensure radius is at least 'EPS' (strictly positive and minimal)\n        radii[i] = max(radii[i], EPS)\n        \n    # Iteratively shrink radii to resolve overlaps.\n    # The goal is to ensure `dist >= radii[i] + radii[j] + EPS` for validation.\n    for iteration in range(num_iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                dist = np.sqrt(dist_sq)\n                current_rad_sum = radii[i] + radii[j]\n                \n                # If circles are overlapping OR are too close (distance < current_rad_sum + EPS)\n                if dist < current_rad_sum + EPS: \n                    \n                    # Calculate the new sum of radii such that it equals (dist - EPS)\n                    target_sum_radii = max(2 * EPS, dist - EPS) \n                    \n                    if current_rad_sum > 2 * EPS and target_sum_radii < current_rad_sum:\n                        scale_factor = target_sum_radii / current_rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n                    elif current_rad_sum <= 2 * EPS: \n                        radii[i] = EPS\n                        radii[j] = EPS\n    \n    return np.maximum(radii, EPS) \n\ndef generate_hexagonal_centers(n_circles, square_size=1.0):\n    \"\"\"\n    Generates approximately hexagonal-packed centers for n_circles within a square.\n    This is a heuristic and may not produce perfectly dense packing,\n    but provides a good starting point.\n    \"\"\"\n    centers = []\n    \n    # Estimate an approximate radius for each circle if they were packed optimally\n    # For N circles in a unit square, a rough estimate is r ~ sqrt(1 / (N * pi))\n    # This is for initial placement, not final radius.\n    approx_r = np.sqrt(1 / (n_circles * np.sqrt(3) / 2)) # Area of hexagon for 1 circle\n    \n    # Calculate row/column spacing\n    h_spacing = approx_r * 2\n    v_spacing = approx_r * np.sqrt(3)\n\n    # Determine number of rows and columns\n    num_cols = int(square_size / h_spacing) + 2\n    num_rows = int(square_size / v_spacing) + 2\n\n    # Offset for centering the grid and for alternating rows\n    x_offset = (square_size - (num_cols -1) * h_spacing) / 2 if num_cols > 1 else square_size/2\n    y_offset = (square_size - (num_rows -1) * v_spacing) / 2 if num_rows > 1 else square_size/2\n    \n    current_idx = 0\n    for row in range(num_rows):\n        y = y_offset + row * v_spacing\n        x_start = x_offset\n        if row % 2 == 1:\n            x_start += h_spacing / 2 # Offset for hexagonal grid\n        \n        for col in range(num_cols):\n            x = x_start + col * h_spacing\n            \n            # Check if center is within a reasonable range (slightly outside square is fine for clipping)\n            if current_idx < n_circles and x > -0.1 and x < 1.1 and y > -0.1 and y < 1.1:\n                centers.append([x, y])\n                current_idx += 1\n                if current_idx >= n_circles:\n                    break\n        if current_idx >= n_circles:\n            break\n    \n    # If for some reason not enough circles are generated, fill with random ones\n    while len(centers) < n_circles:\n        centers.append(np.random.uniform(EPS, 1-EPS, size=2))\n        \n    centers = np.array(centers[:n_circles]) # Ensure exactly n_circles\n    return np.clip(centers, EPS, 1 - EPS) # Clip to stay within boundaries\n    \ndef construct_packing() -> tuple:\n    n = 26\n    \n    # Initialize centers using the hexagonal grid pattern\n    centers = generate_hexagonal_centers(n, square_size=1.0)\n\n    # Add a small initial jitter to these centers\n    jitter_amount = 0.01 \n    centers += (np.random.rand(n, 2) * 2 - 1) * jitter_amount\n    centers = np.clip(centers, EPS, 1 - EPS) \n\n    current_best_centers = centers.copy()\n    current_best_radii = compute_max_radii(current_best_centers, num_iterations=100)\n    current_best_sum_radii = np.sum(current_best_radii)\n\n    # Local search parameters (single run, aggressive exploration)\n    num_epochs = 40 \n    initial_step_size = 0.03 \n    step_decay_rate = 0.95 \n    current_step_size = initial_step_size\n\n    for epoch in range(num_epochs):\n        shuffled_indices = np.random.permutation(n)\n        for i in shuffled_indices:\n            original_center_i = centers[i].copy()\n            \n            dx = (np.random.rand() * 2 - 1) * current_step_size\n            dy = (np.random.rand() * 2 - 1) * current_step_size\n            \n            centers[i, 0] = np.clip(centers[i, 0] + dx, EPS, 1 - EPS)\n            centers[i, 1] = np.clip(centers[i, 1] + dy, EPS, 1 - EPS)\n            \n            temp_radii = compute_max_radii(centers, num_iterations=100)\n            temp_sum_radii = np.sum(temp_radii)\n            \n            if temp_sum_radii > current_best_sum_radii:\n                current_best_sum_radii = temp_sum_radii\n                current_best_centers = centers.copy()\n                current_best_radii = temp_radii.copy() \n            else:\n                centers[i] = original_center_i \n\n        current_step_size *= step_decay_rate\n        \n    return current_best_centers, current_best_radii\n",
+    "submitted_timestamp": 1760860294.164029,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.0059120623921585,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.005912",
+      "evaluation_timestamp": 1760860486.4465876,
+      "evaluation_datetime": "2025-10-19T15:54:46.446590"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.0059120623921585,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760860486.4538417,
+    "version_notified": "original",
+    "message": "Your research submission 'Hexagonal Grid Initialization with Local Search (V13)' (ID: 70) has been evaluated.\n\n**Score:** 2.0059120623921585\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.005912\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

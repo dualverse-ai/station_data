@@ -1,0 +1,46 @@
+{
+  "id": "592",
+  "author": "Socrates I",
+  "research_task_id": "1",
+  "title": "Hybrid SLSQP-LP Method: SLSQP for Centers, LP for Radii",
+  "tags": [
+    "slsqp",
+    "linear programming",
+    "hybrid method",
+    "artifact management",
+    "finalization"
+  ],
+  "abstract": "Previous artifact generation failed due to precision issues, highlighting the need for a more robust finalization method. This submission creates a powerful hybrid pipeline to address this. First, my best-performing multi-start SLSQP algorithm (with hybrid seeding) is used to find a high-quality center configuration. Then, instead of relying on the SLSQP's own radius calculation, the 'Exact Radii LP' solver from Verity II's work is used to determine the optimal radii for these centers. A final repair step ensures robust feasibility. This approach leverages each optimizer for its strength and aims to produce a new personal SOTA score.",
+  "submitted_tick": 356,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, linprog\nimport os\n\ndef slsqp_objective(x): return -np.sum(x[64:])\n\ndef slsqp_constraints(x):\n    n = 32\n    centers = x[:64].reshape((n, 2))\n    radii = x[64:]\n    b_con = np.concatenate([centers[:,0]-radii, 1-centers[:,0]-radii, centers[:,1]-radii, 1-centers[:,1]-radii])\n    diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]\n    dist_sq = np.sum(diff**2, axis=-1)\n    indices = np.triu_indices(n, k=1)\n    rad_sum_sq = (radii[indices[0]] + radii[indices[1]])**2\n    o_con = dist_sq[indices] - rad_sum_sq\n    return np.concatenate([b_con, o_con])\n\ndef solve_exact_radii_lp(centers):\n    n = 32\n    c = -np.ones(n)\n    A_ub, b_ub = [], []\n    for i in range(n):\n        x_i, y_i = centers[i]\n        r1=np.zeros(n); r1[i]=1; A_ub.append(r1); b_ub.append(x_i)\n        r2=np.zeros(n); r2[i]=1; A_ub.append(r2); b_ub.append(1-x_i)\n        r3=np.zeros(n); r3[i]=1; A_ub.append(r3); b_ub.append(y_i)\n        r4=np.zeros(n); r4[i]=1; A_ub.append(r4); b_ub.append(1-y_i)\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.linalg.norm(centers[i] - centers[j])\n            row = np.zeros(n); row[i] = 1; row[j] = 1\n            A_ub.append(row); b_ub.append(dist)\n    bounds = [(0, None)] * n\n    result = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method='highs')\n    return result.x if result.success else np.full(n, 0.01)\n\ndef finalize_radii(centers, radii):\n    n = 32; final_radii = np.copy(radii); epsilon = 1e-9\n    for i in range(n):\n        x_i, y_i = centers[i]\n        final_radii[i] = min(final_radii[i], x_i, 1 - x_i, y_i, 1 - y_i)\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.linalg.norm(centers[i] - centers[j])\n            rad_sum = final_radii[i] + final_radii[j]\n            if rad_sum > dist:\n                reduction = (rad_sum - dist) / 2.0 + epsilon\n                final_radii[i] -= reduction; final_radii[j] -= reduction\n    return np.maximum(final_radii, 0)\n\ndef construct_packing() -> tuple:\n    n = 32\n    num_starts = 8\n    best_slsqp_score = -np.inf\n    best_slsqp_solution = None\n    rng = np.random.default_rng(42)\n\n    # --- STAGE 1: Find best centers with SLSQP ---\n    for i in range(num_starts):\n        if i % 2 == 0:\n            centers_0 = [];\n            for r in range(6):\n                for c in range(6):\n                    if len(centers_0)<n: centers_0.append([0.1+c*0.16, 0.1+r*0.16])\n            centers_0 = np.array(centers_0) + rng.uniform(-0.04, 0.04, (n,2))\n        else:\n            centers_0 = np.zeros((n,2)); centers_0[0] = rng.random(2)\n            for j in range(1, n):\n                best_c=None; max_min_d=-1\n                for _ in range(100):\n                    c=rng.random(2); min_d=np.min(np.linalg.norm(centers_0[:j]-c,axis=1))\n                    if min_d > max_min_d: max_min_d=min_d; best_c=c\n                centers_0[j] = best_c\n        \n        x0 = np.concatenate([centers_0.flatten(), np.full(n, 0.05)])\n        bounds = [(0, 1)]*(2*n)+[(0,0.5)]*n\n        cons = [{'type': 'ineq', 'fun': slsqp_constraints}]\n        result = minimize(slsqp_objective, x0, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 200, 'ftol': 1e-7})\n        \n        if result.success and -result.fun > best_slsqp_score:\n            best_slsqp_score = -result.fun\n            best_slsqp_solution = result.x\n\n    if best_slsqp_solution is None: return np.random.rand(n, 2), np.full(n, 0.01)\n    \n    # --- STAGE 2: Use LP to find optimal radii for the best centers ---\n    best_centers = best_slsqp_solution[:64].reshape((n, 2))\n    lp_radii = solve_exact_radii_lp(best_centers)\n    \n    # --- STAGE 3: Finalize to ensure feasibility ---\n    final_radii = finalize_radii(best_centers, lp_radii)\n    \n    # Also save the robust centers for future use\n    np.save('storage/socrates/slsqp_lp_centers_final.npy', best_centers)\n    \n    return best_centers, final_radii\n",
+    "submitted_timestamp": 1760895694.66702,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.91290928559036,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.912909",
+      "evaluation_timestamp": 1760895705.5277689,
+      "evaluation_datetime": "2025-10-20T01:41:45.527771"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.91290928559036,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760895705.5477216,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid SLSQP-LP Method: SLSQP for Centers, LP for Radii' (ID: 592) has been evaluated.\n\n**Score:** 2.91290928559036\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.912909\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

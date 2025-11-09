@@ -1,0 +1,45 @@
+{
+  "id": "9",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Coordination Baseline: Bidirectional Ring v0",
+  "tags": [
+    "coordination",
+    "baseline",
+    "bidirectional",
+    "reproducibility"
+  ],
+  "abstract": "Implements and evaluates a bidirectional ring broadcast baseline. Confirms deterministic steps-to-full \u2248 ceil((N-1)/2), explores stochastic behavior, and writes an artifact for collaborators.",
+  "submitted_tick": 11,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, time, platform, math, random\nfrom pathlib import Path\n\nSTART = time.time()\nsys.path.append('storage/shared')\n\n# Seeding utilities (package or shim fallback)\nseed_tools_ok = True\ntry:\n    from utilities.seed_tools import set_seed, make_rng, seed_from_str, mix_seed\nexcept Exception:\n    seed_tools_ok = False\n    try:\n        from seed_tools import set_seed, make_rng, seed_from_str, mix_seed  # shim\n    except Exception:\n        import random as _r, hashlib as _h\n        def _u32(x): return int(x) & 0xFFFFFFFF\n        def set_seed(s): _r.seed(_u32(s)); return _u32(s)\n        def make_rng(s): set_seed(s); return None, _r.Random(_u32(s))\n        def seed_from_str(s): return int(_h.sha256(s.encode()).hexdigest()[:8], 16)\n        def mix_seed(a,b): return (_u32(a) ^ (_u32(b) + 0x9E3779B9)) & 0xFFFFFFFF\n\nfrom coord.bidirectional_ring import simulate_bidir_broadcast\nfrom coord.metrics import basic_metrics\n\nbase_seed = seed_from_str(\"Axiom-bidir-ring-v0\")\nset_seed(base_seed)\n_, _ = make_rng(base_seed)\n\ndef expected_steps_bidir(N: int) -> int:\n    return math.ceil((N - 1) / 2)\n\ncfg = {\n    \"Ns\": [24, 25],\n    \"max_steps\": 400,\n    \"stochastic_p\": 0.6,\n    \"replicates\": 10\n}\n\ncases = []\n# Deterministic checks\nfor N in cfg[\"Ns\"]:\n    det = simulate_bidir_broadcast(N=N, p_send=1.0, max_steps=cfg[\"max_steps\"])\n    det_met = basic_metrics(det)\n    exp_steps = expected_steps_bidir(N)\n    cases.append({\n        \"label\": f\"deterministic_N{N}\",\n        \"N\": N,\n        \"p_send\": 1.0,\n        \"expected_steps_to_full\": exp_steps,\n        \"result\": det,\n        \"metrics\": det_met,\n        \"matches_expectation\": (det_met.get(\"time_to_full\") == exp_steps),\n    })\n\n# Stochastic runs (fixed N)\nN_sto = cfg[\"Ns\"][1]\np_sto = cfg[\"stochastic_p\"]\nruns = []\nfor r in range(cfg[\"replicates\"]):\n    run_seed = mix_seed(base_seed, r + 1)\n    rng = random.Random(run_seed)\n    res = simulate_bidir_broadcast(N=N_sto, p_send=p_sto, max_steps=cfg[\"max_steps\"], rng=rng)\n    met = basic_metrics(res)\n    runs.append({\"seed\": run_seed, \"result\": res, \"metrics\": met})\n\n# Aggregate stochastic metrics\nimport statistics as stats\ndef _vals(key):\n    v = [x[\"metrics\"].get(key) for x in runs]\n    return [x for x in v if x is not None]\n\nagg = {}\nfor key in [\"coverage\", \"time_to_full\", \"throughput_msgs_per_step\"]:\n    v = _vals(key)\n    if v:\n        try:\n            agg[key] = {\"count\": len(v), \"mean\": float(stats.fmean(v)), \"min\": float(min(v)), \"max\": float(max(v))}\n        except Exception:\n            v2 = [x for x in v if x is not None]\n            agg[key] = {\"count\": len(v2), \"mean\": float(stats.fmean(v2)) if v2 else None, \"min\": float(min(v2)) if v2 else None, \"max\": float(max(v2)) if v2 else None}\n    else:\n        agg[key] = {\"count\": 0}\n\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nout_path = out_dir / \"axiom_bidir_baseline_v0.json\"\n\nreport = {\n    \"env\": {\n        \"python\": platform.python_version(),\n        \"implementation\": platform.python_implementation(),\n        \"platform\": platform.platform(),\n        \"seed_tools_imported\": seed_tools_ok,\n    },\n    \"config\": cfg,\n    \"deterministic_cases\": cases,\n    \"stochastic_runs\": runs,\n    \"aggregate\": agg,\n}\n\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(report, f, indent=2, sort_keys=True)\n\nEND = time.time()\n# Print compact summary\ndet_summary = {c[\"N\"]: {\"observed\": c[\"metrics\"].get(\"time_to_full\"), \"expected\": c[\"expected_steps_to_full\"], \"ok\": c[\"matches_expectation\"]} for c in cases}\nprint(\"=== Bidirectional Ring Baseline v0 ===\")\nprint(json.dumps({\n    \"artifact\": str(out_path),\n    \"deterministic_checks\": det_summary,\n    \"stochastic_N\": N_sto,\n    \"stochastic_p\": p_sto,\n    \"stochastic_time_to_full_mean\": report[\"aggregate\"][\"time_to_full\"].get(\"mean\"),\n    \"stochastic_coverage_mean\": report[\"aggregate\"][\"coverage\"].get(\"mean\"),\n    \"timing_sec\": round(END - START, 6),\n}, indent=2))\nprint(\"Bidirectional baseline complete.\")\n",
+    "submitted_timestamp": 1757839428.7285738,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Bidirectional Ring Baseline v0 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_bidir_baseline_v0.json\",\n  \"deterministic_checks\": {\n    \"24\": {\n      \"observed\": 12,\n      \"expected\": 12,\n      \"ok\": true\n    },\n    \"25\": {\n      \"observed\": 12,\n      \"expected\": 12,\n      \"ok\": true\n    }\n  },\n  \"stochastic_N\": 25,\n  \"stochastic_p\": 0.6,\n  \"stochastic_time_to_full_mean\": 20.0,\n  \"stochastic_coverage_mean\": 1.0,\n  \"timing_sec\": 0.076322\n}\nBidirectional baseline complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757839430.7520592,
+      "evaluation_datetime": "2025-09-14T16:43:50.752062"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757839430.8017278,
+    "version_notified": "original",
+    "message": "Your research submission 'Coordination Baseline: Bidirectional Ring v0' (ID: 9) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Bidirectional Ring Baseline v0 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_bidir_baseline_v0.json\",\n  \"deterministic_checks\": {\n    \"24\": {\n      \"observed\": 12,\n      \"expected\": 12,\n      \"ok\": true\n    },\n    \"25\": {\n      \"observed\": 12,\n      \"expected\": 12,\n      \"ok\": true\n    }\n  },\n  \"stochastic_N\": 25,\n  \"stochastic_p\": 0.6,\n  \"stochastic_time_to_full_mean\": 20.0,\n  \"stochastic_coverage_mean\": 1.0,\n  \"timing_sec\": 0.076322\n}\nBidirectional baseline complete.\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "980",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Bilevel LP radii + coordinate search for centers (multi-pass, 26 circles)",
+  "tags": [
+    "optimization",
+    "linear-programming",
+    "coordinate-search",
+    "heuristic",
+    "baseline-plus"
+  ],
+  "abstract": "Solves radii optimally via a linear program for fixed centers (maximize sum r subject to boundary and pairwise constraints), and performs multi-pass coordinate search over centers, accepting moves that improve the LP objective. Starts from a 6x5 grid and returns the final LP-optimal radii.",
+  "submitted_tick": 609,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\n# Small safety to keep strict feasibility under numerical checks\nEPS_DIST = 1e-10\nEPS_BND = 1e-10\nIMPROVE_TOL = 1e-12\n\ndef equal_grid_centers(n=26, cols=6, rows=5):\n    dx = 1.0 / (cols + 1)  # 1/7\n    dy = 1.0 / (rows + 1)  # 1/6\n    centers = []\n    for j in range(rows):\n        y = (j + 1) * dy\n        for i in range(cols):\n            if len(centers) >= n:\n                break\n            x = (i + 1) * dx\n            centers.append([x, y])\n        if len(centers) >= n:\n            break\n    return np.array(centers, dtype=float)\n\ndef lp_radii_for_centers(centers):\n    \"\"\"\n    Given centers (n,2), solve LP:\n      maximize sum r_i\n      subject to  0 <= r_i <= boundary_clearance_i - EPS_BND\n                  r_i + r_j <= ||c_i - c_j|| - EPS_DIST   for all i<j\n    Returns (r, obj, success).\n    \"\"\"\n    try:\n        from scipy.optimize import linprog\n    except Exception:\n        # Fallback: equal-radius constrained by boundary only (feasible but suboptimal)\n        n = centers.shape[0]\n        x = centers[:, 0]; y = centers[:, 1]\n        bnd = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - EPS_BND\n        r = np.clip(bnd, 0.0, None)\n        return r, float(np.sum(r)), True\n\n    n = centers.shape[0]\n    # Variable: r in R^n\n    # Objective: minimize c^T r with c = -1 (since linprog minimizes)\n    c = -np.ones(n, dtype=float)\n\n    # Bounds: 0 <= r_i <= ub_i (boundary clearance)\n    x = centers[:, 0]; y = centers[:, 1]\n    ub = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - EPS_BND\n    ub = np.maximum(ub, 0.0)\n    bounds = [(0.0, float(ub[i])) for i in range(n)]\n\n    # Pairwise constraints: r_i + r_j <= d_ij - EPS_DIST\n    # Build A_ub r <= b_ub\n    iu = np.triu_indices(n, k=1)\n    rows = len(iu[0])\n    if rows > 0:\n        A = np.zeros((rows, n), dtype=float)\n        A[np.arange(rows), iu[0]] = 1.0\n        A[np.arange(rows), iu[1]] = 1.0\n        diff = centers[iu[0]] - centers[iu[1]]\n        dij = np.sqrt(np.sum(diff * diff, axis=1))\n        b = dij - EPS_DIST\n    else:\n        A = None; b = None\n\n    res = linprog(c, A_ub=A, b_ub=b, bounds=bounds, method=\"highs\")\n    if res.success:\n        r = res.x\n        return r, float(np.sum(r)), True\n    else:\n        # Very unlikely with reasonable centers; fallback to boundary-only\n        r = np.maximum(ub, 0.0)\n        return r, float(np.sum(r)), False\n\ndef neighborhood_offsets():\n    # 8-directional neighbors\n    offs = []\n    for dx in (-1, 0, 1):\n        for dy in (-1, 0, 1):\n            if dx == 0 and dy == 0:\n                continue\n            offs.append((dx, dy))\n    return offs\n\ndef coordinate_search(centers, steps=(0.05, 0.025, 0.012, 0.006)):\n    \"\"\"\n    Multi-pass coordinate search on centers; for each candidate move of a single center,\n    resolve LP to get optimal radii and accept the move if the objective improves.\n    \"\"\"\n    n = centers.shape[0]\n    r, best_obj, _ = lp_radii_for_centers(centers)\n    best_centers = centers.copy()\n    best_r = r.copy()\n\n    offs = neighborhood_offsets()\n\n    for step in steps:\n        improved_any = True\n        # Keep iterating until no improvement in a full sweep at this step\n        while improved_any:\n            improved_any = False\n            # Visit circles from smallest to largest current radius to help weak ones first\n            order = np.argsort(best_r)\n            for idx in order:\n                c0 = best_centers[idx].copy()\n                local_best_obj = best_obj\n                local_best_c = c0\n                # Try 8 directional moves\n                for (ox, oy) in offs:\n                    cand = c0 + np.array([ox * step, oy * step], dtype=float)\n                    # Must remain strictly inside (avoid touching walls for safety)\n                    if not (0.0 < cand[0] < 1.0 and 0.0 < cand[1] < 1.0):\n                        continue\n                    trial_centers = best_centers.copy()\n                    trial_centers[idx] = cand\n                    r_trial, obj_trial, ok = lp_radii_for_centers(trial_centers)\n                    if ok and obj_trial > local_best_obj + IMPROVE_TOL:\n                        local_best_obj = obj_trial\n                        local_best_c = cand\n                        local_best_r = r_trial\n                # If improved, commit the best move for this circle\n                if local_best_obj > best_obj + IMPROVE_TOL:\n                    best_centers[idx] = local_best_c\n                    best_r = local_best_r\n                    best_obj = local_best_obj\n                    improved_any = True\n        # proceed to next (smaller) step\n    return best_centers, best_r\n\ndef construct_packing():\n    centers0 = equal_grid_centers(n=26, cols=6, rows=5)\n    centers, radii = coordinate_search(centers0, steps=(0.05, 0.025, 0.012, 0.006))\n    # Final LP tighten to ensure best radii for final centers\n    radii, _, _ = lp_radii_for_centers(centers)\n    return centers.astype(float), radii.astype(float)\n",
+    "submitted_timestamp": 1761019512.536345,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.438565772202316,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.438566",
+      "evaluation_timestamp": 1761019522.368547,
+      "evaluation_datetime": "2025-10-21T12:05:22.368550"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.438565772202316,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761019522.3877392,
+    "version_notified": "original",
+    "message": "Your research submission 'Bilevel LP radii + coordinate search for centers (multi-pass, 26 circles)' (ID: 980) has been evaluated.\n\n**Score:** 2.438565772202316\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.438566\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

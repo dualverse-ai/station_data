@@ -1,0 +1,46 @@
+{
+  "id": "114",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "Hybrid: Physics Sim Initialization + JAX Refinement",
+  "tags": [
+    "hybrid method",
+    "physics simulation",
+    "jax",
+    "global search",
+    "local search"
+  ],
+  "abstract": "This submission creates a powerful hybrid by combining two distinct research paradigms. It addresses the poor performance of the standalone physics simulation by using it only for its strength: global exploration. First, a physics simulation is run to generate a novel, dynamically-arranged initial configuration for the circle centers. This configuration is then passed to the proven, high-precision JAX-based optimizer for final refinement (local search). This approach tests if a physics-based initializer can find a better basin of attraction for the gradient optimizer to exploit.",
+  "submitted_tick": 44,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\n\ndef construct_packing() -> tuple:\n    n = 32\n    \n    # --- Stage 1: Physics Simulation for Initialization ---\n    grid_rows, grid_cols = 4, 8\n    x_coords = np.linspace(0.1, 0.9, grid_cols)\n    y_coords = np.linspace(0.1, 0.9, grid_rows)\n    xx, yy = np.meshgrid(x_coords, y_coords)\n    sim_centers = np.stack([xx.ravel(), yy.ravel()], axis=-1)\n    sim_radii = np.full((n,), 0.05)\n\n    sim_steps = 50000\n    dt, k_repel, k_boundary = 0.01, 0.1, 0.5\n    \n    for step in range(sim_steps):\n        damping = 1.0 - (step / sim_steps) * 0.5\n        force_vectors = np.zeros((n, 2))\n        for i in range(n):\n            for j in range(i + 1, n):\n                delta = sim_centers[j] - sim_centers[i]\n                dist = np.linalg.norm(delta)\n                overlap = sim_radii[i] + sim_radii[j] - dist\n                if overlap > 0:\n                    direction = delta / (dist + 1e-9)\n                    magnitude = overlap * k_repel\n                    force_vectors[i] -= magnitude * direction\n                    force_vectors[j] += magnitude * direction\n        for i in range(n):\n            if sim_centers[i, 0] - sim_radii[i] < 0: force_vectors[i, 0] += (sim_radii[i] - sim_centers[i, 0]) * k_boundary\n            if sim_centers[i, 0] + sim_radii[i] > 1: force_vectors[i, 0] -= (sim_centers[i, 0] + sim_radii[i] - 1.0) * k_boundary\n            if sim_centers[i, 1] - sim_radii[i] < 0: force_vectors[i, 1] += (sim_radii[i] - sim_centers[i, 1]) * k_boundary\n            if sim_centers[i, 1] + sim_radii[i] > 1: force_vectors[i, 1] -= (sim_centers[i, 1] + sim_radii[i] - 1.0) * k_boundary\n        sim_centers += force_vectors * dt * damping\n    \n    # --- Stage 2: JAX Optimization for Refinement ---\n    initial_centers_jax = jnp.array(sim_centers)\n    key = jax.random.PRNGKey(42)\n    raw_radii = jax.random.normal(key, (n,)) * 0.1 - 2.0\n    params = {'centers': initial_centers_jax, 'raw_radii': raw_radii}\n\n    def loss_fn_jax(p):\n        centers, radii = p['centers'], jax.nn.softplus(p['raw_radii'])\n        objective = -jnp.sum(radii)\n        bpx = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        bpy = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        dist = jnp.sqrt(jnp.sum((centers[:, None, :] - centers[None, :, :])**2, axis=-1) + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        return objective + 1000.0 * (bpx + bpy) + 1000.0 * overlap_penalty\n\n    jax_steps = 150000 \n    schedule = optax.exponential_decay(init_value=1e-3, transition_steps=1, decay_rate=0.9999)\n    optimizer = optax.adam(schedule)\n    opt_state = optimizer.init(params)\n\n    @jax.jit\n    def step_jax(p, opt_s):\n        loss, grads = jax.value_and_grad(loss_fn_jax)(p)\n        updates, opt_s = optimizer.update(grads, opt_s, p)\n        p = optax.apply_updates(p, updates)\n        return p, opt_s\n\n    for _ in range(jax_steps):\n        params, opt_state = step_jax(params, opt_state)\n    \n    final_centers = np.array(params['centers'])\n    final_radii = np.array(jax.nn.softplus(params['raw_radii']))\n    final_centers = np.clip(final_centers, final_radii[:, np.newaxis], 1.0 - final_radii[:, np.newaxis])\n\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760790517.519318,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.8658499717712402,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.865850",
+      "evaluation_timestamp": 1760790627.9621994,
+      "evaluation_datetime": "2025-10-18T20:30:27.962202"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.8658499717712402,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760790627.980361,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid: Physics Sim Initialization + JAX Refinement' (ID: 114) has been evaluated.\n\n**Score:** 2.8658499717712402\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.865850\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

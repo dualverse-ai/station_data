@@ -1,0 +1,50 @@
+{
+  "id": "489",
+  "author": "Aether II",
+  "research_task_id": "1",
+  "title": "Diagnostic Test: Batch Separability after BQN and BW Preprocessing",
+  "tags": [
+    "diagnostic",
+    "preprocessing",
+    "batch",
+    "pca",
+    "logistic",
+    "regression"
+  ],
+  "abstract": "This diagnostic experiment quantifies the impact of Batch-Specific Quantile Normalization (BQN) and Batch-Specific Winsorization (BW) on the linear separability of batch effects in PCA space. Using logistic regression, we compare batch prediction accuracy for raw, BQN-preprocessed, and BW-preprocessed data, as suggested by reviewer feedback on Archive #15.",
+  "submitted_tick": 288,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom sklearn.decomposition import PCA\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\nimport sys\n\n# Import local utility functions\nsys.path.append('storage/aether')\nfrom aether_utils import _normalize_log1p_inplace, _batch_specific_quantile_normalize, _batch_specific_winsorize\n\ndef _evaluate_batch_separability(adata_embedding, batch_labels, n_pca_components=50, random_state=0):\n    \"\"\"\n    Evaluates batch separability in an embedding using logistic regression.\n    Args:\n        adata_embedding: AnnData object where .X is the embedding.\n        batch_labels: pandas Series of batch labels.\n        n_pca_components: Number of PCA components to use for feature reduction for logistic regression.\n        random_state: Random state for reproducibility.\n    Returns:\n        Classification accuracy score.\n    \"\"\"\n    print(f\"  Evaluating batch separability with {n_pca_components} PCA components for LR...\")\n    \n    # Ensure adata_embedding.X is dense for PCA/LR\n    data_matrix = adata_embedding.X.toarray() if hasattr(adata_embedding.X, 'toarray') else adata_embedding.X\n\n    # If the embedding has more features than n_pca_components, perform PCA for LR features\n    if data_matrix.shape[1] > n_pca_components:\n        pca_lr = PCA(n_components=n_pca_components, random_state=random_state)\n        X_features = pca_lr.fit_transform(data_matrix)\n    else:\n        X_features = data_matrix\n\n    y_labels = batch_labels\n    \n    if len(np.unique(y_labels)) < 2:\n        print(\"  Warning: Only one batch present, cannot evaluate separability. Returning 0.0 accuracy.\")\n        return 0.0\n\n    X_train, X_test, y_train, y_test = train_test_split(\n        X_features, y_labels, test_size=0.3, random_state=random_state, stratify=y_labels\n    )\n\n    # Using a solver that handles multi-class classification by default (e.g., 'lbfgs')\n    log_reg = LogisticRegression(max_iter=1000, random_state=random_state, solver='lbfgs', multi_class='auto')\n    log_reg.fit(X_train, y_train)\n    y_pred = log_reg.predict(X_test) # CORRECTED: Predict on X_test, not y_test\n    accuracy = accuracy_score(y_test, y_pred)\n    return accuracy\n\ndef test(adata: sc.AnnData):\n    \"\"\"\n    Diagnostic test to quantify batch separability before and after preprocessing.\n    \"\"\"\n    print(\"Starting diagnostic test for batch separability...\")\n    random_seed = 0\n    n_comps = 50 # Number of PCA components for visualization and subsequent LR.\n\n    # Initial preprocessing (as typically done before PCA in scRNA-seq)\n    adata_preprocessed = adata.copy()\n    _normalize_log1p_inplace(adata_preprocessed)\n    print(\"Initial normalization and log1p transformation complete.\")\n\n    # --- Experiment 1: Baseline PCA (after initial normalization) ---\n    print(\"\\n--- Baseline PCA Embedding ---\")\n    adata_baseline = adata_preprocessed.copy()\n    sc.tl.pca(adata_baseline, n_comps=n_comps, random_state=random_seed)\n    baseline_accuracy = _evaluate_batch_separability(sc.AnnData(adata_baseline.obsm['X_pca']), adata_baseline.obs['batch'], n_pca_components=n_comps, random_state=random_seed)\n    print(f\"  Baseline PCA (after initial norm) Batch Separability Accuracy: {baseline_accuracy:.4f}\")\n\n    # --- Experiment 2: BQN then PCA ---\n    print(\"\\n--- Batch-Specific Quantile Normalization (BQN) then PCA Embedding ---\")\n    adata_bqn = adata.copy() # Start from raw counts\n    _normalize_log1p_inplace(adata_bqn)\n    \n    # Apply BQN\n    adata_bqn.X = _batch_specific_quantile_normalize(adata_bqn, adata_bqn.obs['batch'])\n    \n    sc.tl.pca(adata_bqn, n_comps=n_comps, random_state=random_seed)\n    bqn_accuracy = _evaluate_batch_separability(sc.AnnData(adata_bqn.obsm['X_pca']), adata_bqn.obs['batch'], n_pca_components=n_comps, random_state=random_seed)\n    print(f\"  BQN then PCA Batch Separability Accuracy: {bqn_accuracy:.4f}\")\n\n    # --- Experiment 3: BW then PCA ---\n    print(\"\\n--- Batch-Specific Winsorization (BW) then PCA Embedding ---\")\n    adata_bw = adata.copy() # Start from raw counts\n    _normalize_log1p_inplace(adata_bw)\n    \n    # Apply BW\n    adata_bw.X = _batch_specific_winsorize(adata_bw, adata_bw.obs['batch'])\n    \n    sc.tl.pca(adata_bw, n_comps=n_comps, random_state=random_seed)\n    bw_accuracy = _evaluate_batch_separability(sc.AnnData(adata_bw.obsm['X_pca']), adata_bw.obs['batch'], n_pca_components=n_comps, random_state=random_seed)\n    print(f\"  BW then PCA Batch Separability Accuracy: {bw_accuracy:.4f}\")\n    \n    return \"Diagnostic test for batch separability completed. See output for results.\"\n\ndef eliminate_batch_effect_fn(adata: sc.AnnData) -> sc.AnnData:\n    # This function will not be run as a 'test' function is defined.\n    pass\n",
+    "submitted_timestamp": 1761484485.9822407,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\nStarting diagnostic test for batch separability...\nInitial normalization and log1p transformation complete.\n\n--- Baseline PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  Baseline PCA (after initial norm) Batch Separability Accuracy: 0.9973\n\n--- Batch-Specific Quantile Normalization (BQN) then PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  BQN then PCA Batch Separability Accuracy: 0.9972\n\n--- Batch-Specific Winsorization (BW) then PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  BW then PCA Batch Separability Accuracy: 0.9978\nTest result: Diagnostic test for batch separability completed. See output for results.\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761484695.726824,
+      "evaluation_datetime": "2025-10-26T21:18:15.726835",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761484695.801193,
+    "version_notified": "original",
+    "message": "Your research submission 'Diagnostic Test: Batch Separability after BQN and BW Preprocessing' (ID: 489) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\nStarting diagnostic test for batch separability...\nInitial normalization and log1p transformation complete.\n\n--- Baseline PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  Baseline PCA (after initial norm) Batch Separability Accuracy: 0.9973\n\n--- Batch-Specific Quantile Normalization (BQN) then PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  BQN then PCA Batch Separability Accuracy: 0.9972\n\n--- Batch-Specific Winsorization (BW) then PCA Embedding ---\n  Evaluating batch separability with 50 PCA components for LR...\n  BW then PCA Batch Separability Accuracy: 0.9978\nTest result: Diagnostic test for batch separability completed. See output for results.\n\n\nSTDERR:\n\n```"
+  }
+}

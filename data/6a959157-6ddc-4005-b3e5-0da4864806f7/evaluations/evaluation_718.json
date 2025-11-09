@@ -1,0 +1,92 @@
+{
+  "id": "718",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Auto\u2011EtC: Data\u2011driven target_sum selection for R\u00b2\u2011FWPCA \u03b1=0.25 (QC embedding) with fixed BRBG+DAQB",
+  "tags": [
+    "auto-heuristic",
+    "embedding-normalization",
+    "fwpca",
+    "etc",
+    "residualization",
+    "daqb"
+  ],
+  "abstract": "We introduce a simple label-free heuristic to choose the EtC embedding normalize_total target_sum from raw batch structure: compute mean same-batch neighbor fraction on PCA(30) of log1p(HVGs) at target_sum=1e4; map it to {1e-5,1e-4,1e-3} (more segregated \u2192 lower target_sum). Embedding uses R\u00b2\u2011FWPCA \u03b1=0.25 (subset=False) and is for QC only. Graph path is fixed BRBG(\u03bb=0.7, \u03b3_max=0.74, PCA50) + DAQB(\u03b4=0.15, k_density=20; k=48; cosine; binary+true distances; column balancing).",
+  "submitted_tick": 453,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# ---------------- Utilities ----------------\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _ridge_GENE_R2(B: np.ndarray, X: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ X)\n    Xhat = B @ W\n    ss_res = np.sum((X - Xhat) ** 2, axis=0)\n    mu = X.mean(axis=0, keepdims=True)\n    ss_tot = np.sum((X - mu) ** 2, axis=0) + 1e-8\n    R2 = 1.0 - ss_res / ss_tot\n    return np.clip(R2, 0.0, 1.0)\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros(); D_sym.eliminate_zeros()\n    return A_sym, D_sym\n\ndef _build_daqb(Zcorr: np.ndarray, batches, k_total=48, metric='cosine',\n                delta=0.15, k_density=20, cap=2.0, rng_seed=0):\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches)\n    nB = len(cats)\n    base_cross = (nB - 1) / float(nB)\n    L, U = 0.60, 0.90\n\n    # Density proxy: distance to k_density-th NN\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * delta, L, U)\n\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(nB - 1, 1)\n\n    k_within_max = int(np.ceil((1.0 - L) * k_total))\n    k_cross_per_max = int(np.ceil(U * k_total / B_other))\n    k_max = max(k_within_max, k_cross_per_max) + 1\n\n    cat2code = {c: i for i, c in enumerate(cats)}\n    batch_codes = np.array([cat2code[b] for b in batches], dtype=int)\n    nn_models, train_idx = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_idx[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=k_max, metric=metric, algorithm='brute')\n        nn.fit(Z[mask])\n        nn_models[j] = nn\n\n    dists, idx_local = {}, {}\n    for j in range(nB):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d; idx_local[j] = ii\n\n    inbound = np.zeros(n, dtype=np.int32)\n    cap_thr = int(np.ceil(cap * k_total))\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = batch_codes[i]\n        q_within = int(q_within_tot[i])\n        q_cross_total = int(q_cross_tot[i])\n\n        other_batches = [j for j in range(nB) if j != bi]\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n        batch_scores = [(j, dists[j][i][0]) for j in other_batches]  # smaller is closer\n        batch_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[batch_scores[k % len(other_batches)][0]] += 1\n\n        # Within\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_idx[bi][ii_w[start_w:]]\n        cand_inb = inbound[globals_w]; cand_dst = d_w[start_w:]\n        order = np.lexsort((cand_dst, cand_inb))\n        taken = 0\n        for idx in order:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_thr: continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n            inbound[g] += 1; taken += 1\n            if taken >= q_within: break\n        if taken < q_within:\n            for idx in order:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= q_within: break\n\n        # Cross-batch\n        for j in other_batches:\n            qj = q_map[j]\n            if qj <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]\n            globals_c = train_idx[j][ii_c]\n            cand_inb = inbound[globals_c]; cand_dst = d_c\n            order = np.lexsort((cand_dst, cand_inb))\n            taken = 0\n            for idx in order:\n                g = int(globals_c[idx])\n                if inbound[g] >= cap_thr: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= qj: break\n            if taken < qj:\n                for idx in order:\n                    g = int(globals_c[idx])\n                    if inbound[g] < cap_thr: continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dst[idx]))\n                    inbound[g] += 1; taken += 1\n                    if taken >= qj: break\n\n    C_sym, D_sym = _symmetrize_binary_with_distances(\n        np.asarray(rows, dtype=np.int32),\n        np.asarray(cols, dtype=np.int32),\n        np.asarray(dvals, dtype=np.float32),\n        n=Z.shape[0]\n    )\n    return C_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\n# ---------------- Main ----------------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_probe = 30\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.15\n    k_density = 20\n    cap = 2.0\n    alpha_r2 = 0.25\n    emb_n_neighbors = 15\n    k_probe = 30\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # -------- Probe raw batch structure (label-free heuristic) --------\n    # Graph-style preprocessing to build a probe PCA and kNN\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    X_probe = adata.X[:, hv]\n    Z_probe = _pca_array(X_probe, n_comps=n_pcs_probe, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    # kNN on probe\n    nn = NearestNeighbors(n_neighbors=k_probe + 1, metric=metric, algorithm='brute')\n    nn.fit(Z_probe)\n    _, idx = nn.kneighbors(Z_probe, return_distance=True)\n    codes = adata.obs['batch'].astype('category').cat.codes.to_numpy()\n    same_frac = []\n    for i in range(adata.n_obs):\n        neigh = idx[i, 1:]  # drop self\n        same = (codes[neigh] == codes[i]).mean()\n        same_frac.append(same)\n    mean_same = float(np.mean(same_frac))\n\n    # Map to target_sum for embedding (coarse 3-bin policy)\n    # Very segregated (many same-batch neighbors) -> lower target_sum; already mixed -> higher target_sum\n    if mean_same >= 0.90:\n        target_sum_embed = 1e-5\n    elif mean_same <= 0.65:\n        target_sum_embed = 1e-3\n    else:\n        target_sum_embed = 1e-4\n    print(f\"[Auto-EtC] mean_same_batch_neighbors={mean_same:.3f} -> target_sum_embed={target_sum_embed}\")\n\n    # -------- Embedding (EtC, QC only): R\u00b2-FWPCA \u03b1=0.25, subset=False --------\n    ad_emb = ad.AnnData(adata.layers['counts'].copy() if 'counts' in adata.layers else adata.X.copy(),\n                        obs=adata.obs[['batch']].copy(),\n                        var=adata.var.copy())\n    sc.pp.normalize_total(ad_emb, target_sum=target_sum_embed)\n    sc.pp.log1p(ad_emb)\n    sc.pp.highly_variable_genes(ad_emb, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask = ad_emb.var['highly_variable'].to_numpy()\n    X_hvg = ad_emb.X[:, hvg_mask]\n    if sp.issparse(X_hvg):\n        X_hvg = X_hvg.toarray()\n    X_hvg = X_hvg.astype(np.float32, copy=False)\n    B_emb = _one_hot_batches(batches)\n    R2_gene = _ridge_GENE_R2(B_emb, X_hvg, l2=l2)\n    w = np.power(1.0 - R2_gene, alpha_r2).astype(np.float32)\n    X_hvg_w = X_hvg * w\n    ad_emb_pca = ad.AnnData(X_hvg_w, obs=ad_emb.obs[['batch']].copy())\n    sc.pp.pca(ad_emb_pca, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb_pca.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=ad_emb.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # -------- Graph: BRBG (\u03bbr=0.7, \u03b3_max=0.74) + DAQB (\u03b4=0.15, kd=20) --------\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2_pc = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2_pc)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = _build_daqb(Zcorr.astype(np.float32), batches=batches,\n                         k_total=k_total, metric=metric,\n                         delta=delta, k_density=k_density, cap=cap, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761537525.0868506,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7299589005756635,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-EtC] mean_same_batch_neighbors=0.969 -> target_sum_embed=1e-05\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dc1c774a-ad0d-4149-8114-0ab718543d8e/result_human.h5ad\n\nRESULT_UUID: dc1c774a-ad0d-4149-8114-0ab718543d8e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.585  ASW_label: 0.104  ARI: 0.726  NMI: 0.676\n  Graph_conn: 0.960  kBET: 0.833  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.541\n\nRaw Scores (before normalization):\n  ASW_batch: 0.797084  ASW_label: 0.471410  ARI: 0.725538  NMI: 0.676484\n  Graph_conn: 0.961152  kBET: 0.794628  iLISI: 0.917918  cLISI: 0.987156\n  PCR: 0.999937  Cell_cycle: 0.470124",
+        "ASW_batch": [
+          "0.585",
+          0.5850631539037351
+        ],
+        "ASW_label": [
+          "0.104",
+          0.10370552719090972
+        ],
+        "ARI": [
+          "0.726",
+          0.7255752720851602
+        ],
+        "NMI": [
+          "0.676",
+          0.6763928852762601
+        ],
+        "Graph_conn": [
+          "0.960",
+          0.9604813299409033
+        ],
+        "kBET": [
+          "0.833",
+          0.8334660316872752
+        ],
+        "iLISI": [
+          "0.918",
+          0.9179179179179178
+        ],
+        "cLISI": [
+          "0.956",
+          0.9559093669733115
+        ],
+        "PCR": [
+          "1.000",
+          0.9999370579897545
+        ],
+        "Cell_cycle": [
+          "0.541",
+          0.5411404627914072
+        ]
+      },
+      "evaluation_timestamp": 1761537846.2432,
+      "evaluation_datetime": "2025-10-27T12:04:06.243202",
+      "sort_key": [
+        0.7299589005756635
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7299589005756635,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761537846.311533,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011EtC: Data\u2011driven target_sum selection for R\u00b2\u2011FWPCA \u03b1=0.25 (QC embedding) with fixed BRBG+DAQB' (ID: 718) has been evaluated.\n\n**Score:** 0.7299589005756635\n**ASW_batch:** 0.585\n**ASW_label:** 0.104\n**ARI:** 0.726\n**NMI:** 0.676\n**Graph_conn:** 0.960\n**kBET:** 0.833\n**iLISI:** 0.918\n**cLISI:** 0.956\n**PCR:** 1.000\n**Cell_cycle:** 0.541\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.585  ASW_label: 0.104  ARI: 0.726  NMI: 0.676\n  Graph_conn: 0.960  kBET: 0.833  iLISI: 0.918  cLISI: 0.956\n  PCR: 1.000  Cell_cycle: 0.541\n\nRaw Scores (before normalization):\n  ASW_batch: 0.797084  ASW_label: 0.471410  ARI: 0.725538  NMI: 0.676484\n  Graph_conn: 0.961152  kBET: 0.794628  iLISI: 0.917918  cLISI: 0.987156\n  PCR: 0.999937  Cell_cycle: 0.470124\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-EtC] mean_same_batch_neighbors=0.969 -> target_sum_embed=1e-05\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dc1c774a-ad0d-4149-8114-0ab718543d8e/result_human.h5ad\n\nRESULT_UUID: dc1c774a-ad0d-4149-8114-0ab718543d8e\n\n\nSTDERR:\n\n```"
+  }
+}

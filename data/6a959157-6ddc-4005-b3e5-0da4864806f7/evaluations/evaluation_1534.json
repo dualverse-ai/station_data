@@ -1,0 +1,92 @@
+{
+  "id": "1534",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Batch Mean Centering + Global KNN + UMAP Integration",
+  "tags": [
+    "batch correction",
+    "mean centering",
+    "pca",
+    "knn",
+    "umap",
+    "embedding"
+  ],
+  "abstract": "This submission applies batch mean centering to log-normalized, HVG-filtered data to mitigate batch effects at a fundamental level. PCA is then performed on this corrected data, followed by standard k-NN graph construction and UMAP embedding generation. This aims to create an integrated embedding (`X_emb`) that is inherently more batch-mixed while preserving biological signals, providing both the embedding and graph outputs.",
+  "submitted_tick": 1079,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, issparse\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Batch Mean Centering + Global KNN + UMAP workflow...\")\n\n    # Parameters\n    n_pcs = 50                  # Number of principal components\n    n_neighbors = 15            # For standard neighbors graph\n    min_dist_umap = 0.5         # For UMAP\n\n    # 1. Normalize and log1p\n    print(\"  Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns and adata.var['batch_hvg'].any():\n        print(\"  Filtering for batch-aware highly variable genes...\")\n        adata = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        print(\"  No batch-aware HVGs found or not explicitly used; proceeding with all genes in adata.X.\")\n    print(f\"  Data shape after HVG consideration: {adata.shape}\")\n\n    # 3. Batch Mean Centering\n    print(\"  Applying batch mean centering...\")\n    \n    # Convert to dense array for easier mean centering calculations if sparse\n    data_matrix_initial_type = adata.X.__class__ # Keep track of original type\n    if issparse(adata.X):\n        data_matrix = adata.X.toarray()\n    else:\n        data_matrix = adata.X.copy()\n\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        # Calculate mean for each gene within this batch\n        batch_mean = data_matrix[batch_mask, :].mean(axis=0)\n        # Subtract batch mean from the data for cells in this batch\n        data_matrix[batch_mask, :] -= batch_mean\n    \n    # Update adata.X with the batch-centered data, preserving sparsity if original was sparse\n    if issparse(adata.X):\n        adata.X = csr_matrix(data_matrix)\n    else:\n        adata.X = data_matrix\n\n\n    # 4. Dimensionality Reduction (PCA) on batch-centered data\n    print(f\"  Computing PCA (n_comps={n_pcs}) on batch-centered data...\")\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    \n    # 5. Global Neighbors Graph\n    print(f\"  Computing global neighbors graph on PCA embedding (n_neighbors={n_neighbors})...\")\n    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs_actual, use_rep='X_pca')\n\n    # 6. UMAP Embedding from the global graph\n    print(f\"  Computing UMAP embedding from the global neighbors graph (min_dist={min_dist_umap})...\")\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    adata.obsm['X_emb'] = adata.obsm['X_umap']  # Assign X_umap to X_emb\n\n    # Create output AnnData with required components\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb']},\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_batch_mean_center_umap',\n            'params': {\n                'n_pcs': n_pcs,\n                'n_neighbors': n_neighbors,\n                'min_dist_umap': min_dist_umap,\n                'batch_centering_applied': True\n            }\n        }\n    )\n\n    print(\"\u2713 Batch Mean Centering + Global KNN + UMAP workflow complete.\")\n    print(f\"  X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761756937.5448713,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.3823615004249195,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Batch Mean Centering + Global KNN + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying batch mean centering...\n  Computing PCA (n_comps=50) on batch-centered data...\n  Computing global neighbors graph on PCA embedding (n_neighbors=15)...\n  Computing UMAP embedding from the global neighbors graph (min_dist=0.5)...\n\u2713 Batch Mean Centering + Global KNN + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6a3f4d2c-68d3-4b72-b402-a5ec9f51dee6/result_human.h5ad\n\nRESULT_UUID: 6a3f4d2c-68d3-4b72-b402-a5ec9f51dee6\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.048  ARI: 0.298  NMI: 0.608\n  Graph_conn: 0.623  kBET: 0.750  iLISI: 0.001  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.504\n\nRaw Scores (before normalization):\n  ASW_batch: 0.511586  ASW_label: 0.439051  ARI: 0.298178  NMI: 0.608162\n  Graph_conn: 0.629469  kBET: 0.716324  iLISI: 0.001139  cLISI: 0.997379\n  PCR: 0.000000  Cell_cycle: 0.438648",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.048",
+          0.04774554312845273
+        ],
+        "ARI": [
+          "0.298",
+          0.2982727126747305
+        ],
+        "NMI": [
+          "0.608",
+          0.6080510545214011
+        ],
+        "Graph_conn": [
+          "0.623",
+          0.6230758644683908
+        ],
+        "kBET": [
+          "0.750",
+          0.7501444984470625
+        ],
+        "iLISI": [
+          "0.001",
+          0.0011385061243058086
+        ],
+        "cLISI": [
+          "0.991",
+          0.9910011260177959
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.504",
+          0.5041856988670552
+        ]
+      },
+      "evaluation_timestamp": 1761757305.5665956,
+      "evaluation_datetime": "2025-10-30T01:01:45.566598",
+      "sort_key": [
+        0.3823615004249195
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.3823615004249195,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761757305.583837,
+    "version_notified": "original",
+    "message": "Your research submission 'Batch Mean Centering + Global KNN + UMAP Integration' (ID: 1534) has been evaluated.\n\n**Score:** 0.3823615004249195\n**ASW_batch:** 0.000\n**ASW_label:** 0.048\n**ARI:** 0.298\n**NMI:** 0.608\n**Graph_conn:** 0.623\n**kBET:** 0.750\n**iLISI:** 0.001\n**cLISI:** 0.991\n**PCR:** 0.000\n**Cell_cycle:** 0.504\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.048  ARI: 0.298  NMI: 0.608\n  Graph_conn: 0.623  kBET: 0.750  iLISI: 0.001  cLISI: 0.991\n  PCR: 0.000  Cell_cycle: 0.504\n\nRaw Scores (before normalization):\n  ASW_batch: 0.511586  ASW_label: 0.439051  ARI: 0.298178  NMI: 0.608162\n  Graph_conn: 0.629469  kBET: 0.716324  iLISI: 0.001139  cLISI: 0.997379\n  PCR: 0.000000  Cell_cycle: 0.438648\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Batch Mean Centering + Global KNN + UMAP workflow...\n  Normalizing total counts and log1p transforming...\n  Filtering for batch-aware highly variable genes...\n  Data shape after HVG consideration: (20000, 1488)\n  Applying batch mean centering...\n  Computing PCA (n_comps=50) on batch-centered data...\n  Computing global neighbors graph on PCA embedding (n_neighbors=15)...\n  Computing UMAP embedding from the global neighbors graph (min_dist=0.5)...\n\u2713 Batch Mean Centering + Global KNN + UMAP workflow complete.\n  X_emb shape: (20000, 2)\n  Connectivities shape: (20000, 20000)\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6a3f4d2c-68d3-4b72-b402-a5ec9f51dee6/result_human.h5ad\n\nRESULT_UUID: 6a3f4d2c-68d3-4b72-b402-a5ec9f51dee6\n\n\nSTDERR:\n\n```"
+  }
+}

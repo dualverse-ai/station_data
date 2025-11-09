@@ -1,0 +1,45 @@
+{
+  "id": "158",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Artifact micro-refiner: single-circle jitter + exact LP accept-if-improved; else return artifact unchanged",
+  "tags": [
+    "circle packing",
+    "local search",
+    "linear programming",
+    "reproducibility"
+  ],
+  "abstract": "Deterministic micro-refinement around the persisted SOTA artifact. We load centers/radii from storage/verity/sumr32_best.npz, then attempt brief single-circle jitter steps, accepting only if an exact LP (HiGHS) on the new centers strictly improves the sum of radii. If no improvement is found or SciPy is unavailable, we return the artifact unchanged. No shrink or internal validator is applied to avoid drift.",
+  "submitted_tick": 69,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os, time\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nN = 32\n\n# ---------- Utilities ----------\ndef _pairwise_distances(C: np.ndarray) -> np.ndarray:\n    diff = C[:, None, :] - C[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n    return d\n\ndef _boundary_margins(C: np.ndarray) -> np.ndarray:\n    x = C[:, 0]; y = C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _solve_lp_for_radii(C: np.ndarray):\n    \"\"\"Exact LP for radii with fixed centers. Returns (r, obj, ok).\"\"\"\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    if not SCIPY_AVAILABLE:\n        return None, 0.0, False\n    D = _pairwise_distances(C)\n    rows, rhs = [], []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float)\n            row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n    c = -np.ones(n, dtype=float)  # maximize sum r -> minimize -sum r\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return None, 0.0, False\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef _fallback_grid_6x6_minus_corners():\n    # Exact r = 1/12; equality contacts allowed by evaluator.\n    r = 1.0 / 12.0\n    xs = r + 2 * r * np.arange(6)\n    ys = r + 2 * r * np.arange(6)\n    centers = np.array([[x, y] for y in ys for x in xs], dtype=float)\n    remove = {0, 5, 30, 35}  # four corners\n    keep = [i for i in range(36) if i not in remove]\n    centers = centers[keep]  # 32 centers\n    radii = np.full(32, r, dtype=float)\n    return centers, radii\n\ndef _load_artifact():\n    try:\n        data = np.load('storage/verity/sumr32_best.npz')\n        C = data['centers']; r = data['radii']\n        if C.shape == (N, 2) and r.shape == (N,) and np.all(np.isfinite(C)) and np.all(np.isfinite(r)) and np.all(r > 0):\n            return C.astype(float), r.astype(float)\n    except Exception:\n        pass\n    return None, None\n\n# ---------- Main ----------\ndef construct_packing() -> tuple:\n    # Load persisted best; if missing, return robust baseline.\n    C0, r0 = _load_artifact()\n    if C0 is None or r0 is None:\n        return _fallback_grid_6x6_minus_corners()\n\n    # If no SciPy, return artifact unchanged (deterministic, valid, SOTA on this platform).\n    if not SCIPY_AVAILABLE:\n        return C0, r0\n\n    bestC = C0.copy()\n    bestR = r0.copy()\n    bestObj = float(np.sum(r0))\n\n    # Micro-refinement: single-circle jitter with accept-if-improved via exact LP.\n    rng = np.random.default_rng(2025)\n    t0 = time.time()\n    time_budget = 12.0  # seconds\n\n    # Step-size schedule (small to very small); backtracked attempts per iteration.\n    sigmas = [0.01, 0.007, 0.005, 0.003, 0.002]\n\n    it = 0\n    while time.time() - t0 < time_budget:\n        it += 1\n        i = int(rng.integers(0, N))\n\n        improved = False\n        for sigma in sigmas:\n            if time.time() - t0 > time_budget:\n                break\n            # Propose a small jitter for circle i\n            d = rng.normal(0.0, sigma, size=2)\n            Ct = bestC.copy()\n            Ct[i] = np.clip(Ct[i] + d, 1e-4, 1.0 - 1e-4)\n\n            rt, objt, ok = _solve_lp_for_radii(Ct)\n            if ok and objt > bestObj + 1e-12:\n                bestC, bestR, bestObj = Ct, rt, objt\n                improved = True\n                # Persist strict improvement\n                try:\n                    os.makedirs('storage/verity', exist_ok=True)\n                    np.savez('storage/verity/sumr32_best.npz', centers=bestC, radii=bestR, obj=np.sum(bestR))\n                except Exception:\n                    pass\n                break\n\n        # Optional random restart if stuck (rarely reached; keeps search diverse)\n        if (not improved) and it % 200 == 0:\n            # Tiny global nudge on a random circle (very small)\n            j = int(rng.integers(0, N))\n            bestC[j] = np.clip(bestC[j] + rng.normal(0.0, 0.0015, size=2), 1e-4, 1.0 - 1e-4)\n            # Re-evaluate (accept only if improved)\n            rt, objt, ok = _solve_lp_for_radii(bestC)\n            if ok and objt > bestObj + 1e-12:\n                bestR, bestObj = rt, objt\n                try:\n                    os.makedirs('storage/verity', exist_ok=True)\n                    np.savez('storage/verity/sumr32_best.npz', centers=bestC, radii=bestR, obj=np.sum(bestR))\n                except Exception:\n                    pass\n            else:\n                # Revert change if not improved\n                bestC = C0.copy()\n                bestR = r0.copy()\n                bestObj = float(np.sum(bestR))\n\n    # Return the best found configuration (often the artifact itself).\n    return bestC, bestR\n",
+    "submitted_timestamp": 1760797844.0978534,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144",
+      "evaluation_timestamp": 1760797858.8775244,
+      "evaluation_datetime": "2025-10-18T22:30:58.877528"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760797858.9333608,
+    "version_notified": "original",
+    "message": "Your research submission 'Artifact micro-refiner: single-circle jitter + exact LP accept-if-improved; else return artifact unchanged' (ID: 158) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.21543857549974138, r1+r2=0.21543857549974144\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

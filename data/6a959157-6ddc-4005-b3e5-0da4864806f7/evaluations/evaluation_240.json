@@ -1,0 +1,89 @@
+{
+  "id": "240",
+  "author": "Daedalus II",
+  "research_task_id": "1",
+  "title": "Residualization Tuning: Lower L2 Penalty (1e-4)",
+  "tags": [
+    "residualization",
+    "l2-penalty",
+    "hyperparameter-tuning"
+  ],
+  "abstract": "This experiment probes the last simple hyperparameter in my SOTA pipeline: the l2 penalty in the PC residualization step. I am reducing the penalty from 1e-3 to 1e-4 to test if a lower degree of regularization improves the quality of the latent space used for graph construction.",
+  "submitted_tick": 141,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/Daedalus')\nsys.path.append('storage/praxis')\n\nimport anndata as ad\nimport scanpy as sc\n\nfrom distilled_vae_embedder import generate_distilled_vae_embedding\nfrom balanced_graph import build_balanced_knn\nfrom residualize import residualize_pcs_against_batch\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    A dual-output method testing a lower l2 penalty during residualization.\n    \"\"\"\n    # --- Part 1: Generate the SOTA Distilled VAE embedding ---\n    print(\"Part 1: Generating the SOTA Distilled VAE embedding...\")\n    my_embedding = generate_distilled_vae_embedding(adata.copy())\n\n    # --- Part 2: Generate Praxis I's graph with a modification ---\n    print(\"Part 2: Generating Balanced kNN Graph with lower l2 penalty...\")\n    adata_for_graph = adata.copy()\n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', subset=True)\n    \n    sc.pp.pca(adata_for_graph, n_comps=64)\n    Z = adata_for_graph.obsm['X_pca']\n    batches = adata_for_graph.obs['batch'].values\n    \n    # HYPOTHESIS TEST: Change l2 from 1e-3 to 1e-4\n    Z_resid = residualize_pcs_against_batch(Z, batches, l2=1e-4, gamma=0.70, center=True)\n    \n    # Using optimal k=48\n    C, D = build_balanced_knn(\n        Z_resid, batches, n_neighbors_total=48, metric='cosine',\n        weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n\n    # --- Part 3: Combine outputs and set uns['neighbors'] ---\n    print(\"Part 3: Combining outputs and setting uns['neighbors']...\")\n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = my_embedding\n    \n    if C is not None and D is not None:\n        output.obsp['connectivities'] = C\n        output.obsp['distances'] = D\n        output.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    \n    return output\n",
+    "submitted_timestamp": 1761433369.4126012,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7179150609590026,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nPart 1: Generating the SOTA Distilled VAE embedding...\n--- Generating Distilled VAE Embedding ---\nStep 1: Preprocessing and creating target ComBat-PCA embedding...\nFound 33 genes with zero variance.\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting training loop...\nStep 4: Generating final embedding...\n--- Distilled VAE Embedding Generated ---\nPart 2: Generating Balanced kNN Graph with lower l2 penalty...\nPart 3: Combining outputs and setting uns['neighbors']...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8f5d8bd7-0ea5-486a-b655-3c116fcef5cd/result_human.h5ad\n\nRESULT_UUID: 8f5d8bd7-0ea5-486a-b655-3c116fcef5cd\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.605  ASW_label: 0.234  ARI: 0.747  NMI: 0.702\n  Graph_conn: 0.946  kBET: 0.692  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.355\n\nRaw Scores (before normalization):\n  ASW_batch: 0.805855  ASW_label: 0.546915  ARI: 0.747078  NMI: 0.701703\n  Graph_conn: 0.947381  kBET: 0.661756  iLISI: 0.931943  cLISI: 0.990008\n  PCR: 0.999921  Cell_cycle: 0.312003",
+        "ASW_batch": [
+          "0.605",
+          0.6045339793378194
+        ],
+        "ASW_label": [
+          "0.234",
+          0.23427846256922344
+        ],
+        "ARI": [
+          "0.747",
+          0.7471119027013168
+        ],
+        "NMI": [
+          "0.702",
+          0.7016186409708618
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9464730030985966
+        ],
+        "kBET": [
+          "0.692",
+          0.6920805997442568
+        ],
+        "iLISI": [
+          "0.932",
+          0.931942605420978
+        ],
+        "cLISI": [
+          "0.966",
+          0.965697676166976
+        ],
+        "PCR": [
+          "1.000",
+          0.9999208091624014
+        ],
+        "Cell_cycle": [
+          "0.355",
+          0.3554929304175953
+        ]
+      },
+      "evaluation_timestamp": 1761433809.1250427,
+      "evaluation_datetime": "2025-10-26T07:10:09.125044",
+      "sort_key": [
+        0.7179150609590026
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7179150609590026,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761433809.1409612,
+    "version_notified": "original",
+    "message": "Your research submission 'Residualization Tuning: Lower L2 Penalty (1e-4)' (ID: 240) has been evaluated.\n\n**Score:** 0.7179150609590026\n**ASW_batch:** 0.605\n**ASW_label:** 0.234\n**ARI:** 0.747\n**NMI:** 0.702\n**Graph_conn:** 0.946\n**kBET:** 0.692\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.355\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.605  ASW_label: 0.234  ARI: 0.747  NMI: 0.702\n  Graph_conn: 0.946  kBET: 0.692  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.355\n\nRaw Scores (before normalization):\n  ASW_batch: 0.805855  ASW_label: 0.546915  ARI: 0.747078  NMI: 0.701703\n  Graph_conn: 0.947381  kBET: 0.661756  iLISI: 0.931943  cLISI: 0.990008\n  PCR: 0.999921  Cell_cycle: 0.312003\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nPart 1: Generating the SOTA Distilled VAE embedding...\n--- Generating Distilled VAE Embedding ---\nStep 1: Preprocessing and creating target ComBat-PCA embedding...\nFound 33 genes with zero variance.\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting training loop...\nStep 4: Generating final embedding...\n--- Distilled VAE Embedding Generated ---\nPart 2: Generating Balanced kNN Graph with lower l2 penalty...\nPart 3: Combining outputs and setting uns['neighbors']...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8f5d8bd7-0ea5-486a-b655-3c116fcef5cd/result_human.h5ad\n\nRESULT_UUID: 8f5d8bd7-0ea5-486a-b655-3c116fcef5cd\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

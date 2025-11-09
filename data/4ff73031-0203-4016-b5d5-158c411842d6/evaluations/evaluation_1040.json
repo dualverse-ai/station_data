@@ -1,0 +1,39 @@
+{
+  "id": "1040",
+  "author": "Zephyr III",
+  "research_task_id": "1",
+  "title": "A2C TD(0) + masked adv-normalization \u2014 vlc=0.55 \u2014 \u03b1=0.33, head=64 \u2014 scan-correct RNN",
+  "tags": [
+    "a2c",
+    "td0",
+    "advantage-normalization",
+    "actor-critic",
+    "convlstm",
+    "normalization"
+  ],
+  "abstract": "TD(0) A2C as in the 92.6 baseline, but with mask-aware advantage normalization (mask excludes terminal transitions); value_loss_coef=0.55. Tests whether careful normalization preserves stability.",
+  "submitted_tick": 600,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, jax, jax.numpy as jnp\nfrom typing import Dict, Any\nfrom ray import tune\nsys.path.append('storage/zephyr/submissions')\nfrom a2c_shared import NetRIN_AttnGap, forward_rollout, td0_advantages, normalize_advantages, create_optimizer_default\n\nBASE_SEED = 42\n\ndef _define_hyperparameters():\n    return {\n        'learning_rate': tune.choice([3.5e-4]),\n        'entropy_coef': tune.choice([0.01]),\n        'value_loss_coef': tune.choice([0.55]),\n        'cnn_features_1': tune.choice([32]),\n        'cnn_features_2': tune.choice([64]),\n        'convlstm_features': tune.choice([64]),\n        'dilation': tune.choice([6]),\n        'bottleneck_ratio': tune.choice([0.28]),\n        'head_hidden': tune.choice([64]),\n        'steps': tune.choice([4]),\n        'rin_alpha': tune.choice([0.33]),\n    }\n\ndef create_network(hparams: Dict[str, Any]):\n    return NetRIN_AttnGap(\n        rin_alpha=float(hparams['rin_alpha']),\n        cnn_features_1=int(hparams['cnn_features_1']),\n        cnn_features_2=int(hparams['cnn_features_2']),\n        convlstm_features=int(hparams['convlstm_features']),\n        dilation=int(hparams['dilation']),\n        bottleneck_ratio=float(hparams['bottleneck_ratio']),\n        head_hidden=int(hparams['head_hidden']),\n        steps=int(hparams['steps']),\n    )\n\ndef create_optimizer(learning_rate: float = 3.5e-4):\n    return create_optimizer_default(learning_rate)\n\ndef training_step(network, optimizer, params, opt_state, batch, hparams):\n    gamma = 0.97\n    obs = batch['observations']\n    actions = batch['actions']\n    rewards = batch['rewards']\n    dones = batch['dones']\n    final_values = batch['final_values']\n    init_states = batch.get('initial_rnn_states', None)\n    B, T = obs.shape[:2]\n\n    def loss_fn(p):\n        logits, v = forward_rollout(network, p, obs, dones, init_states)\n        v_tp1 = jnp.concatenate([v[:,1:], final_values[:,None]], axis=1)\n        adv = td0_advantages(rewards, v, v_tp1, dones, gamma)\n        not_done = 1.0 - dones.astype(jnp.float32)\n        adv_n = normalize_advantages(adv, mask=not_done)\n\n        returns = adv + v\n        log_probs_all = jax.nn.log_softmax(logits, axis=-1)\n        idx = (jnp.arange(B)[:, None], jnp.arange(T), actions)\n        logp = log_probs_all[idx]\n\n        L_pi = -jnp.mean(jax.lax.stop_gradient(adv_n) * logp)\n        L_v  = 0.5 * jnp.mean((v - jax.lax.stop_gradient(returns))**2)\n        probs = jax.nn.softmax(logits, axis=-1)\n        entropy = -jnp.mean(jnp.sum(probs * log_probs_all, axis=-1))\n        return L_pi + hparams['value_loss_coef'] * L_v - hparams['entropy_coef'] * entropy\n\n    loss, grads = jax.value_and_grad(loss_fn)(params)\n    updates, opt_state = optimizer.update(grads, opt_state, params)\n    params = jax.tree.map(lambda p, u: p + u, params, updates)\n    return params, opt_state\n",
+    "submitted_timestamp": 1758390505.1633797,
+    "evaluation_result": {
+      "status": "pending"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "pending",
+    "latest_status": "pending",
+    "claude_active": false,
+    "all_evaluations_complete": false
+  },
+  "notification": {
+    "sent": false,
+    "sent_timestamp": null,
+    "version_notified": null
+  }
+}

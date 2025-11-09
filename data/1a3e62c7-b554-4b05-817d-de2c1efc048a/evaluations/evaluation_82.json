@@ -1,0 +1,47 @@
+{
+  "id": "82",
+  "author": "Episteme I",
+  "research_task_id": "1",
+  "title": "Vectorized Multi-Start for Performance",
+  "tags": [
+    "optimization",
+    "scipy",
+    "slsqp",
+    "multi-start",
+    "vectorized",
+    "performance"
+  ],
+  "abstract": "This submission introduces a significant performance upgrade to the SOTA multi-start methodology. The core `compute_max_radii` function has been completely refactored to use vectorized NumPy operations instead of slow Python loops. This performance gain is leveraged to run a more aggressive search (10 starts, 150 iterations) which previously timed out, aiming to find a new SOTA score.",
+  "submitted_tick": 43,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef compute_max_radii_vectorized(centers):\n    \"\"\"\n    Vectorized implementation to compute maximum possible radii.\n    \"\"\"\n    n = centers.shape[0]\n    epsilon = 1e-9\n    safety_margin = 1 - 1e-7\n\n    # Step 1: Vectorized boundary check\n    radii = np.min(np.hstack([centers, 1 - centers]), axis=1)\n\n    # Step 2: Iteratively shrink radii using vectorized operations\n    for _ in range(25): # A few more iterations for stability with vectorization\n        # Calculate pairwise distance matrix\n        diffs = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]\n        dist_matrix = np.sqrt(np.sum(diffs**2, axis=-1))\n        \n        # Calculate radii sum matrix\n        radii_sum_matrix = radii[:, np.newaxis] + radii[np.newaxis, :]\n        \n        # Find overlaps, ignoring self-comparisons\n        np.fill_diagonal(dist_matrix, np.inf)\n        overlap_mask = dist_matrix < radii_sum_matrix\n        \n        if not np.any(overlap_mask):\n            break # Converged\n            \n        # Calculate scaling factors for all pairs\n        # Use np.divide to handle potential division by zero, though unlikely here\n        scale_matrix = np.divide(dist_matrix, radii_sum_matrix, where=radii_sum_matrix!=0)\n        \n        # We only care about the scaling factors for overlapping circles\n        # Set non-overlapping pairs to 1.0 so they don't affect the minimum\n        scale_matrix[~overlap_mask] = 1.0\n        \n        # For each circle, find the minimum scaling factor required to resolve its worst overlap\n        min_scale_factors = np.min(scale_matrix, axis=1)\n        \n        # Apply the scaling factor to all radii simultaneously\n        radii *= min_scale_factors * safety_margin\n    \n    return np.maximum(radii, 0)\n\ndef construct_packing():\n    \"\"\"\n    Implements a more aggressive multi-start strategy thanks to vectorization.\n    \"\"\"\n    n = 26\n    # With a faster function, we can afford a more thorough search\n    num_starts = 10\n    max_iter_per_start = 150\n    noise_level = 0.015 # Slightly more noise\n    \n    np.random.seed(42)\n    \n    base_centers = np.zeros((n, 2))\n    base_centers[0] = [0.5, 0.5]\n    for i in range(8):\n        angle = 2 * np.pi * i / 8\n        base_centers[i + 1] = [0.5 + 0.25 * np.cos(angle), 0.5 + 0.25 * np.sin(angle)]\n    for i in range(16):\n        angle = 2 * np.pi * i / 16\n        base_centers[i + 9] = [0.5 + 0.4 * np.cos(angle), 0.5 + 0.4 * np.sin(angle)]\n    base_centers[25] = [0.5, 0.7]\n    base_centers = np.clip(base_centers, 0.05, 0.95)\n\n    def objective_function(center_vars):\n        centers = center_vars.reshape((n, 2))\n        if np.any(centers < 0) or np.any(centers > 1):\n            return 1000\n        # Use the new vectorized function\n        radii = compute_max_radii_vectorized(centers)\n        return -np.sum(radii)\n\n    best_score = -np.inf\n    best_packing = (None, None)\n    \n    for i in range(num_starts):\n        noise = np.random.randn(n, 2) * noise_level\n        initial_centers = base_centers + noise\n        initial_centers = np.clip(initial_centers, 0, 1)\n        \n        x0 = initial_centers.flatten()\n        bounds = [(0, 1) for _ in range(2 * n)]\n        \n        result = minimize(objective_function, x0, method='SLSQP', bounds=bounds, options={'maxiter': max_iter_per_start, 'ftol': 1e-8})\n        \n        current_score = -result.fun\n        \n        if current_score > best_score:\n            best_score = current_score\n            optimized_centers = result.x.reshape((n, 2))\n            final_radii = compute_max_radii_vectorized(optimized_centers)\n            best_packing = (optimized_centers, final_radii)\n            \n    return best_packing\n",
+    "submitted_timestamp": 1760864604.655397,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.168896476188889,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.168896",
+      "evaluation_timestamp": 1760864629.4155285,
+      "evaluation_datetime": "2025-10-19T17:03:49.415531"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.168896476188889,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760864629.4363008,
+    "version_notified": "original",
+    "message": "Your research submission 'Vectorized Multi-Start for Performance' (ID: 82) has been evaluated.\n\n**Score:** 2.168896476188889\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.168896\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

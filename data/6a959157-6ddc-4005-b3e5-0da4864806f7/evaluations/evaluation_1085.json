@@ -1,0 +1,91 @@
+{
+  "id": "1085",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Latent Space Standardization (Mean and Variance Correction)",
+  "tags": [
+    "pca",
+    "latent-space",
+    "standardization",
+    "variance-correction",
+    "embedding"
+  ],
+  "abstract": "This method corrects for batch effects by standardizing the distribution of each batch in PCA space. For each principal component, it adjusts the coordinates of cells within a batch to match the global mean and variance. This corrects for both location (mean) and scale (variance) differences between batches, aiming to achieve a more thorough and effective mixing of cell distributions.",
+  "submitted_tick": 705,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nLatent Space Standardization (Mean and Variance Correction)\n\nThis method corrects for batch effects by standardizing both the mean (1st moment)\nand variance (2nd moment) of each batch's distribution within the PCA latent space.\n\nThe algorithm is as follows:\n1. Standard normalization and PCA are performed.\n2. For each principal component axis:\n   a. The global mean and standard deviation are computed.\n   b. For each batch, its local mean and standard deviation are computed.\n   c. Each cell's coordinate is transformed:\n      new = ((old - batch_mean) / batch_std) * global_std + global_mean\n3. The resulting corrected PCA embedding, where all batches are aligned in both\n   location and scale, is returned.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Performs batch correction by standardizing batch distributions in PCA space.\n    \"\"\"\n    print(\"Latent Space Standardization: Starting...\")\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing initial PCA...\")\n    \n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    print(f\"  [Stage 1] Initial PCA computed with shape {X_pca.shape}.\")\n\n    # === STAGE 2: Per-PC Standardization ===\n    print(\"  [Stage 2] Performing per-PC, per-batch standardization...\")\n    \n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    # Iterate over each principal component (column)\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        \n        # Calculate global statistics for this PC\n        global_mean = pc_vector.mean()\n        global_std = pc_vector.std()\n\n        # Correct each batch for this PC\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc_vector = pc_vector[batch_mask]\n                \n                batch_mean = batch_pc_vector.mean()\n                batch_std = batch_pc_vector.std()\n                \n                # Avoid division by zero for batches with no variance on a PC\n                if batch_std < 1e-8:\n                    batch_std = 1.0\n\n                # Standardize the batch vector (z-score)\n                standardized_vector = (batch_pc_vector - batch_mean) / batch_std\n                \n                # Rescale to global distribution\n                rescaled_vector = standardized_vector * global_std + global_mean\n                \n                # Place the corrected values into the final matrix\n                X_pca_corrected[batch_mask, pc_idx] = rescaled_vector\n\n    print(\"  [Stage 2] Standardization complete.\")\n\n    # === STAGE 3: Create Output AnnData ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={\n            'X_emb': X_pca_corrected.astype(np.float32)\n        },\n        uns={\n            'method_id': 'pca_standardization'\n        }\n    )\n\n    print(f\"\u2713 Latent Space Standardization complete. Embedding shape: {X_pca_corrected.shape}\")\n    \n    return output\n",
+    "submitted_timestamp": 1761636453.015824,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.617286746835736,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLatent Space Standardization: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Performing per-PC, per-batch standardization...\n  [Stage 2] Standardization complete.\n\u2713 Latent Space Standardization complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/fdc40cfa-19c6-418b-ba82-8db0cc2c9b0f/result_human.h5ad\n\nRESULT_UUID: fdc40cfa-19c6-418b-ba82-8db0cc2c9b0f\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.220  ARI: 0.589  NMI: 0.685\n  Graph_conn: 0.873  kBET: 0.776  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.368\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825347  ASW_label: 0.538687  ARI: 0.588685  NMI: 0.685114\n  Graph_conn: 0.875638  kBET: 0.740199  iLISI: 0.023401  cLISI: 0.997247\n  PCR: 1.000000  Cell_cycle: 0.322871",
+        "ASW_batch": [
+          "0.648",
+          0.6478053673715649
+        ],
+        "ASW_label": [
+          "0.220",
+          0.2200500274744144
+        ],
+        "ARI": [
+          "0.589",
+          0.5887412101594879
+        ],
+        "NMI": [
+          "0.685",
+          0.6850253198376164
+        ],
+        "Graph_conn": [
+          "0.873",
+          0.8734918304672281
+        ],
+        "kBET": [
+          "0.776",
+          0.7755496749642394
+        ],
+        "iLISI": [
+          "0.023",
+          0.023400764485767
+        ],
+        "cLISI": [
+          "0.991",
+          0.9905502664649108
+        ],
+        "PCR": [
+          "1.000",
+          0.9999998071015169
+        ],
+        "Cell_cycle": [
+          "0.368",
+          0.3682532000306134
+        ]
+      },
+      "evaluation_timestamp": 1761636754.8780723,
+      "evaluation_datetime": "2025-10-28T15:32:34.878073",
+      "sort_key": [
+        0.617286746835736
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.617286746835736,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761636754.899461,
+    "version_notified": "original",
+    "message": "Your research submission 'Latent Space Standardization (Mean and Variance Correction)' (ID: 1085) has been evaluated.\n\n**Score:** 0.617286746835736\n**ASW_batch:** 0.648\n**ASW_label:** 0.220\n**ARI:** 0.589\n**NMI:** 0.685\n**Graph_conn:** 0.873\n**kBET:** 0.776\n**iLISI:** 0.023\n**cLISI:** 0.991\n**PCR:** 1.000\n**Cell_cycle:** 0.368\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.220  ARI: 0.589  NMI: 0.685\n  Graph_conn: 0.873  kBET: 0.776  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.368\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825347  ASW_label: 0.538687  ARI: 0.588685  NMI: 0.685114\n  Graph_conn: 0.875638  kBET: 0.740199  iLISI: 0.023401  cLISI: 0.997247\n  PCR: 1.000000  Cell_cycle: 0.322871\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLatent Space Standardization: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Performing per-PC, per-batch standardization...\n  [Stage 2] Standardization complete.\n\u2713 Latent Space Standardization complete. Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/fdc40cfa-19c6-418b-ba82-8db0cc2c9b0f/result_human.h5ad\n\nRESULT_UUID: fdc40cfa-19c6-418b-ba82-8db0cc2c9b0f\n\n\nSTDERR:\n\n```"
+  }
+}

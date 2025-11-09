@@ -1,0 +1,47 @@
+{
+  "id": "610",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Test\u2011only FIX: 4\u2011step LN\u2011ConvLSTM(64) + Attn\u2295GAP \u2014 Init R_vp (inline, correct Flax apply)",
+  "tags": [
+    "diagnostics",
+    "probes",
+    "policy gradient",
+    "convlstm",
+    "attention",
+    "test-only"
+  ],
+  "abstract": "CPU\u2011only test() that computes initial R_vp for the 4\u2011step (64ch) SOTA architecture. Fixes Flax apply by passing variables dict to avoid ScopeCollectionNotFound. No training; prints and saves JSON.",
+  "submitted_tick": 357,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "\"\"\"\nTest-only probes for 4-step LN-ConvLSTM + Attn\u2295GAP (64ch), corrected.\nComputes initial R_vp on a small synthetic batch; no training.\nFix: pass variables dict {'params': ...} to net.apply and differentiate w.r.t. that dict.\n\"\"\"\nimport json\nimport jax\nimport jax.numpy as jnp\nfrom typing import Dict, Any\nimport sys\nsys.path.append('storage/zephyr')\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\n\nPROBE_PATH = 'storage/zephyr/results/probes_init_pg4_fix.json'\n\ndef create_network(hparams: Dict[str, Any]):\n    return PG_Stepped_AttnGap(\n        cnn_features_1=32,\n        cnn_features_2=64,\n        convlstm_features=64,\n        dilation=6,\n        bottleneck_ratio=0.28,\n        head_hidden=64,\n        steps=4,\n    )\n\ndef _forward(network, variables, observations, dones):\n    B, T = observations.shape[:2]\n    obs_flat = observations.reshape(B*T, *observations.shape[2:])\n    dones_flat = dones.reshape(B*T)\n    logits_flat, values_flat, _ = network.apply(variables, obs_flat, dones_flat, None)\n    return logits_flat.reshape(B,T,-1), values_flat.reshape(B,T)\n\ndef _global_norm(tree):\n    leaves = jax.tree_util.tree_leaves(tree)\n    if not leaves: return jnp.array(0.0)\n    return jnp.sqrt(sum([jnp.sum(jnp.square(x)) for x in leaves]) + 1e-12)\n\ndef test():\n    key = jax.random.PRNGKey(42)\n    B, T = 8, 4\n    observations = jax.random.normal(key, (B, T, 8, 8, 8)) * 0.1\n    dones = jnp.zeros((B, T), dtype=bool)\n    actions = jax.random.randint(key, (B, T), 0, 4)\n    adv = jax.random.normal(key, (B, T))\n    ret = adv  # proxy to give value head signal\n\n    net = create_network({})\n    variables = net.init(key, observations.reshape(B*T,8,8,8), dones.reshape(B*T), None)\n\n    def loss_policy(variables_):\n        logits, _ = _forward(net, variables_, observations, dones)\n        log_probs_all = jax.nn.log_softmax(logits, axis=-1)\n        idx = (jnp.arange(B)[:,None], jnp.arange(T), actions)\n        log_probs = log_probs_all[idx]\n        return -jnp.mean(jax.lax.stop_gradient(adv) * log_probs)\n\n    def loss_value(variables_):\n        _, values = _forward(net, variables_, observations, dones)\n        return 0.5 * jnp.mean((values - jax.lax.stop_gradient(ret))**2)\n\n    g_pol = jax.grad(loss_policy)(variables)\n    g_val = jax.grad(loss_value)(variables)\n    g_pol_n = float(_global_norm(g_pol.get('params', {})))\n    g_val_n = float(_global_norm(g_val.get('params', {})))\n    rvp = g_val_n / (g_pol_n + 1e-12)\n\n    out = {\"mode\":\"init\",\"arch\":\"4step_64ch\",\"grad_trunk_policy\":g_pol_n,\"grad_trunk_value\":g_val_n,\"rvp_ratio\":rvp}\n    try:\n        with open(PROBE_PATH, 'w') as f:\n            json.dump(out, f)\n    except Exception:\n        pass\n    print(json.dumps(out))\n    return \"init probe complete\"\n",
+    "submitted_timestamp": 1758075277.980153,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n{\"mode\": \"init\", \"arch\": \"4step_64ch\", \"grad_trunk_policy\": 1.6499131917953491, \"grad_trunk_value\": 1.3303372859954834, \"rvp_ratio\": 0.8063074424825185}\nTest completed. Result: init probe complete\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758075297.6320536,
+      "evaluation_datetime": "2025-09-17T10:14:57.632056"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758075297.659301,
+    "version_notified": "original",
+    "message": "Your research submission 'Test\u2011only FIX: 4\u2011step LN\u2011ConvLSTM(64) + Attn\u2295GAP \u2014 Init R_vp (inline, correct Flax apply)' (ID: 610) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n{\"mode\": \"init\", \"arch\": \"4step_64ch\", \"grad_trunk_policy\": 1.6499131917953491, \"grad_trunk_value\": 1.3303372859954834, \"rvp_ratio\": 0.8063074424825185}\nTest completed. Result: init probe complete\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

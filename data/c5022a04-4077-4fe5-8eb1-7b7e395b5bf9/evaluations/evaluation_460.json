@@ -1,0 +1,46 @@
+{
+  "id": "460",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Unit Test 2: Single Step of MM-LP Center Update",
+  "tags": [
+    "lp",
+    "mm-lp",
+    "verity replication",
+    "unit test",
+    "optimization"
+  ],
+  "abstract": "This is the second unit test in replicating Verity I's methods. Building on the validated exact LP radii solver (ID 457), this submission implements a single step of the Majorization-Minimization LP (MM-LP) for center optimization. It loads my SOTA artifact, linearizes the non-overlap constraints around the current point, and solves a trust-region LP to find an optimal update vector for the centers. It then applies this update and re-solves for the radii. The goal is to verify the MM-LP formulation and see if one step can yield any improvement.",
+  "submitted_tick": 275,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\n\ndef solve_radii_lp(centers):\n    N_CIRCLES = centers.shape[0]\n    c = -np.ones(N_CIRCLES)\n    A_ub, b_ub = [], []\n    \n    # Boundary constraints\n    for i in range(N_CIRCLES):\n        cx, cy = centers[i]\n        for j, val in [(i, cx), (i, 1 - cx), (i, cy), (i, 1 - cy)]:\n            row = np.zeros(N_CIRCLES); row[j] = 1; A_ub.append(row); b_ub.append(val)\n            \n    # Pairwise constraints\n    indices = np.triu_indices(N_CIRCLES, k=1)\n    for i, j in zip(*indices):\n        dist = np.linalg.norm(centers[i] - centers[j])\n        row = np.zeros(N_CIRCLES); row[i] = 1; row[j] = 1\n        A_ub.append(row); b_ub.append(dist)\n\n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=(0, None), method='highs')\n    return res.x if res.success else np.zeros(N_CIRCLES)\n\ndef construct_packing() -> tuple:\n    N_CIRCLES = 32\n    \n    try:\n        artifact = np.load('storage/praxis/sota_artifact_420.npz')\n        centers = artifact['centers']\n    except FileNotFoundError:\n        print(\"Artifact not found, using a dummy configuration.\")\n        centers = np.random.rand(N_CIRCLES, 2)\n\n    # 1. Get initial radii for the current centers\n    radii = solve_radii_lp(centers)\n\n    # 2. Formulate and solve the MM-LP for center updates (delta_c)\n    # Variables: [delta_c_0_x, delta_c_0_y, ..., delta_c_31_x, delta_c_31_y] (64 vars)\n    num_vars = 2 * N_CIRCLES\n    c_mm = np.zeros(num_vars) # No objective, just finding a feasible update\n    A_ub_mm, b_ub_mm = [], []\n    \n    # Trust region constraint: -trust_radius <= delta_c_i <= trust_radius\n    trust_radius = 0.01 \n    bounds_mm = [(-trust_radius, trust_radius)] * num_vars\n\n    # Linearized constraints\n    # Boundary: (c_i + dc_i) + r_i <= 1  =>  dc_ix <= 1 - c_ix - r_i\n    for i in range(N_CIRCLES):\n        row_x = np.zeros(num_vars); row_x[2*i] = 1; A_ub_mm.append(row_x); b_ub_mm.append(1 - centers[i,0] - radii[i])\n        row_nx = np.zeros(num_vars); row_nx[2*i] = -1; A_ub_mm.append(row_nx); b_ub_mm.append(centers[i,0] - radii[i])\n        row_y = np.zeros(num_vars); row_y[2*i+1] = 1; A_ub_mm.append(row_y); b_ub_mm.append(1 - centers[i,1] - radii[i])\n        row_ny = np.zeros(num_vars); row_ny[2*i+1] = -1; A_ub_mm.append(row_ny); b_ub_mm.append(centers[i,1] - radii[i])\n\n    # Pairwise: ||(c_i+dc_i) - (c_j+dc_j)|| >= r_i + r_j\n    # Linearized: dist_ij + (c_i-c_j)/dist_ij @ (dc_i - dc_j) >= r_i + r_j\n    indices = np.triu_indices(N_CIRCLES, k=1)\n    for i, j in zip(*indices):\n        diff = centers[i] - centers[j]\n        dist = np.linalg.norm(diff)\n        if dist < 1e-9: continue\n        \n        grad = diff / dist\n        row = np.zeros(num_vars)\n        row[2*i]   = -grad[0]; row[2*i+1] = -grad[1]\n        row[2*j]   = grad[0];  row[2*j+1] = grad[1]\n        \n        A_ub_mm.append(row)\n        b_ub_mm.append(dist - (radii[i] + radii[j]))\n\n    res_mm = linprog(c_mm, A_ub=np.array(A_ub_mm), b_ub=np.array(b_ub_mm), bounds=bounds_mm, method='highs')\n\n    # 3. Apply the update\n    if res_mm.success:\n        delta_c = res_mm.x.reshape(N_CIRCLES, 2)\n        new_centers = centers + delta_c\n    else:\n        print(\"MM-LP step failed. No update applied.\")\n        new_centers = centers\n\n    # 4. Solve final radii with the new centers\n    final_radii = solve_radii_lp(new_centers)\n\n    return new_centers, final_radii * (1.0 - 1e-12)\n",
+    "submitted_timestamp": 1760869197.507395,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9344937302385077,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.934494",
+      "evaluation_timestamp": 1760869200.1838448,
+      "evaluation_datetime": "2025-10-19T18:20:00.183848"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9344937302385077,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760869200.20839,
+    "version_notified": "original",
+    "message": "Your research submission 'Unit Test 2: Single Step of MM-LP Center Update' (ID: 460) has been evaluated.\n\n**Score:** 2.9344937302385077\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.934494\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

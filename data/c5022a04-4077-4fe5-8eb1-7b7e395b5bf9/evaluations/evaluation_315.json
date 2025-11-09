@@ -1,0 +1,45 @@
+{
+  "id": "315",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "Hybrid GA+ASN, Step 1: GA Generator",
+  "tags": [
+    "genetic algorithm",
+    "generator",
+    "hybrid method",
+    "evolutionary algorithm"
+  ],
+  "abstract": "This experiment repurposes the Genetic Algorithm (ID 312) to act as a 'generator' in a new hybrid pipeline. The GA is run for a long duration to find the best possible configuration through evolution. Upon termination, it saves its single best chromosome to 'storage/cognito/ga_artifact.npz'. This artifact will then be used as a warm start for the powerful ASN refiner in a subsequent experiment.",
+  "submitted_tick": 161,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport time\nimport os\n\n# --- Core utility for fitness calculation ---\ndef _pair_indices(n: int): return np.triu_indices(n, 1)\ndef _boundary_margins(C: np.ndarray) -> np.ndarray: return np.minimum.reduce([C[:,0], 1-C[:,0], C[:,1], 1-C[:,1]])\n\ndef exact_lp(C: np.ndarray):\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    I, J = _pair_indices(n)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n    m = len(I)\n    A_ub = np.zeros((m, n)); A_ub[np.arange(m), I] = 1; A_ub[np.arange(m), J] = 1; b_ub = D\n    c = -np.ones(n); bounds = [(0, float(max(0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return (res.x, -res.fun) if res.success else (np.zeros(n), 0.0)\n\n# --- Genetic Algorithm Implementation ---\nclass GeneticAlgorithm:\n    def __init__(self, n_circles=32, pop_size=100, tournament_k=3, crossover_p=0.8, mutation_p=0.1):\n        self.n = n_circles\n        self.pop_size = pop_size\n        self.k = tournament_k\n        self.p_cross = crossover_p\n        self.p_mut = mutation_p\n        self.rng = np.random.default_rng(seed=159) # Re-use seed for consistency\n        self.population = self.rng.uniform(0.05, 0.95, size=(self.pop_size, self.n, 2))\n        self.fitness = np.zeros(self.pop_size)\n\n    def calculate_fitness(self):\n        for i in range(self.pop_size):\n            _, score = exact_lp(self.population[i])\n            self.fitness[i] = score\n\n    def selection(self):\n        competitors_idx = self.rng.choice(self.pop_size, size=self.k, replace=True)\n        winner_idx = competitors_idx[np.argmax(self.fitness[competitors_idx])]\n        return self.population[winner_idx]\n\n    def crossover(self, p1, p2):\n        if self.rng.random() < self.p_cross:\n            mask = self.rng.integers(0, 2, size=(self.n, 1)).astype(bool)\n            offspring = np.where(mask, p1, p2)\n        else:\n            alpha = self.rng.random()\n            offspring = alpha * p1 + (1 - alpha) * p2\n        return offspring\n\n    def mutation(self, chromosome):\n        if self.rng.random() < self.p_mut:\n            for i in range(self.n):\n                if self.rng.random() < (1.0 / self.n):\n                    perturbation = self.rng.normal(0, 0.02, 2)\n                    chromosome[i] += perturbation\n            np.clip(chromosome, 0, 1, out=chromosome)\n        return chromosome\n\n    def run(self, max_gen=150, stagnation_limit=30, time_limit=1180):\n        start_time = time.time()\n        self.calculate_fitness()\n        best_fitness_overall = np.max(self.fitness)\n        best_chromosome_overall = self.population[np.argmax(self.fitness)].copy()\n        stagnation_counter = 0\n\n        for gen in range(max_gen):\n            if time.time() - start_time > time_limit:\n                print(f\"Time limit reached at generation {gen}.\")\n                break\n            \n            new_population = np.zeros_like(self.population)\n            elite_idx = np.argmax(self.fitness)\n            new_population[0] = self.population[elite_idx].copy()\n            \n            for i in range(1, self.pop_size):\n                parent1 = self.selection()\n                parent2 = self.selection()\n                offspring = self.crossover(parent1, parent2)\n                offspring = self.mutation(offspring)\n                new_population[i] = offspring\n            \n            self.population = new_population\n            self.calculate_fitness()\n            current_best_fitness = np.max(self.fitness)\n            \n            if current_best_fitness > best_fitness_overall:\n                best_fitness_overall = current_best_fitness\n                best_chromosome_overall = self.population[np.argmax(self.fitness)].copy()\n                stagnation_counter = 0\n            else:\n                stagnation_counter += 1\n            \n            if stagnation_counter >= stagnation_limit:\n                print(f\"Stagnation limit reached at generation {gen}.\")\n                break\n        \n        return best_chromosome_overall\n\n# --- Main Script ---\ndef construct_packing() -> tuple:\n    ga = GeneticAlgorithm()\n    best_centers = ga.run()\n    final_radii, final_score = exact_lp(best_centers)\n    \n    # Save the best artifact found by the GA\n    print(f\"GA finished. Best raw score found: {final_score:.6f}\")\n    SAVE_PATH = 'storage/cognito/ga_artifact.npz'\n    os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)\n    np.savez(SAVE_PATH, centers=best_centers, radii=final_radii)\n    \n    # Return a trivial packing as the script's purpose is artifact generation\n    return np.array([[0.1 + i*0.01, 0.1] for i in range(32)]), np.full(32, 0.001)\n",
+    "submitted_timestamp": 1760831548.806437,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.032,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nGA finished. Best raw score found: 2.572212\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.032000",
+      "evaluation_timestamp": 1760831592.9811091,
+      "evaluation_datetime": "2025-10-19T07:53:12.981112"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.032,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760831593.0017323,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid GA+ASN, Step 1: GA Generator' (ID: 315) has been evaluated.\n\n**Score:** 0.032\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.032000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nGA finished. Best raw score found: 2.572212\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

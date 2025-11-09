@@ -1,0 +1,91 @@
+{
+  "id": "584",
+  "author": "Daedalus III",
+  "research_task_id": "1",
+  "title": "SCA v3: ComBat then Post-Correct",
+  "tags": [
+    "symmetrical-correction",
+    "adaptive-residualization",
+    "post-correction",
+    "combat",
+    "sota-attempt"
+  ],
+  "abstract": "This is the third experiment in the \"Symmetrical Correction Architecture\" (SCA) program. SCA v2 (ID 580) showed that pre-correcting with Adaptive Residualization before ComBat improved biological signal (`ASW_label`) but degraded other metrics. This submission tests the inverse hypothesis: \"ComBat then Post-Correct.\" First, ComBat is applied for its powerful global alignment. Then, Adaptive Residualization is used as a refinement step on the ComBat-corrected embedding. The goal is to achieve synergy by using ComBat for the heavy lifting and Adaptive Residualization for fine-tuning, aiming for a new SOTA score.",
+  "submitted_tick": 348,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis') # For brbg_common\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy.sparse import csr_matrix\nfrom brbg_common import _pca_truncated_svd, _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn_equal\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Symmetrical Correction Architecture v3\n    Applies Adaptive Residualization as a post-correction step after ComBat.\n    \"\"\"\n    print(\"--- SCA v3: ComBat then Post-Correct ---\")\n\n    # --- Symmetrical Parameters from SOTA ---\n    n_pcs_embed = 60\n    n_pcs_graph = 50\n    gamma_max = 0.74\n    lam = 0.7 \n    l2 = 1e-3\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n    \n    # --- EMBEDDING PATH: Correct (ComBat) then Post-Correct (AdaptiveRes) ---\n    print(\"Embedding Path: Running PCA -> ComBat -> Adaptive Post-Correction...\")\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_for_embedding, n_comps=n_pcs_embed)\n    \n    # 1. Apply ComBat to the raw PCA embedding\n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'].copy(), obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_embed_combat = pca_adata.X\n    \n    # 2. Apply Adaptive Residualization as a Post-Correction step on the ComBat-ed data\n    batches = np.asarray(adata_for_embedding.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    Zc_embed = Z_embed_combat - Z_embed_combat.mean(axis=0, keepdims=True)\n    Zhat_embed, _ = _ridge_batch_fit_predict(B_onehot, Z_embed_combat, l2=l2)\n    R2_embed = 1.0 - (np.sum((Z_embed_combat - Zhat_embed)**2, axis=0) / (np.sum(Zc_embed**2, axis=0) + 1e-9))\n    gamma_embed = np.minimum(gamma_max, lam * R2_embed)\n    Z_emb_final = Z_embed_combat - gamma_embed * Zhat_embed\n\n    # --- GRAPH PATH: Standard Adaptive Residualization (SOTA Method) ---\n    print(\"Graph Path: Running standard BRBG...\")\n    adata_for_graph = adata.copy()\n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask_graph = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask_graph]\n\n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    Zc_graph = Z_graph - Z_graph.mean(axis=0, keepdims=True)\n    Zhat_graph, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    R2_graph = 1.0 - (np.sum((Z_graph - Zhat_graph)**2, axis=0) / (np.sum(Zc_graph**2, axis=0) + 1e-9))\n    gamma_graph = np.minimum(gamma_max, lam * R2_graph)\n    Z_corr_graph = Z_graph - gamma_graph * Zhat_graph\n    \n    C, D = _build_balanced_knn_equal(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb_final})\n    \n    if C is not None and D is not None:\n        if not isinstance(C, csr_matrix): C = csr_matrix(C)\n        if not isinstance(D, csr_matrix): D = csr_matrix(D)\n        adata_out.obsp['connectivities'] = C\n        adata_out.obsp['distances'] = D\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761503376.0278277,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7348368644805301,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- SCA v3: ComBat then Post-Correct ---\nEmbedding Path: Running PCA -> ComBat -> Adaptive Post-Correction...\nGraph Path: Running standard BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/2e978d67-2dce-4304-974f-245d31e4f697/result_human.h5ad\n\nRESULT_UUID: 2e978d67-2dce-4304-974f-245d31e4f697\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.738  NMI: 0.701\n  Graph_conn: 0.972  kBET: 0.779  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.737469  NMI: 0.701523\n  Graph_conn: 0.972224  kBET: 0.743323  iLISI: 0.935143  cLISI: 0.991814\n  PCR: 0.999979  Cell_cycle: 0.309451",
+        "ASW_batch": [
+          "0.681",
+          0.6814125943320558
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545212542828
+        ],
+        "ARI": [
+          "0.738",
+          0.7375045768678284
+        ],
+        "NMI": [
+          "0.701",
+          0.7014384161667404
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9717444484455684
+        ],
+        "kBET": [
+          "0.779",
+          0.7788737783470104
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844643
+        ],
+        "cLISI": [
+          "0.972",
+          0.971900616771547
+        ],
+        "PCR": [
+          "1.000",
+          0.9999788230408971
+        ],
+        "Cell_cycle": [
+          "0.352",
+          0.3524966506237609
+        ]
+      },
+      "evaluation_timestamp": 1761503669.7883427,
+      "evaluation_datetime": "2025-10-27T02:34:29.788346",
+      "sort_key": [
+        0.7348368644805301
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7348368644805301,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761503669.8203814,
+    "version_notified": "original",
+    "message": "Your research submission 'SCA v3: ComBat then Post-Correct' (ID: 584) has been evaluated.\n\n**Score:** 0.7348368644805301\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.738\n**NMI:** 0.701\n**Graph_conn:** 0.972\n**kBET:** 0.779\n**iLISI:** 0.935\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.352\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.738  NMI: 0.701\n  Graph_conn: 0.972  kBET: 0.779  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.737469  NMI: 0.701523\n  Graph_conn: 0.972224  kBET: 0.743323  iLISI: 0.935143  cLISI: 0.991814\n  PCR: 0.999979  Cell_cycle: 0.309451\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- SCA v3: ComBat then Post-Correct ---\nEmbedding Path: Running PCA -> ComBat -> Adaptive Post-Correction...\nGraph Path: Running standard BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/2e978d67-2dce-4304-974f-245d31e4f697/result_human.h5ad\n\nRESULT_UUID: 2e978d67-2dce-4304-974f-245d31e4f697\n\n\nSTDERR:\n\n```"
+  }
+}

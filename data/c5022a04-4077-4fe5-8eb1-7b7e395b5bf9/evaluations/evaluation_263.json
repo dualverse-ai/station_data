@@ -1,0 +1,47 @@
+{
+  "id": "263",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "JAX Native Optimizer v4: Max-Min Distance PGD + LP Inflation",
+  "tags": [
+    "jax",
+    "custom optimizer",
+    "gradient descent",
+    "linear programming",
+    "max-min distance",
+    "hybrid method"
+  ],
+  "abstract": "This submission evolves the PGD+LP optimizer. The previous version successfully found valid but suboptimal packings. The core hypothesis is that the PGD's objective function for finding centers was too simple. This version replaces the overlap penalty with a new objective: maximizing the minimum pairwise distance between centers. This should encourage a more spread-out, globally optimal arrangement of centers, leading to a much better result after the LP radius-inflation phase.",
+  "submitted_tick": 129,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom jax import jit, vmap, grad, random\nfrom scipy.optimize import linprog\n\nN_CIRCLES = 32\n\ndef create_seeds(key, n_starts):\n    keys = random.split(key, n_starts)\n    @vmap\n    def _create_seed(subkey):\n        return random.uniform(subkey, (N_CIRCLES, 2), minval=0.1, maxval=0.9)\n    return _create_seed(keys)\n\ndef min_dist_sq_objective(centers):\n    # Objective: Maximize the minimum squared distance between any two centers\n    # To do this with gradient descent, we minimize the negative of this value.\n    dist_sq = jnp.sum((centers[:, jnp.newaxis, :] - centers[jnp.newaxis, :, :])**2, axis=-1)\n    # Add a large value to the diagonal to ignore self-distances\n    dist_sq += jnp.eye(N_CIRCLES) * 1e9 \n    return -jnp.min(dist_sq)\n\n@jit\ndef pgd_center_update(centers, learning_rate):\n    # Gradient descent on the objective to push the minimum distance up\n    g = grad(min_dist_sq_objective)(centers)\n    centers_new = centers - learning_rate * g\n    # Projection to keep centers within the unit square\n    return jnp.clip(centers_new, 1e-6, 1.0 - 1e-6)\n\ndef solve_radii_lp(centers):\n    c = -np.ones(N_CIRCLES)\n    \n    I, J = np.triu_indices(N_CIRCLES, 1)\n    A_overlap = np.zeros((len(I), N_CIRCLES))\n    A_overlap[np.arange(len(I)), I] = 1\n    A_overlap[np.arange(len(I)), J] = 1\n    d_ij = np.sqrt(np.sum((centers[I] - centers[J])**2, axis=1))\n    b_overlap = d_ij\n\n    A_boundary = np.eye(N_CIRCLES)\n    b_boundary = np.min(np.hstack([centers, 1 - centers]), axis=1)\n\n    A_ub = np.vstack([A_overlap, A_boundary])\n    b_ub = np.hstack([b_overlap, b_boundary])\n\n    bounds = (0, None)\n    \n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return res.x if res.success else np.zeros(N_CIRCLES)\n\ndef construct_packing() -> tuple:\n    n_starts = 256\n    n_steps = 2000\n    learning_rate = 1e-5 # Smaller learning rate for this more sensitive objective\n\n    master_key = random.PRNGKey(42)\n    \n    # --- Phase 1: Find good center positions using JAX PGD ---\n    initial_centers = create_seeds(master_key, n_starts)\n    \n    vmapped_update = vmap(pgd_center_update, in_axes=(0, None))\n\n    def optimization_loop(i, centers):\n        return vmapped_update(centers, learning_rate)\n\n    final_centers_batch = jax.lax.fori_loop(0, n_steps, optimization_loop, initial_centers)\n    \n    # --- Phase 2: Inflate radii using LP for each candidate ---\n    best_radii = None\n    best_score = -1.0\n    best_centers = None\n\n    for i in range(n_starts):\n        centers = np.asarray(final_centers_batch[i])\n        radii = solve_radii_lp(centers)\n        score = np.sum(radii)\n        if score > best_score:\n            best_score = score\n            best_radii = radii\n            best_centers = centers\n    \n    best_radii *= (1.0 - 1e-12) # Safety shrink\n\n    return np.asarray(best_centers), np.asarray(best_radii)\n",
+    "submitted_timestamp": 1760819039.7696822,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: All radii must be positive, found: [0. 0.]",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: All radii must be positive, found: [0. 0.]",
+      "evaluation_timestamp": 1760819045.4246974,
+      "evaluation_datetime": "2025-10-19T04:24:05.424701"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760819045.4427783,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX Native Optimizer v4: Max-Min Distance PGD + LP Inflation' (ID: 263) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: All radii must be positive, found: [0. 0.]\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

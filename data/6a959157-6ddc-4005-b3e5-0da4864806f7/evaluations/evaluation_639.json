@@ -1,0 +1,90 @@
+{
+  "id": "639",
+  "author": "Daedalus III",
+  "research_task_id": "1",
+  "title": "Synergy Test: Daedalus SOTA + Density-Adaptive Graph",
+  "tags": [
+    "synthesis",
+    "sota-attempt",
+    "density-adaptive",
+    "daedalus-sota"
+  ],
+  "abstract": "After concluding that direct replication of Praxis II's SOTA is unreliable in my environment, this experiment pivots to a new synthesis. It combines the two most successful and robust components from our respective lineages: my original SOTA architecture (ID 488, with its high-performing standard ComBat embedding and `lam=0.7` residualization) and Praxis II's innovative Density-adaptive BBSG graph (ID 609). The hypothesis is that combining my embedding, which excels at `kBET` and `Cell_cycle`, with their graph, which excels at `ARI` and `NMI`, will yield a synergistic effect and a new, robust SOTA.",
+  "submitted_tick": 386,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage')\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom praxis.brbg_common import _pca_truncated_svd, _one_hot_batches, _ridge_batch_fit_predict\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Synergy Test: My SOTA architecture (ID 488) + Praxis II's Density-Adaptive graph.\n    \"\"\"\n    print(\"--- Synergy Test: Daedalus SOTA + Density-Adaptive Graph ---\")\n\n    # --- Parameters from my SOTA (ID 488) and Praxis II's SOTA (ID 609) ---\n    n_pcs_embed = 60\n    n_pcs_graph = 50\n    gamma_max = 0.74\n    lam = 0.7 \n    l2 = 1e-3\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n    delta = 0.15\n    k_density = 20\n    \n    # --- EMBEDDING PATH: My Standard ComBat Embedding (No FWPCA) ---\n    print(\"Embedding Path: Running PCA -> ComBat...\")\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_for_embedding, n_comps=n_pcs_embed)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb_final = pca_adata.X\n\n    # --- GRAPH PATH: My Adaptive Residualization + Praxis II's Density-Adaptive BBSG ---\n    print(\"Graph Path: Running Adaptive Res + Density-Adaptive BBSG...\")\n    adata_for_graph = adata.copy()\n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask_graph = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask_graph]\n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    \n    Zc_graph = Z_graph - Z_graph.mean(axis=0, keepdims=True)\n    Zhat_graph, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    R2_graph = 1.0 - (np.sum((Z_graph - Zhat_graph)**2, axis=0) / (np.sum(Zc_graph**2, axis=0) + 1e-9))\n    gamma_graph = np.minimum(gamma_max, lam * R2_graph)\n    Z_corr_graph = Z_graph - gamma_graph * Zhat_graph\n    \n    # Use Praxis II's SOTA graph construction method\n    Cg, Dg = build_density_adaptive_bbsg(Z_corr_graph.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=k_density, rng_seed=0)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb_final})\n    adata_out.obsp['connectivities'] = Cg\n    adata_out.obsp['distances'] = Dg\n    adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761514750.152278,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7338018592930023,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Synergy Test: Daedalus SOTA + Density-Adaptive Graph ---\nEmbedding Path: Running PCA -> ComBat...\nGraph Path: Running Adaptive Res + Density-Adaptive BBSG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/eb18081d-038c-439c-a276-c924d1d8fabd/result_human.h5ad\n\nRESULT_UUID: eb18081d-038c-439c-a276-c924d1d8fabd\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.735  NMI: 0.700\n  Graph_conn: 0.971  kBET: 0.777  iLISI: 0.933  cLISI: 0.971\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.734966  NMI: 0.699690\n  Graph_conn: 0.971535  kBET: 0.741610  iLISI: 0.932695  cLISI: 0.991511\n  PCR: 0.999979  Cell_cycle: 0.309451",
+        "ASW_batch": [
+          "0.681",
+          0.6814125946256852
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545211433443
+        ],
+        "ARI": [
+          "0.735",
+          0.735001684680301
+        ],
+        "NMI": [
+          "0.700",
+          0.6996055708882799
+        ],
+        "Graph_conn": [
+          "0.971",
+          0.9710435490835821
+        ],
+        "kBET": [
+          "0.777",
+          0.7770514961846505
+        ],
+        "iLISI": [
+          "0.933",
+          0.932695374800638
+        ],
+        "cLISI": [
+          "0.971",
+          0.9708573907146086
+        ],
+        "PCR": [
+          "1.000",
+          0.9999788292159947
+        ],
+        "Cell_cycle": [
+          "0.352",
+          0.35249665062194896
+        ]
+      },
+      "evaluation_timestamp": 1761515031.226871,
+      "evaluation_datetime": "2025-10-27T05:43:51.226872",
+      "sort_key": [
+        0.7338018592930023
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7338018592930023,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761515031.2651443,
+    "version_notified": "original",
+    "message": "Your research submission 'Synergy Test: Daedalus SOTA + Density-Adaptive Graph' (ID: 639) has been evaluated.\n\n**Score:** 0.7338018592930023\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.735\n**NMI:** 0.700\n**Graph_conn:** 0.971\n**kBET:** 0.777\n**iLISI:** 0.933\n**cLISI:** 0.971\n**PCR:** 1.000\n**Cell_cycle:** 0.352\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.735  NMI: 0.700\n  Graph_conn: 0.971  kBET: 0.777  iLISI: 0.933  cLISI: 0.971\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.734966  NMI: 0.699690\n  Graph_conn: 0.971535  kBET: 0.741610  iLISI: 0.932695  cLISI: 0.991511\n  PCR: 0.999979  Cell_cycle: 0.309451\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Synergy Test: Daedalus SOTA + Density-Adaptive Graph ---\nEmbedding Path: Running PCA -> ComBat...\nGraph Path: Running Adaptive Res + Density-Adaptive BBSG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/eb18081d-038c-439c-a276-c924d1d8fabd/result_human.h5ad\n\nRESULT_UUID: eb18081d-038c-439c-a276-c924d1d8fabd\n\n\nSTDERR:\n\n```"
+  }
+}

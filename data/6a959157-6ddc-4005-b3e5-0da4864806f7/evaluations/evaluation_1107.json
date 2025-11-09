@@ -1,0 +1,92 @@
+{
+  "id": "1107",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Ensemble Correction (alpha=0.7)",
+  "tags": [
+    "ensemble",
+    "standardization",
+    "mnn",
+    "fusion",
+    "hyperparameter-tuning",
+    "sotw-refinement"
+  ],
+  "abstract": "This experiment optimizes the SOTA 'Ensemble Correction' method by tuning the alpha hyperparameter. This submission uses alpha=0.7, giving more weight (30%) to the locally-correct MNN embedding. The goal is to determine if a greater contribution from the local correction can improve the iLISI score further without significantly compromising the excellent global (PCR) performance.",
+  "submitted_tick": 724,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nEnsemble Correction by Fusing a Globally- and Locally-Optimal Embedding\nHyperparameter Tuning: alpha = 0.7\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Ensemble Correction (alpha=0.7): Starting...\")\n\n    # --- Parameters ---\n    alpha = 0.7 # Weight for the global correction embedding\n    k_mnn = 20\n    k_smooth = 10\n    n_pcs = 50\n\n    # === STAGE 1: Initial PCA (shared by both methods) ===\n    print(\"  [Stage 1] Performing initial normalization and PCA...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca_original = adata.obsm['X_pca'].copy()\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique().tolist()\n\n    # === STAGE 2A: Compute E_global (Latent Space Standardization) ===\n    print(\"  [Stage 2a] Computing global embedding (Standardization)...\")\n    E_global = np.zeros_like(X_pca_original)\n    for pc_idx in range(X_pca_original.shape[1]):\n        pc = X_pca_original[:, pc_idx]\n        g_mean, g_std = pc.mean(), pc.std()\n        for batch in unique_batches:\n            mask = (batch_labels == batch).values\n            if np.any(mask):\n                b_pc = pc[mask]\n                b_mean, b_std = b_pc.mean(), b_pc.std()\n                if b_std < 1e-8: b_std = 1.0\n                std_pc = (b_pc - b_mean) / b_std\n                E_global[mask, pc_idx] = std_pc * g_std + g_mean\n    \n    # === STAGE 2B: Compute E_local (MNN Smoothing) ===\n    print(\"  [Stage 2b] Computing local embedding (MNN Smoothing)...\")\n    mnn_pairs = []\n    for i in range(len(unique_batches)):\n        for j in range(i + 1, len(unique_batches)):\n            b1, b2 = unique_batches[i], unique_batches[j]\n            m1, m2 = (batch_labels == b1).values, (batch_labels == b2).values\n            idx1, idx2 = np.where(m1)[0], np.where(m2)[0]\n            data1, data2 = X_pca_original[m1, :], X_pca_original[m2, :]\n            if data1.shape[0] == 0 or data2.shape[0] == 0: continue\n            nn1 = NearestNeighbors(n_neighbors=min(k_mnn, data2.shape[0])).fit(data2)\n            _, nbrs1 = nn1.kneighbors(data1)\n            nn2 = NearestNeighbors(n_neighbors=min(k_mnn, data1.shape[0])).fit(data1)\n            _, nbrs2 = nn2.kneighbors(data2)\n            for i1_loc, nbr_list in enumerate(nbrs1):\n                for i2_loc in nbr_list:\n                    if i1_loc in nbrs2[i2_loc]: mnn_pairs.append((idx1[i1_loc], idx2[i2_loc]))\n    \n    anchor_indices = np.unique(np.array(mnn_pairs).flatten())\n    raw_vectors = np.zeros_like(X_pca_original)\n    for idx1, idx2 in mnn_pairs:\n        vec = X_pca_original[idx2, :] - X_pca_original[idx1, :]\n        raw_vectors[idx1, :] += vec\n        raw_vectors[idx2, :] -= vec\n    counts = np.zeros(X_pca_original.shape[0]); np.add.at(counts, np.array(mnn_pairs)[:,0],1); np.add.at(counts, np.array(mnn_pairs)[:,1],1)\n    counts[counts==0] = 1; raw_vectors /= counts[:, np.newaxis]\n    \n    anchor_pca = X_pca_original[anchor_indices, :]\n    nn_smooth = NearestNeighbors(n_neighbors=min(k_smooth, len(anchor_indices))).fit(anchor_pca)\n    distances, neighbor_indices = nn_smooth.kneighbors(X_pca_original)\n    global_neighbor_indices = anchor_indices[neighbor_indices]\n    sigma = np.median(distances);\n    if sigma == 0: sigma = 1.0\n    weights = np.exp(-(distances**2) / (2 * sigma**2)); weights /= weights.sum(axis=1)[:, np.newaxis]\n    smoothed_corrections = np.zeros_like(X_pca_original)\n    for i in range(X_pca_original.shape[0]):\n        smoothed_corrections[i, :] = np.sum(raw_vectors[global_neighbor_indices[i, :], :] * weights[i, :][:, np.newaxis], axis=0)\n    E_local = X_pca_original + smoothed_corrections\n\n    # === STAGE 3: Fuse Embeddings ===\n    print(f\"  [Stage 3] Fusing embeddings with alpha={alpha}...\")\n    E_final = (alpha * E_global) + ((1 - alpha) * E_local)\n\n    # === STAGE 4: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': E_final.astype(np.float32)},\n        uns={'method_id': 'ensemble_correction_std_mnn_alpha0.7'}\n    )\n    \n    print(f\"\u2713 Ensemble Correction complete.\")\n    return output\n",
+    "submitted_timestamp": 1761641137.419041,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6290854005088587,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nEnsemble Correction (alpha=0.7): Starting...\n  [Stage 1] Performing initial normalization and PCA...\n  [Stage 2a] Computing global embedding (Standardization)...\n  [Stage 2b] Computing local embedding (MNN Smoothing)...\n  [Stage 3] Fusing embeddings with alpha=0.7...\n\u2713 Ensemble Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/aed9785e-5c27-4e8c-a60e-e95e74799e4a/result_human.h5ad\n\nRESULT_UUID: aed9785e-5c27-4e8c-a60e-e95e74799e4a\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.656  ASW_label: 0.232  ARI: 0.648  NMI: 0.713\n  Graph_conn: 0.881  kBET: 0.777  iLISI: 0.086  cLISI: 0.993\n  PCR: 0.936  Cell_cycle: 0.370\n\nRaw Scores (before normalization):\n  ASW_batch: 0.828947  ASW_label: 0.545385  ARI: 0.647859  NMI: 0.712835\n  Graph_conn: 0.883048  kBET: 0.741468  iLISI: 0.085822  cLISI: 0.997817\n  PCR: 0.936326  Cell_cycle: 0.324514",
+        "ASW_batch": [
+          "0.656",
+          0.6557967231474411
+        ],
+        "ASW_label": [
+          "0.232",
+          0.2316327618153237
+        ],
+        "ARI": [
+          "0.648",
+          0.6479070345275599
+        ],
+        "NMI": [
+          "0.713",
+          0.7127538296437188
+        ],
+        "Graph_conn": [
+          "0.881",
+          0.8810297856820207
+        ],
+        "kBET": [
+          "0.777",
+          0.7768997075693822
+        ],
+        "iLISI": [
+          "0.086",
+          0.08582161712115018
+        ],
+        "cLISI": [
+          "0.993",
+          0.9925053199266564
+        ],
+        "PCR": [
+          "0.936",
+          0.9363255553070615
+        ],
+        "Cell_cycle": [
+          "0.370",
+          0.3701816703482736
+        ]
+      },
+      "evaluation_timestamp": 1761641367.4679008,
+      "evaluation_datetime": "2025-10-28T16:49:27.467902",
+      "sort_key": [
+        0.6290854005088587
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6290854005088587,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761641367.4786816,
+    "version_notified": "original",
+    "message": "Your research submission 'Ensemble Correction (alpha=0.7)' (ID: 1107) has been evaluated.\n\n**Score:** 0.6290854005088587\n**ASW_batch:** 0.656\n**ASW_label:** 0.232\n**ARI:** 0.648\n**NMI:** 0.713\n**Graph_conn:** 0.881\n**kBET:** 0.777\n**iLISI:** 0.086\n**cLISI:** 0.993\n**PCR:** 0.936\n**Cell_cycle:** 0.370\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.656  ASW_label: 0.232  ARI: 0.648  NMI: 0.713\n  Graph_conn: 0.881  kBET: 0.777  iLISI: 0.086  cLISI: 0.993\n  PCR: 0.936  Cell_cycle: 0.370\n\nRaw Scores (before normalization):\n  ASW_batch: 0.828947  ASW_label: 0.545385  ARI: 0.647859  NMI: 0.712835\n  Graph_conn: 0.883048  kBET: 0.741468  iLISI: 0.085822  cLISI: 0.997817\n  PCR: 0.936326  Cell_cycle: 0.324514\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nEnsemble Correction (alpha=0.7): Starting...\n  [Stage 1] Performing initial normalization and PCA...\n  [Stage 2a] Computing global embedding (Standardization)...\n  [Stage 2b] Computing local embedding (MNN Smoothing)...\n  [Stage 3] Fusing embeddings with alpha=0.7...\n\u2713 Ensemble Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/aed9785e-5c27-4e8c-a60e-e95e74799e4a/result_human.h5ad\n\nRESULT_UUID: aed9785e-5c27-4e8c-a60e-e95e74799e4a\n\n\nSTDERR:\n\n```"
+  }
+}

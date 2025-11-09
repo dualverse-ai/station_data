@@ -1,0 +1,91 @@
+{
+  "id": "1915",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Praxis: DAQB baseline + reciprocity-friendly degree cap (cap=250, distance-first trim)",
+  "tags": [
+    "graphfwpca",
+    "daqb",
+    "robustness",
+    "degree-cap",
+    "trimming"
+  ],
+  "abstract": "Build the standard MPB\u2011GraphFWPCA+DAQB baseline (\u03bb=0.605, kd=22, k=50, \u03b4=0.12, emb_k=17, \u03b3_max=0.70), then apply a mild, reciprocity-friendly undirected degree cap at 250 by trimming the farthest edges first on overfull nodes and removing both directions per edge to preserve symmetry. Returns X_emb and capped connectivities/distances.",
+  "submitted_tick": 1443,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nimport anndata as ad\n\nsys.path.extend(['storage', 'storage/praxis'])\nfrom mpb_graphfwpca_override import eliminate_mpb_graphfwpca as run_base\n\nCAP = 250  # mild cap to trim only extreme hubs; baseline mean\u224892, median\u224858; p99\u2248666\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X, dtype=np.float64)\n\ndef _cap_undirected_degree(C_in: sp.csr_matrix, D_in: sp.csr_matrix, cap: int = 250):\n    \"\"\"\n    Symmetric degree cap:\n      - Work on undirected graph (C symmetric binary, D symmetric distances).\n      - For nodes with deg > cap, drop edges with largest distances first.\n      - Remove both directions (i,j) and (j,i) to preserve symmetry.\n    Returns (C_out, D_out) as CSR[float64].\n    \"\"\"\n    C = _to_csr(C_in).astype(np.float64)\n    D = _to_csr(D_in).astype(np.float64)\n    n = C.shape[0]\n    deg = np.asarray(C.sum(axis=1)).ravel().astype(np.int64)\n\n    # Use LIL for efficient in-place deletions\n    C_lil = C.tolil(copy=True)\n    D_lil = D.tolil(copy=True)\n\n    over = np.where(deg > cap)[0]\n    # Process higher-degree nodes first\n    over = over[np.argsort(deg[over])[::-1]]\n\n    for i in over:\n        # Recompute current degree as edges may have been removed while processing other nodes\n        di = int(C_lil.rows[i].__len__())\n        if di <= cap:\n            continue\n        nbrs = np.array(C_lil.rows[i], dtype=np.int64)\n        if nbrs.size == 0:\n            continue\n        dists = np.array(D_lil.data[i], dtype=np.float64)\n        # Sort neighbors by distance descending (farthest trimmed first)\n        order = np.argsort(dists)[::-1]\n        remove_needed = di - cap\n        removed = 0\n        for idx in order:\n            if removed >= remove_needed:\n                break\n            j = int(nbrs[idx])\n            # Skip if edge already gone\n            if C_lil[i, j] == 0.0:\n                continue\n            # Remove both directions\n            C_lil[i, j] = 0.0; C_lil[j, i] = 0.0\n            D_lil[i, j] = 0.0; D_lil[j, i] = 0.0\n            removed += 1\n\n    C_out = C_lil.tocsr().astype(np.float64)\n    D_out = D_lil.tocsr().astype(np.float64)\n    return C_out, D_out\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # 1) Run frozen Praxis baseline\n    A = run_base(\n        adata,\n        lam_override=0.605,\n        delta=0.12,\n        kdensity=22,\n        k_total=50,\n        emb_n_neighbors=17,\n        gamma_max=0.70,\n        cap=2.0,\n        rng_seed=0\n    )\n\n    # Guards: ensure graph present\n    if 'connectivities' not in A.obsp or 'distances' not in A.obsp:\n        raise RuntimeError(\"Baseline did not produce graph matrices.\")\n\n    C = A.obsp['connectivities']\n    D = A.obsp['distances']\n\n    # 2) Apply mild symmetric degree cap (distance-first trimming)\n    C_cap, D_cap = _cap_undirected_degree(C, D, cap=CAP)\n\n    # 3) Write back and neighbor metadata\n    A.obsp['connectivities'] = C_cap\n    A.obsp['distances'] = D_cap\n    A.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': 50,\n            'method': f'DAQB+cap{CAP}',\n            'metric': 'cosine',\n            'notes': 'distance-first symmetric degree cap after DAQB'\n        }\n    }\n    return A\n",
+    "submitted_timestamp": 1761862312.1247115,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7196208814728148,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6031bf82-a7af-4cf2-bfa3-0b2ea52da285/result_human.h5ad\n\nRESULT_UUID: 6031bf82-a7af-4cf2-bfa3-0b2ea52da285\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.770  NMI: 0.750\n  Graph_conn: 0.965  kBET: 0.790  iLISI: 0.713  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.769686  NMI: 0.749851\n  Graph_conn: 0.965493  kBET: 0.753648  iLISI: 0.712776  cLISI: 0.992666\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.770",
+          0.7697167633669902
+        ],
+        "NMI": [
+          "0.750",
+          0.7497802492294797
+        ],
+        "Graph_conn": [
+          "0.965",
+          0.9648976905532104
+        ],
+        "kBET": [
+          "0.790",
+          0.7898599819978497
+        ],
+        "iLISI": [
+          "0.713",
+          0.7127761767531221
+        ],
+        "cLISI": [
+          "0.975",
+          0.9748232299999807
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761862820.2266386,
+      "evaluation_datetime": "2025-10-31T06:20:20.226641",
+      "sort_key": [
+        0.7196208814728148
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7196208814728148,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761862820.2954745,
+    "version_notified": "original",
+    "message": "Your research submission 'Praxis: DAQB baseline + reciprocity-friendly degree cap (cap=250, distance-first trim)' (ID: 1915) has been evaluated.\n\n**Score:** 0.7196208814728148\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.770\n**NMI:** 0.750\n**Graph_conn:** 0.965\n**kBET:** 0.790\n**iLISI:** 0.713\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.770  NMI: 0.750\n  Graph_conn: 0.965  kBET: 0.790  iLISI: 0.713  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.769686  NMI: 0.749851\n  Graph_conn: 0.965493  kBET: 0.753648  iLISI: 0.712776  cLISI: 0.992666\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6031bf82-a7af-4cf2-bfa3-0b2ea52da285/result_human.h5ad\n\nRESULT_UUID: 6031bf82-a7af-4cf2-bfa3-0b2ea52da285\n\n\nSTDERR:\n\n```"
+  }
+}

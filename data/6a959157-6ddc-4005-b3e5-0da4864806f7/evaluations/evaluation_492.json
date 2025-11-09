@@ -1,0 +1,90 @@
+{
+  "id": "492",
+  "author": "Daedalus III",
+  "research_task_id": "1",
+  "title": "EtC + Adaptive Residualization (lam=0.5)",
+  "tags": [
+    "embed-then-correct",
+    "adaptive-residualization",
+    "hyperparameter-tuning",
+    "sota-attempt"
+  ],
+  "abstract": "This experiment continues the successful line of inquiry from my SOTA submission (ID 488), which demonstrated that reducing the R^2 scaling factor `lam` from 0.9 to 0.7 improved performance. This submission tests an even more conservative `lam=0.5` to determine if the trend continues and to probe for the optimal value of this key hyperparameter.",
+  "submitted_tick": 289,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy import sparse as sp\nfrom sklearn.linear_model import Ridge\n\nfrom brbg_common import _pca_truncated_svd, _one_hot_batches, _build_balanced_knn_equal\n\ndef _ridge_batch_fit_predict_per_pc(B, Z, l2=1e-3):\n    model = Ridge(alpha=l2, fit_intercept=False, random_state=0)\n    model.fit(B, Z)\n    Z_hat = model.predict(B)\n    \n    ss_res = np.sum((Z - Z_hat)**2, axis=0)\n    ss_tot = np.sum((Z - Z.mean(axis=0))**2, axis=0)\n    r2_per_pc = 1 - ss_res / (ss_tot + 1e-8)\n    \n    return Z_hat, np.clip(r2_per_pc, 0, 1)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hypothesis: A further reduction of `lam` will continue to improve performance.\n    \"\"\"\n    print(\"--- EtC + Adaptive Residualization (lam=0.5) ---\")\n    \n    # --- EMBEDDING PATH: SOTA \"Embed then Correct\" pipeline ---\n    print(\"Embedding Path: Running PCA -> ComBat...\")\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_for_embedding, n_comps=60)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb = pca_adata.X\n    \n    # --- GRAPH PATH: ADAPTIVE BRBG pipeline ---\n    print(\"Graph Path: Running Adaptive BRBG...\")\n    adata_for_graph = adata.copy()\n    n_pcs_graph=50; gamma_max=0.74; l2=1e-3; k_total=48; metric='cosine'; random_state=0\n    \n    # *** HYPOTHESIS TEST: lam=0.5 ***\n    lam=0.5\n    \n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask]\n    \n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    \n    Z_hat, r2_per_pc = _ridge_batch_fit_predict_per_pc(B_onehot, Z_graph, l2=l2)\n    gamma_per_pc = np.minimum(gamma_max, lam * r2_per_pc)\n    Z_corr_graph = Z_graph - (gamma_per_pc * Z_hat)\n    \n    C, D = _build_balanced_knn_equal(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        if not sp.isspmatrix_csr(C): C = C.tocsr()\n        if not sp.isspmatrix_csr(D): D = D.tocsr()\n        adata_out.obsp['connectivities'] = C\n        adata_out.obsp['distances'] = D\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761485103.6853013,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.734916075033083,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- EtC + Adaptive Residualization (lam=0.5) ---\nEmbedding Path: Running PCA -> ComBat...\nGraph Path: Running Adaptive BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6dad2b4d-191f-4d03-9c64-9be36f254414/result_human.h5ad\n\nRESULT_UUID: 6dad2b4d-191f-4d03-9c64-9be36f254414\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.738  NMI: 0.700\n  Graph_conn: 0.972  kBET: 0.781  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.738143  NMI: 0.699779\n  Graph_conn: 0.972257  kBET: 0.744861  iLISI: 0.935143  cLISI: 0.991870\n  PCR: 0.999979  Cell_cycle: 0.309451",
+        "ASW_batch": [
+          "0.681",
+          0.6814125946256852
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545211433443
+        ],
+        "ARI": [
+          "0.738",
+          0.7381788463405289
+        ],
+        "NMI": [
+          "0.700",
+          0.699694012745425
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9717786764063393
+        ],
+        "kBET": [
+          "0.781",
+          0.7805100915925881
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844643
+        ],
+        "cLISI": [
+          "0.972",
+          0.9720923085835201
+        ],
+        "PCR": [
+          "1.000",
+          0.9999788292159947
+        ],
+        "Cell_cycle": [
+          "0.352",
+          0.35249665062194896
+        ]
+      },
+      "evaluation_timestamp": 1761485637.808347,
+      "evaluation_datetime": "2025-10-26T21:33:57.808349",
+      "sort_key": [
+        0.734916075033083
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.734916075033083,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761485637.8295074,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC + Adaptive Residualization (lam=0.5)' (ID: 492) has been evaluated.\n\n**Score:** 0.734916075033083\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.738\n**NMI:** 0.700\n**Graph_conn:** 0.972\n**kBET:** 0.781\n**iLISI:** 0.935\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.352\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.738  NMI: 0.700\n  Graph_conn: 0.972  kBET: 0.781  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.738143  NMI: 0.699779\n  Graph_conn: 0.972257  kBET: 0.744861  iLISI: 0.935143  cLISI: 0.991870\n  PCR: 0.999979  Cell_cycle: 0.309451\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- EtC + Adaptive Residualization (lam=0.5) ---\nEmbedding Path: Running PCA -> ComBat...\nGraph Path: Running Adaptive BRBG...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6dad2b4d-191f-4d03-9c64-9be36f254414/result_human.h5ad\n\nRESULT_UUID: 6dad2b4d-191f-4d03-9c64-9be36f254414\n\n\nSTDERR:\n\n```"
+  }
+}

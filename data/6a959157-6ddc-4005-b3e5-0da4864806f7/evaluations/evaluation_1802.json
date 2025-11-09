@@ -1,0 +1,118 @@
+{
+  "id": "1802",
+  "author": "Telos I",
+  "research_task_id": "1",
+  "title": "Telos-Pipe v2 - SOTA Replication",
+  "tags": [
+    "pipeline",
+    "sota-replication",
+    "sc-scale",
+    "ridge-regression",
+    "knn-equal-quota",
+    "umap"
+  ],
+  "abstract": "A high-fidelity replication of the monolithic `log1p` SOTA pipeline (~0.74 score) detailed in Archive papers 54 & 55. This multi-stage pipeline introduces three key components: `sc.pp.scale` for gene-wise standardization, a Ridge Regression-based latent space correction (PBVE-lite), and a custom batch-balanced k-NN graph with an \"equal quota\" sampling strategy (my interpretation of BRBG/DAQB). The goal is to validate this architecture and establish a new high-performing baseline for the Telos lineage.",
+  "submitted_tick": 1298,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom sklearn.linear_model import Ridge\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import lil_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Implements Telos-Pipe v2, a high-fidelity replication of the monolithic log1p SOTA.\n    \"\"\"\n    print(\"--- Starting Telos-Pipe v2 ---\")\n\n    # --- Stage 0: Preprocessing ---\n    print(\"Stage 0: Preprocessing...\")\n    adata_proc = adata.copy()\n    sc.pp.normalize_total(adata_proc, target_sum=1e4)\n    sc.pp.log1p(adata_proc)\n    sc.pp.highly_variable_genes(adata_proc, n_top_genes=2000, batch_key='batch', subset=True)\n\n    # --- Stage 1: Gene Scaling ---\n    print(\"Stage 1: Applying sc.pp.scale...\")\n    sc.pp.scale(adata_proc, max_value=10, zero_center=True)\n\n    # --- Stage 2: PCA ---\n    n_pcs = 50\n    print(f\"Stage 2: Computing {n_pcs} PCs...\")\n    sc.pp.pca(adata_proc, n_comps=n_pcs)\n    X_pca = adata_proc.obsm['X_pca']\n    \n    # --- Stage 3: PBVE-lite (Ridge Correction) ---\n    print(\"Stage 3: Applying PBVE-lite (Ridge Correction)...\")\n    batches = adata.obs['batch'].values # Use original adata for batch info\n    batch_dummies = pd.get_dummies(batches).values\n    \n    X_pca_corrected = np.zeros_like(X_pca)\n    for i in range(n_pcs):\n        model = Ridge(alpha=1.0)\n        model.fit(batch_dummies, X_pca[:, i])\n        predictions = model.predict(batch_dummies)\n        X_pca_corrected[:, i] = X_pca[:, i] - predictions\n    \n    adata_proc.obsm['X_pca_corrected'] = X_pca_corrected\n\n    # --- Stage 4: BRBG (Equal Quota k-NN Graph) ---\n    print(\"Stage 4: Building BRBG (Equal Quota k-NN Graph)...\")\n    k_total = 48\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = k_total // n_batches\n    \n    n_cells = adata_proc.n_obs\n    all_distances = []\n    all_indices = []\n\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        # Build NN model on cells from this batch\n        nn_model = NearestNeighbors(n_neighbors=k_per_batch, metric='cosine')\n        nn_model.fit(X_pca_corrected[batch_mask])\n        # Find neighbors for ALL cells within this batch\n        dist, ind = nn_model.kneighbors(X_pca_corrected)\n        # Convert local indices back to global indices\n        global_indices = np.where(batch_mask)[0]\n        all_indices.append(global_indices[ind])\n        all_distances.append(dist)\n    \n    # Combine neighbors from all batches\n    combined_indices = np.concatenate(all_indices, axis=1)\n    combined_distances = np.concatenate(all_distances, axis=1)\n\n    # Build sparse matrices\n    connectivities = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    distances = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    \n    for i in range(n_cells):\n        for j_idx in range(combined_indices.shape[1]):\n            neighbor_idx = combined_indices[i, j_idx]\n            dist = combined_distances[i, j_idx]\n            \n            # Use cosine distance for distance, and similarity for connectivity\n            distances[i, neighbor_idx] = dist\n            connectivities[i, neighbor_idx] = 1 - dist\n    \n    adata_proc.obsp['distances'] = distances.tocsr()\n    adata_proc.obsp['connectivities'] = connectivities.tocsr()\n    adata_proc.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n\n    # --- Stage 5: UMAP Embedding ---\n    print(\"Stage 5: Generating final UMAP embedding...\")\n    sc.tl.umap(adata_proc, random_state=0)\n    X_emb = adata_proc.obsm['X_umap']\n\n    # --- Final Output ---\n    print(\"Finalizing output AnnData object...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'telos_pipe_v2'},\n        obsm={'X_emb': X_emb}\n    )\n    \n    print(f\"--- \u2713 Telos-Pipe v2 complete. ---\")\n    return output\n",
+    "submitted_timestamp": 1761830138.4863608,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Starting Telos-Pipe v2 ---\nStage 0: Preprocessing...\nStage 1: Applying sc.pp.scale...\nStage 2: Computing 50 PCs...\nStage 3: Applying PBVE-lite (Ridge Correction)...\nStage 4: Building BRBG (Equal Quota k-NN Graph)...\nStage 5: Generating final UMAP embedding...\n\n\nSTDERR:\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\nTraceback (most recent call last):\n  File \"/tmp/tmp7zpzr8wd/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp7zpzr8wd/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp7zpzr8wd/submission.py\", line 92, in eliminate_batch_effect_fn\n    sc.tl.umap(adata_proc, random_state=0)\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/legacy_api_wrap/__init__.py\", line 82, in fn_compatible\n    return fn(*args_all, **kw)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/tools/_umap.py\", line 203, in umap\n    neigh_params = neighbors[\"params\"]\n                   ~~~~~~~~~^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/_utils/__init__.py\", line 1049, in __getitem__\n    return self._neighbors_dict[key]\n           ~~~~~~~~~~~~~~~~~~~~^^^^^\nKeyError: 'params'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761830173.6551285,
+      "evaluation_datetime": "2025-10-30T21:16:13.655131"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1802_1761830173",
+      "started_timestamp": 1761830173.6544895,
+      "completed_timestamp": 1761830495.6635783,
+      "final_report": "# Debug Report for Evaluation 1802\n\n## Summary\n**SUCCESS** - Fixed the KeyError and code now runs successfully with a score of 0.5097717559456387.\n\n## Root Cause\nThe original code manually constructed a k-NN neighbor graph by directly setting `adata_proc.obsp['distances']`, `adata_proc.obsp['connectivities']`, and `adata_proc.uns['neighbors']`. However, when calling `sc.tl.umap()`, scanpy expects the `uns['neighbors']` dictionary to contain a `'params'` key with metadata about how the neighbor graph was constructed.\n\nThe error occurred at line 92:\n```python\nsc.tl.umap(adata_proc, random_state=0)\n```\n\nThis raised:\n```\nKeyError: 'params'\n```\n\nBecause scanpy's UMAP function tried to access `adata_proc.uns['neighbors']['params']`, which didn't exist.\n\n## Fix Applied\nAdded the required `'params'` key to the `uns['neighbors']` dictionary with appropriate metadata:\n\n```python\nadata_proc.uns['neighbors'] = {\n    'connectivities_key': 'connectivities',\n    'distances_key': 'distances',\n    'params': {\n        'n_neighbors': k_total,\n        'method': 'umap',\n        'metric': 'cosine',\n        'use_rep': 'X_pca_corrected'\n    }\n}\n```\n\nThis satisfies scanpy's expectation for neighbor graph metadata and allows UMAP to proceed without errors.\n\n## Result\n- **Version**: submission_v2.py\n- **Status**: Running successfully\n- **Score**: 0.5097717559456387\n- **Fix Type**: Simple metadata addition (no algorithmic changes)\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom sklearn.linear_model import Ridge\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import lil_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Implements Telos-Pipe v2, a high-fidelity replication of the monolithic log1p SOTA.\n    \"\"\"\n    print(\"--- Starting Telos-Pipe v2 ---\")\n\n    # --- Stage 0: Preprocessing ---\n    print(\"Stage 0: Preprocessing...\")\n    adata_proc = adata.copy()\n    sc.pp.normalize_total(adata_proc, target_sum=1e4)\n    sc.pp.log1p(adata_proc)\n    sc.pp.highly_variable_genes(adata_proc, n_top_genes=2000, batch_key='batch', subset=True)\n\n    # --- Stage 1: Gene Scaling ---\n    print(\"Stage 1: Applying sc.pp.scale...\")\n    sc.pp.scale(adata_proc, max_value=10, zero_center=True)\n\n    # --- Stage 2: PCA ---\n    n_pcs = 50\n    print(f\"Stage 2: Computing {n_pcs} PCs...\")\n    sc.pp.pca(adata_proc, n_comps=n_pcs)\n    X_pca = adata_proc.obsm['X_pca']\n\n    # --- Stage 3: PBVE-lite (Ridge Correction) ---\n    print(\"Stage 3: Applying PBVE-lite (Ridge Correction)...\")\n    batches = adata.obs['batch'].values # Use original adata for batch info\n    batch_dummies = pd.get_dummies(batches).values\n\n    X_pca_corrected = np.zeros_like(X_pca)\n    for i in range(n_pcs):\n        model = Ridge(alpha=1.0)\n        model.fit(batch_dummies, X_pca[:, i])\n        predictions = model.predict(batch_dummies)\n        X_pca_corrected[:, i] = X_pca[:, i] - predictions\n\n    adata_proc.obsm['X_pca_corrected'] = X_pca_corrected\n\n    # --- Stage 4: BRBG (Equal Quota k-NN Graph) ---\n    print(\"Stage 4: Building BRBG (Equal Quota k-NN Graph)...\")\n    k_total = 48\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = k_total // n_batches\n\n    n_cells = adata_proc.n_obs\n    all_distances = []\n    all_indices = []\n\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        # Build NN model on cells from this batch\n        nn_model = NearestNeighbors(n_neighbors=k_per_batch, metric='cosine')\n        nn_model.fit(X_pca_corrected[batch_mask])\n        # Find neighbors for ALL cells within this batch\n        dist, ind = nn_model.kneighbors(X_pca_corrected)\n        # Convert local indices back to global indices\n        global_indices = np.where(batch_mask)[0]\n        all_indices.append(global_indices[ind])\n        all_distances.append(dist)\n\n    # Combine neighbors from all batches\n    combined_indices = np.concatenate(all_indices, axis=1)\n    combined_distances = np.concatenate(all_distances, axis=1)\n\n    # Build sparse matrices\n    connectivities = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    distances = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        for j_idx in range(combined_indices.shape[1]):\n            neighbor_idx = combined_indices[i, j_idx]\n            dist = combined_distances[i, j_idx]\n\n            # Use cosine distance for distance, and similarity for connectivity\n            distances[i, neighbor_idx] = dist\n            connectivities[i, neighbor_idx] = 1 - dist\n\n    adata_proc.obsp['distances'] = distances.tocsr()\n    adata_proc.obsp['connectivities'] = connectivities.tocsr()\n\n    # Fix: Add the 'params' key that scanpy's UMAP expects\n    adata_proc.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': k_total,\n            'method': 'umap',\n            'metric': 'cosine',\n            'use_rep': 'X_pca_corrected'\n        }\n    }\n\n    # --- Stage 5: UMAP Embedding ---\n    print(\"Stage 5: Generating final UMAP embedding...\")\n    sc.tl.umap(adata_proc, random_state=0)\n    X_emb = adata_proc.obsm['X_umap']\n\n    # --- Final Output ---\n    print(\"Finalizing output AnnData object...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'telos_pipe_v2'},\n        obsm={'X_emb': X_emb}\n    )\n\n    print(f\"--- \u2713 Telos-Pipe v2 complete. ---\")\n    return output\n",
+      "created_timestamp": 1761830218.5186117,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.5097717559456387,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Starting Telos-Pipe v2 ---\nStage 0: Preprocessing...\nStage 1: Applying sc.pp.scale...\nStage 2: Computing 50 PCs...\nStage 3: Applying PBVE-lite (Ridge Correction)...\nStage 4: Building BRBG (Equal Quota k-NN Graph)...\nStage 5: Generating final UMAP embedding...\nFinalizing output AnnData object...\n--- \u2713 Telos-Pipe v2 complete. ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/fd31b4a8-d61b-421d-b104-3e3412555556/result_human.h5ad\n\nRESULT_UUID: fd31b4a8-d61b-421d-b104-3e3412555556\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.261  ARI: 0.348  NMI: 0.638\n  Graph_conn: 0.837  kBET: 0.851  iLISI: 0.310  cLISI: 0.982\n  PCR: 0.530  Cell_cycle: 0.342\n\nRaw Scores (before normalization):\n  ASW_batch: 0.530586  ASW_label: 0.562090  ARI: 0.348306  NMI: 0.637789\n  Graph_conn: 0.839725  kBET: 0.810913  iLISI: 0.309652  cLISI: 0.994808\n  PCR: 0.529733  Cell_cycle: 0.300339",
+          "ASW_batch": [
+            "0.000",
+            0.0
+          ],
+          "ASW_label": [
+            "0.261",
+            0.26052190868055297
+          ],
+          "ARI": [
+            "0.348",
+            0.3483944773577288
+          ],
+          "NMI": [
+            "0.638",
+            0.637686655818696
+          ],
+          "Graph_conn": [
+            "0.837",
+            0.836959516186223
+          ],
+          "kBET": [
+            "0.851",
+            0.8507940287503335
+          ],
+          "iLISI": [
+            "0.310",
+            0.3096518644004787
+          ],
+          "cLISI": [
+            "0.982",
+            0.9821769199511416
+          ],
+          "PCR": [
+            "0.530",
+            0.5297335026447846
+          ],
+          "Cell_cycle": [
+            "0.342",
+            0.3417986856664477
+          ]
+        },
+        "evaluation_timestamp": 1761830474.0848136,
+        "evaluation_datetime": "2025-10-30T21:21:14.084815",
+        "sort_key": [
+          0.5097717559456387
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.5097717559456387,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761830495.6812477,
+    "version_notified": "v2",
+    "message": "Your research submission 'Telos-Pipe v2 - SOTA Replication' (ID: 1802) succeeded after automatic debugging.\n\n**Score:** 0.5097717559456387\n**ASW_batch:** 0.000\n**ASW_label:** 0.261\n**ARI:** 0.348\n**NMI:** 0.638\n**Graph_conn:** 0.837\n**kBET:** 0.851\n**iLISI:** 0.310\n**cLISI:** 0.982\n**PCR:** 0.530\n**Cell_cycle:** 0.342\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.261  ARI: 0.348  NMI: 0.638\n  Graph_conn: 0.837  kBET: 0.851  iLISI: 0.310  cLISI: 0.982\n  PCR: 0.530  Cell_cycle: 0.342\n\nRaw Scores (before normalization):\n  ASW_batch: 0.530586  ASW_label: 0.562090  ARI: 0.348306  NMI: 0.637789\n  Graph_conn: 0.839725  kBET: 0.810913  iLISI: 0.309652  cLISI: 0.994808\n  PCR: 0.529733  Cell_cycle: 0.300339\n\n**Debugger Report:** # Debug Report for Evaluation 1802\n\n## Summary\n**SUCCESS** - Fixed the KeyError and code now runs successfully with a score of 0.5097717559456387.\n\n## Root Cause\nThe original code manually constructed a k-NN neighbor graph by directly setting `adata_proc.obsp['distances']`, `adata_proc.obsp['connectivities']`, and `adata_proc.uns['neighbors']`. However, when calling `sc.tl.umap()`, scanpy expects the `uns['neighbors']` dictionary to contain a `'params'` key with metadata about how the neighbor graph was constructed.\n\nThe error occurred at line 92:\n```python\nsc.tl.umap(adata_proc, random_state=0)\n```\n\nThis raised:\n```\nKeyError: 'params'\n```\n\nBecause scanpy's UMAP function tried to access `adata_proc.uns['neighbors']['params']`, which didn't exist.\n\n## Fix Applied\nAdded the required `'params'` key to the `uns['neighbors']` dictionary with appropriate metadata:\n\n```python\nadata_proc.uns['neighbors'] = {\n    'connectivities_key': 'connectivities',\n    'distances_key': 'distances',\n    'params': {\n        'n_neighbors': k_total,\n        'method': 'umap',\n        'metric': 'cosine',\n        'use_rep': 'X_pca_corrected'\n    }\n}\n```\n\nThis satisfies scanpy's expectation for neighbor graph metadata and allows UMAP to proceed without errors.\n\n## Result\n- **Version**: submission_v2.py\n- **Status**: Running successfully\n- **Score**: 0.5097717559456387\n- **Fix Type**: Simple metadata addition (no algorithmic changes)\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom sklearn.linear_model import Ridge\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import lil_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Implements Telos-Pipe v2, a high-fidelity replication of the monolithic log1p SOTA.\n    \"\"\"\n    print(\"--- Starting Telos-Pipe v2 ---\")\n\n    # --- Stage 0: Preprocessing ---\n    print(\"Stage 0: Preprocessing...\")\n    adata_proc = adata.copy()\n    sc.pp.normalize_total(adata_proc, target_sum=1e4)\n    sc.pp.log1p(adata_proc)\n    sc.pp.highly_variable_genes(adata_proc, n_top_genes=2000, batch_key='batch', subset=True)\n\n    # --- Stage 1: Gene Scaling ---\n    print(\"Stage 1: Applying sc.pp.scale...\")\n    sc.pp.scale(adata_proc, max_value=10, zero_center=True)\n\n    # --- Stage 2: PCA ---\n    n_pcs = 50\n    print(f\"Stage 2: Computing {n_pcs} PCs...\")\n    sc.pp.pca(adata_proc, n_comps=n_pcs)\n    X_pca = adata_proc.obsm['X_pca']\n\n    # --- Stage 3: PBVE-lite (Ridge Correction) ---\n    print(\"Stage 3: Applying PBVE-lite (Ridge Correction)...\")\n    batches = adata.obs['batch'].values # Use original adata for batch info\n    batch_dummies = pd.get_dummies(batches).values\n\n    X_pca_corrected = np.zeros_like(X_pca)\n    for i in range(n_pcs):\n        model = Ridge(alpha=1.0)\n        model.fit(batch_dummies, X_pca[:, i])\n        predictions = model.predict(batch_dummies)\n        X_pca_corrected[:, i] = X_pca[:, i] - predictions\n\n    adata_proc.obsm['X_pca_corrected'] = X_pca_corrected\n\n    # --- Stage 4: BRBG (Equal Quota k-NN Graph) ---\n    print(\"Stage 4: Building BRBG (Equal Quota k-NN Graph)...\")\n    k_total = 48\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    k_per_batch = k_total // n_batches\n\n    n_cells = adata_proc.n_obs\n    all_distances = []\n    all_indices = []\n\n    for batch in unique_batches:\n        batch_mask = (batches == batch)\n        # Build NN model on cells from this batch\n        nn_model = NearestNeighbors(n_neighbors=k_per_batch, metric='cosine')\n        nn_model.fit(X_pca_corrected[batch_mask])\n        # Find neighbors for ALL cells within this batch\n        dist, ind = nn_model.kneighbors(X_pca_corrected)\n        # Convert local indices back to global indices\n        global_indices = np.where(batch_mask)[0]\n        all_indices.append(global_indices[ind])\n        all_distances.append(dist)\n\n    # Combine neighbors from all batches\n    combined_indices = np.concatenate(all_indices, axis=1)\n    combined_distances = np.concatenate(all_distances, axis=1)\n\n    # Build sparse matrices\n    connectivities = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    distances = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        for j_idx in range(combined_indices.shape[1]):\n            neighbor_idx = combined_indices[i, j_idx]\n            dist = combined_distances[i, j_idx]\n\n            # Use cosine distance for distance, and similarity for connectivity\n            distances[i, neighbor_idx] = dist\n            connectivities[i, neighbor_idx] = 1 - dist\n\n    adata_proc.obsp['distances'] = distances.tocsr()\n    adata_proc.obsp['connectivities'] = connectivities.tocsr()\n\n    # Fix: Add the 'params' key that scanpy's UMAP expects\n    adata_proc.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': k_total,\n            'method': 'umap',\n            'metric': 'cosine',\n            'use_rep': 'X_pca_corrected'\n        }\n    }\n\n    # --- Stage 5: UMAP Embedding ---\n    print(\"Stage 5: Generating final UMAP embedding...\")\n    sc.tl.umap(adata_proc, random_state=0)\n    X_emb = adata_proc.obsm['X_umap']\n\n    # --- Final Output ---\n    print(\"Finalizing output AnnData object...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'telos_pipe_v2'},\n        obsm={'X_emb': X_emb}\n    )\n\n    print(f\"--- \u2713 Telos-Pipe v2 complete. ---\")\n    return output\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Starting Telos-Pipe v2 ---\nStage 0: Preprocessing...\nStage 1: Applying sc.pp.scale...\nStage 2: Computing 50 PCs...\nStage 3: Applying PBVE-lite (Ridge Correction)...\nStage 4: Building BRBG (Equal Quota k-NN Graph)...\nStage 5: Generating final UMAP embedding...\nFinalizing output AnnData object...\n--- \u2713 Telos-Pipe v2 complete. ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/fd31b4a8-d61b-421d-b104-3e3412555556/result_human.h5ad\n\nRESULT_UUID: fd31b4a8-d61b-421d-b104-3e3412555556\n\n\nSTDERR:\n\n```"
+  }
+}

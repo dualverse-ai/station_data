@@ -1,0 +1,91 @@
+{
+  "id": "11",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-BalancedGraph-Weighted: Procrustes Embedding + Gaussian-Weighted kNN",
+  "tags": [
+    "pca",
+    "procrustes",
+    "neighbors",
+    "balanced-knn",
+    "weighted"
+  ],
+  "abstract": "Build a batch-balanced kNN graph on PBAGC embedding but use gaussian-weighted connectivities derived from neighbor distances, aiming to retain strong iLISI while improving ASW_batch/NMI/cLISI over the binary graph.",
+  "submitted_tick": 10,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _compute_global_clusters,\n    _align_batches,\n)\nfrom balanced_graph import build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pca_components = 50\n    n_clusters = 64\n    alpha = 0.8\n    ridge = 1e-3\n    min_cells_per_cluster = 5\n    n_neighbors_total = 15\n    metric = 'euclidean'\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] is required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] is required.\"\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=random_state)\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    cluster_labels, k = _compute_global_clusters(Z, n_clusters=n_clusters, random_state=random_state)\n\n    Z_corr, _ = _align_batches(\n        Z, batches, cluster_labels, k, alpha=alpha,\n        min_cells_per_cluster=min_cells_per_cluster, ridge=ridge\n    )\n    adata.obsm['X_emb'] = Z_corr\n\n    # Initialize default neighbor structures, then overwrite with balanced weighted graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn(Z_corr, batches, n_neighbors_total=n_neighbors_total,\n                              metric=metric, weighting='gaussian', symmetric=True)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    return adata\n",
+    "submitted_timestamp": 1761390959.1840394,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5632291927596526,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0a8aecb6-074f-4e57-9caa-a3531bdc2740/result_human.h5ad\n\nRESULT_UUID: 0a8aecb6-074f-4e57-9caa-a3531bdc2740\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.531  NMI: 0.529\n  Graph_conn: 0.853  kBET: 0.733  iLISI: 0.700  cLISI: 0.843\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.531324  NMI: 0.529280\n  Graph_conn: 0.855910  kBET: 0.700368  iLISI: 0.700371  cLISI: 0.954328\n  PCR: 0.547968  Cell_cycle: 0.218411",
+        "ASW_batch": [
+          "0.468",
+          0.4676734086853265
+        ],
+        "ASW_label": [
+          "0.180",
+          0.18032983739773922
+        ],
+        "ARI": [
+          "0.531",
+          0.5313875880653444
+        ],
+        "NMI": [
+          "0.529",
+          0.5291468850313358
+        ],
+        "Graph_conn": [
+          "0.853",
+          0.853423800895231
+        ],
+        "kBET": [
+          "0.733",
+          0.7331670206643777
+        ],
+        "iLISI": [
+          "0.700",
+          0.700370816319487
+        ],
+        "cLISI": [
+          "0.843",
+          0.8432167395353249
+        ],
+        "PCR": [
+          "0.548",
+          0.5479684631306224
+        ],
+        "Cell_cycle": [
+          "0.246",
+          0.24560736787173612
+        ]
+      },
+      "evaluation_timestamp": 1761391349.7005358,
+      "evaluation_datetime": "2025-10-25T19:22:29.700536",
+      "sort_key": [
+        0.5632291927596526
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5632291927596526,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761391349.7207067,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-BalancedGraph-Weighted: Procrustes Embedding + Gaussian-Weighted kNN' (ID: 11) has been evaluated.\n\n**Score:** 0.5632291927596526\n**ASW_batch:** 0.468\n**ASW_label:** 0.180\n**ARI:** 0.531\n**NMI:** 0.529\n**Graph_conn:** 0.853\n**kBET:** 0.733\n**iLISI:** 0.700\n**cLISI:** 0.843\n**PCR:** 0.548\n**Cell_cycle:** 0.246\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.531  NMI: 0.529\n  Graph_conn: 0.853  kBET: 0.733  iLISI: 0.700  cLISI: 0.843\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.531324  NMI: 0.529280\n  Graph_conn: 0.855910  kBET: 0.700368  iLISI: 0.700371  cLISI: 0.954328\n  PCR: 0.547968  Cell_cycle: 0.218411\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0a8aecb6-074f-4e57-9caa-a3531bdc2740/result_human.h5ad\n\nRESULT_UUID: 0a8aecb6-074f-4e57-9caa-a3531bdc2740\n\n\nSTDERR:\n\n```"
+  }
+}

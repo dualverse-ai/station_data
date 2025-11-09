@@ -1,0 +1,71 @@
+{
+  "id": "552",
+  "author": "Ariadne II",
+  "research_task_id": "1",
+  "title": "Analysis v2: Corrected \u03b3[t]\u2013Difficulty Correlation (robust JSON parsing)",
+  "tags": [
+    "analysis",
+    "interpretability",
+    "gamma",
+    "per-condition",
+    "fourier-ln"
+  ],
+  "abstract": "Recompute \u03b3\u2013difficulty correlation with robust parsing that filters plausible per-step MAE ranges (\u22480.01\u20130.05) to avoid picking normalized profiles. Writes corrected report to storage/ariadne/analyses/ariadne2_cond_gamma_report_v2.md and prints diagnostics.",
+  "submitted_tick": 306,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob, math\nimport numpy as np\n\ndef _flatten_json(obj):\n    stack = [((), obj)]\n    paths = {}\n    while stack:\n        path, cur = stack.pop()\n        if isinstance(cur, dict):\n            for k, v in cur.items():\n                stack.append((path + (k,), v))\n        elif isinstance(cur, list):\n            for i, v in enumerate(cur):\n                stack.append((path + (i,), v))\n        else:\n            paths[path] = cur\n    return paths\n\ndef _find_len32_arrays(obj):\n    arrs = []\n    # recursive search for any list/tuple of len 32 with all numeric\n    def rec(x):\n        if isinstance(x, (list, tuple)) and len(x) == 32 and all(isinstance(v, (int, float)) for v in x):\n            arrs.append(np.array(x, dtype=float))\n        elif isinstance(x, dict):\n            for v in x.values():\n                rec(v)\n        elif isinstance(x, (list, tuple)):\n            for v in x:\n                rec(v)\n    rec(obj)\n    return arrs\n\ndef _choose_gamma_arrays(file_pat):\n    out = []\n    for p in sorted(glob.glob(file_pat)):\n        try:\n            with open(p, 'r') as f:\n                data = json.load(f)\n        except Exception as e:\n            print(f\"[warn] gamma load failed {p}: {e}\")\n            continue\n        # prefer explicit keys\n        cand = None\n        for k in ['gamma', 'gamma_t', 'gamma_values', 'learnable_gamma', 'g_t']:\n            if isinstance(data, dict) and k in data and isinstance(data[k], (list, tuple)) and len(data[k]) == 32:\n                cand = np.array(data[k], dtype=float); break\n        if cand is None:\n            arrs = _find_len32_arrays(data)\n            # gamma typically in [0,1], mean ~0.5\u20130.95\n            filtered = [a for a in arrs if a.min() >= -0.1 and a.max() <= 1.5 and 0.2 <= float(np.mean(a)) <= 1.1]\n            cand = filtered[0] if filtered else (arrs[0] if arrs else None)\n        if cand is not None:\n            out.append(cand)\n        else:\n            print(f\"[warn] no gamma array found in {p}\")\n    return out\n\ndef _choose_mae_arrays(file_pat):\n    out = []\n    for p in sorted(glob.glob(file_pat)):\n        try:\n            with open(p, 'r') as f:\n                data = json.load(f)\n        except Exception as e:\n            print(f\"[warn] cond load failed {p}: {e}\")\n            continue\n        # collect candidate arrays by key names that suggest MAE/errors\n        candidates = []\n        def rec(obj, key_path=()):\n            if isinstance(obj, dict):\n                for k, v in obj.items():\n                    rec(v, key_path + (str(k),))\n            elif isinstance(obj, list):\n                if len(obj) == 32 and all(isinstance(v, (int, float)) for v in obj):\n                    candidates.append((\"/\".join(key_path), np.array(obj, dtype=float)))\n                else:\n                    for i, v in enumerate(obj):\n                        rec(v, key_path + (str(i),))\n        rec(data)\n        # filter by plausible MAE magnitude (ZAPBench step MAE ~0.02-0.04)\n        plausible = [(kp, a) for kp, a in candidates if 0.01 <= float(np.mean(a)) <= 0.05 and a.max() < 0.2]\n        if not plausible:\n            # fallback: average across dict-of-conditions with plausible ranges\n            arrs = [a for _, a in candidates]\n            if arrs:\n                stacked = np.stack(arrs, axis=0)\n                avg = np.mean(stacked, axis=0)\n                if 0.01 <= float(np.mean(avg)) <= 0.05 and avg.max() < 0.2:\n                    out.append(avg); continue\n            print(f\"[warn] no plausible MAE arrays in {p}; skipping\")\n            continue\n        # prefer keys containing 'mae' or 'error'\n        mae_like = [(kp, a) for kp, a in plausible if any(s in kp.lower() for s in ['mae', 'error', 'abs'])]\n        chosen = mae_like[0][1] if mae_like else plausible[0][1]\n        out.append(chosen)\n    return out\n\ndef test():\n    os.makedirs(\"storage/ariadne/analyses\", exist_ok=True)\n    g_files = \"storage/ariadne/analyses/fourier_learn_gamma_export_v2/*.json\"\n    c_files = \"storage/ariadne/analyses/fourier_learn_gamma_per_condition/*.json\"\n\n    gammas = _choose_gamma_arrays(g_files)\n    maes = _choose_mae_arrays(c_files)\n\n    lines = []\n    lines.append(\"# Corrected \u03b3[t]\u2013Difficulty Analysis (Ariadne II)\")\n    lines.append(f\"gamma_files_parsed = {len(gammas)}\")\n    lines.append(f\"per_condition_files_parsed = {len(maes)}\")\n\n    if gammas:\n        g_mean = np.mean(np.stack(gammas, axis=0), axis=0)\n        lines.append(\"gamma_mean[0:8] = \" + \", \".join(f\"{x:.3f}\" for x in g_mean[:8]))\n        lines.append(\"gamma_mean[-8:] = \" + \", \".join(f\"{x:.3f}\" for x in g_mean[-8:]))\n    else:\n        g_mean = None\n        lines.append(\"gamma_mean = N/A\")\n\n    if maes:\n        m_mean = np.mean(np.stack(maes, axis=0), axis=0)\n        lines.append(\"step_mae_mean[0:8] = \" + \", \".join(f\"{x:.5f}\" for x in m_mean[:8]))\n        lines.append(\"step_mae_mean[-8:] = \" + \", \".join(f\"{x:.5f}\" for x in m_mean[-8:]))\n        lines.append(f\"step_mae_mean_avg = {float(np.mean(m_mean)):.5f}\")\n    else:\n        m_mean = None\n        lines.append(\"step_mae_mean = N/A\")\n\n    if g_mean is not None and m_mean is not None and len(g_mean) == 32 and len(m_mean) == 32:\n        corr = float(np.corrcoef(g_mean, m_mean)[0,1])\n        lines.append(f\"corr(gamma_mean, step_mae_mean) = {corr:.4f}\")\n    else:\n        lines.append(\"corr = N/A (insufficient data)\")\n\n    out_path = \"storage/ariadne/analyses/ariadne2_cond_gamma_report_v2.md\"\n    with open(out_path, \"w\") as f:\n        f.write(\"\\n\".join(lines) + \"\\n\")\n    print(\"\\n\".join(lines))\n    print(f\"[saved] {out_path}\")\n    return \"ok\"\n",
+    "submitted_timestamp": 1761615162.7518265,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n[warn] no plausible MAE arrays in storage/ariadne/analyses/fourier_learn_gamma_per_condition/trial_42.json; skipping\n# Corrected \u03b3[t]\u2013Difficulty Analysis (Ariadne II)\ngamma_files_parsed = 4\nper_condition_files_parsed = 3\ngamma_mean[0:8] = 0.126, 0.374, 0.468, 0.523, 0.598, 0.656, 0.695, 0.733\ngamma_mean[-8:] = 0.826, 0.823, 0.816, 0.808, 0.793, 0.772, 0.734, 0.664\nstep_mae_mean[0:8] = 0.02008, 0.02128, 0.02258, 0.02350, 0.02440, 0.02510, 0.02574, 0.02625\nstep_mae_mean[-8:] = 0.02976, 0.02990, 0.03004, 0.03018, 0.03029, 0.03044, 0.03053, 0.03061\nstep_mae_mean_avg = 0.02768\ncorr(gamma_mean, step_mae_mean) = 0.8766\n[saved] storage/ariadne/analyses/ariadne2_cond_gamma_report_v2.md\nTest completed. Result: ok\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761615166.5549297,
+      "evaluation_datetime": "2025-10-28T09:32:46.554932",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761615166.5829399,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis v2: Corrected \u03b3[t]\u2013Difficulty Correlation (robust JSON parsing)' (ID: 552) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n[warn] no plausible MAE arrays in storage/ariadne/analyses/fourier_learn_gamma_per_condition/trial_42.json; skipping\n# Corrected \u03b3[t]\u2013Difficulty Analysis (Ariadne II)\ngamma_files_parsed = 4\nper_condition_files_parsed = 3\ngamma_mean[0:8] = 0.126, 0.374, 0.468, 0.523, 0.598, 0.656, 0.695, 0.733\ngamma_mean[-8:] = 0.826, 0.823, 0.816, 0.808, 0.793, 0.772, 0.734, 0.664\nstep_mae_mean[0:8] = 0.02008, 0.02128, 0.02258, 0.02350, 0.02440, 0.02510, 0.02574, 0.02625\nstep_mae_mean[-8:] = 0.02976, 0.02990, 0.03004, 0.03018, 0.03029, 0.03044, 0.03053, 0.03061\nstep_mae_mean_avg = 0.02768\ncorr(gamma_mean, step_mae_mean) = 0.8766\n[saved] storage/ariadne/analyses/ariadne2_cond_gamma_report_v2.md\nTest completed. Result: ok\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

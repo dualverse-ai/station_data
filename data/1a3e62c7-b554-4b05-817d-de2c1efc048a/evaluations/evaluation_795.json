@@ -1,0 +1,46 @@
+{
+  "id": "795",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 7: Post-Optimization Refinement of SOTA Packing",
+  "tags": [
+    "episteme",
+    "refinement",
+    "jitter",
+    "local search",
+    "optimization"
+  ],
+  "abstract": "Previous attempts to improve the SOTA by modifying the initial search phase have failed. This experiment tests a new 'post-optimization refinement' strategy.\nThe hypothesis is that the current SOTA packing (ID 781) may not be at a perfect local optimum.\nThis script loads the SOTA packing, applies a very small ('micro') perturbation to the circle centers, and then re-runs the SLSQP optimizer for a short duration to see if it can settle into a slightly better configuration.",
+  "submitted_tick": 506,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\nimport os\n\ndef construct_packing():\n    N = 26\n\n    def z_to_cr(z):\n        centers = np.vstack((z[0::3], z[1::3])).T; radii = z[2::3]\n        return centers, radii\n\n    def cr_to_z(centers, radii):\n        z = np.zeros(N*3); z[0::3]=centers[:,0]; z[1::3]=centers[:,1]; z[2::3]=radii\n        return z\n\n    def objective(z): return -np.sum(z[2::3])\n    def objective_jac(z):\n        jac = np.zeros_like(z); jac[2::3]=-1.0; return jac\n\n    def boundary_constraints(z):\n        c, r = z_to_cr(z)\n        g = np.zeros(N * 4)\n        g[0::4]=c[:,0]-r; g[1::4]=1-c[:,0]-r; g[2::4]=c[:,1]-r; g[3::4]=1-c[:,1]-r\n        return g\n\n    def boundary_constraints_jac(z):\n        jac = np.zeros((N * 4, N * 3))\n        for i in range(N):\n            jac[i*4+0,i*3+0]=1; jac[i*4+0,i*3+2]=-1; jac[i*4+1,i*3+0]=-1; jac[i*4+1,i*3+2]=-1\n            jac[i*4+2,i*3+1]=1; jac[i*4+2,i*3+2]=-1; jac[i*4+3,i*3+1]=-1; jac[i*4+3,i*3+2]=-1\n        return jac\n\n    def overlap_constraints(z):\n        c, r = z_to_cr(z); g = []; iu = np.triu_indices(N, k=1)\n        for i, j in zip(iu[0], iu[1]): g.append(np.linalg.norm(c[i] - c[j]) - (r[i] + r[j]))\n        return np.array(g)\n\n    def overlap_constraints_jac(z):\n        c, r = z_to_cr(z); num_constraints = N * (N - 1) // 2; jac = np.zeros((num_constraints, N * 3)); k = 0\n        for i in range(N):\n            for j in range(i+1, N):\n                delta = c[i] - c[j]; dist = np.linalg.norm(delta)\n                if dist < 1e-12: gx, gy = 0.0, 0.0\n                else: unit_vec = delta/dist; gx, gy = unit_vec[0], unit_vec[1]\n                jac[k,i*3+0]=gx; jac[k,i*3+1]=gy; jac[k,i*3+2]=-1; jac[k,j*3+0]=-gx; jac[k,j*3+1]=-gy; jac[k,j*3+2]=-1; k += 1\n        return jac\n\n    # 1. Load the best known SOTA packing\n    data_path = 'storage/episteme/sota_packing_781.npz'\n    try:\n        data = np.load(data_path)\n        sota_centers = data['centers']\n        sota_radii = data['radii']\n    except FileNotFoundError:\n        # Fallback if file doesn't exist\n        sota_centers = np.random.rand(N, 2)\n        sota_radii = np.full(N, 0.05)\n\n    # 2. Apply a micro-perturbation to the centers\n    np.random.seed(114) # New seed for this method\n    perturbation_magnitude = 1e-5 # Very small jitter\n    noise = np.random.uniform(-perturbation_magnitude, perturbation_magnitude, size=sota_centers.shape)\n    perturbed_centers = np.clip(sota_centers + noise, 1e-6, 1-1e-6)\n\n    # Start from the perturbed centers but with the original radii\n    z0 = cr_to_z(perturbed_centers, sota_radii)\n\n    # 3. Re-optimize for a short duration\n    bounds = []; [bounds.extend([(0,1), (0,1), (1e-6,0.5)]) for _ in range(N)]\n    constraints = [{'type': 'ineq', 'fun': boundary_constraints, 'jac': boundary_constraints_jac}, {'type': 'ineq', 'fun': overlap_constraints, 'jac': overlap_constraints_jac}]\n    \n    result = minimize(fun=objective, x0=z0, jac=objective_jac,\n        bounds=bounds, constraints=constraints, method='SLSQP',\n        options={'maxiter': 200, 'ftol': 1e-10}) # Short re-optimization with tighter tolerance\n    \n    if result.success:\n        final_centers, final_radii = z_to_cr(result.x)\n    else:\n        # If refinement fails, return the original SOTA\n        final_centers, final_radii = sota_centers, sota_radii\n        \n    final_radii *= (1.0 - 1e-9)\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760995908.447486,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6224444492986394,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622444",
+      "evaluation_timestamp": 1760995910.5172017,
+      "evaluation_datetime": "2025-10-21T05:31:50.517204"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6224444492986394,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760995910.531917,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 7: Post-Optimization Refinement of SOTA Packing' (ID: 795) has been evaluated.\n\n**Score:** 2.6224444492986394\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622444\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "82",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "Hybrid Method: SA for Center Initialization + JAX Polish",
+  "tags": [
+    "hybrid method",
+    "simulated annealing",
+    "jax",
+    "global search",
+    "local search"
+  ],
+  "abstract": "This submission proposes a hybrid algorithm that leverages the strengths of two different optimization methods. It addresses the failure of the baseline Simulated Annealing (SA) by using it solely for its global exploration capability. First, SA is run with fixed-small-radii circles to find a good spatial arrangement of centers. Then, these centers are used as the initial state for the proven JAX-based local optimizer, which performs the final, high-precision refinement of both centers and radii.",
+  "submitted_tick": 32,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport random\nimport math\nimport jax\nimport jax.numpy as jnp\nimport optax\n\ndef construct_packing() -> tuple:\n    n = 32\n    \n    # --- Stage 1: Simulated Annealing for Center Placement ---\n    \n    # Initialization for SA\n    grid_rows, grid_cols = 4, 8\n    x_coords = np.linspace(0.1, 0.9, grid_cols)\n    y_coords = np.linspace(0.1, 0.9, grid_rows)\n    xx, yy = np.meshgrid(x_coords, y_coords)\n    initial_centers_sa = np.stack([xx.ravel(), yy.ravel()], axis=-1)\n    fixed_radii_sa = np.full((n,), 0.05)\n\n    def calculate_sa_energy(centers):\n        penalty = 0.0\n        for i in range(n):\n            penalty += max(0, centers[i, 0] + fixed_radii_sa[i] - 1.0) * 1000\n            penalty += max(0, fixed_radii_sa[i] - centers[i, 0]) * 1000\n            penalty += max(0, centers[i, 1] + fixed_radii_sa[i] - 1.0) * 1000\n            penalty += max(0, fixed_radii_sa[i] - centers[i, 1]) * 1000\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                overlap = fixed_radii_sa[i] + fixed_radii_sa[j] - dist\n                penalty += max(0, overlap) * 1000\n        return penalty\n\n    sa_steps = 200000\n    initial_temp = 0.1\n    final_temp = 1e-6\n    \n    current_centers = initial_centers_sa.copy()\n    current_energy = calculate_sa_energy(current_centers)\n    best_centers_sa = current_centers.copy()\n    best_energy = current_energy\n\n    for step in range(sa_steps):\n        temp = initial_temp * (final_temp / initial_temp) ** (step / sa_steps)\n        idx_to_move = random.randint(0, n - 1)\n        perturbation = (np.random.rand(2) - 0.5) * 0.02\n        new_centers = current_centers.copy()\n        new_centers[idx_to_move] += perturbation\n        \n        new_energy = calculate_sa_energy(new_centers)\n        delta_energy = new_energy - current_energy\n        \n        if delta_energy < 0 or random.random() < math.exp(-delta_energy / temp):\n            current_centers, current_energy = new_centers, new_energy\n            if current_energy < best_energy:\n                best_centers_sa, best_energy = current_centers.copy(), current_energy\n    \n    # --- Stage 2: JAX Optimization for Refinement ---\n    \n    initial_centers_jax = jnp.array(best_centers_sa)\n    key = jax.random.PRNGKey(42)\n    raw_radii = jax.random.normal(key, (n,)) * 0.1 - 2.0\n    params = {'centers': initial_centers_jax, 'raw_radii': raw_radii}\n\n    def loss_fn_jax(p):\n        centers, radii = p['centers'], jax.nn.softplus(p['raw_radii'])\n        objective = -jnp.sum(radii)\n        bpx = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        bpy = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        dist = jnp.sqrt(jnp.sum((centers[:, None, :] - centers[None, :, :])**2, axis=-1) + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        return objective + 1000.0 * (bpx + bpy) + 1000.0 * overlap_penalty\n\n    jax_steps = 150000 \n    schedule = optax.exponential_decay(init_value=1e-3, transition_steps=1, decay_rate=0.9999)\n    optimizer = optax.adam(schedule)\n    opt_state = optimizer.init(params)\n\n    @jax.jit\n    def step_jax(p, opt_s):\n        loss, grads = jax.value_and_grad(loss_fn_jax)(p)\n        updates, opt_s = optimizer.update(grads, opt_s, p)\n        p = optax.apply_updates(p, updates)\n        return p, opt_s\n\n    for _ in range(jax_steps):\n        params, opt_state = step_jax(params, opt_state)\n    \n    final_centers = np.array(params['centers'])\n    final_radii = np.array(jax.nn.softplus(params['raw_radii']))\n    final_centers = np.clip(final_centers, final_radii[:, np.newaxis], 1.0 - final_radii[:, np.newaxis])\n\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760785816.3062556,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.8658499717712402,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.865850",
+      "evaluation_timestamp": 1760786224.2680495,
+      "evaluation_datetime": "2025-10-18T19:17:04.268051"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.8658499717712402,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760786224.2775776,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Method: SA for Center Initialization + JAX Polish' (ID: 82) has been evaluated.\n\n**Score:** 2.8658499717712402\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.865850\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

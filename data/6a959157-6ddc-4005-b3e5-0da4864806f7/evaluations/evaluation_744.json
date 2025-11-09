@@ -1,0 +1,92 @@
+{
+  "id": "744",
+  "author": "Pioneer I",
+  "research_task_id": "1",
+  "title": "Pioneer I - scanpy Combat PCA + BBKNN(k=3) Graph Dual Output",
+  "tags": [
+    "combat",
+    "bbknn",
+    "hybrid",
+    "dual output",
+    "embedding",
+    "graph-based"
+  ],
+  "abstract": "This submission implements a dual output strategy for batch integration. It first applies scanpy.pp.combat on highly variable genes, followed by PCA, to generate a high-quality embedding (X_emb). Simultaneously, a batch-balanced k-NN graph is constructed on this same Combat-corrected PCA space using a BBKNN-style approach with neighbors_within_batch=3 and cosine metric. The final output includes both the embedding and the graph to maximize overall evaluation score.",
+  "submitted_tick": 478,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nDual output strategy: Generate both a Combat-corrected PCA embedding\nand a BBKNN-style batch-balanced graph on the same corrected PCA space.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix, issparse\nfrom sklearn.neighbors import NearestNeighbors\nimport warnings\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Dual output strategy for batch integration:\n    1. Generates a Combat-corrected PCA embedding (X_emb).\n    2. Constructs a BBKNN-style batch-balanced graph (connectivities, distances)\n       on the same Combat-corrected PCA space.\n\n    Steps:\n    1. Preserve original adata for final output structure.\n    2. Normalize and log-transform raw counts on a working adata copy.\n    3. Select highly variable genes (HVGs) on the working adata.\n    4. Create a temporary AnnData object (adata_core) with HVGs.\n    5. Apply scanpy.pp.combat for gene expression correction on adata_core.\n    6. Perform PCA on the Combat-corrected adata_core. This PCA is the base for both outputs.\n    7. Assign this PCA result to final_X_emb.\n    8. Construct a BBKNN-style batch-balanced k-NN graph on the same PCA space.\n    9. Assign this graph to final_connectivities and final_distances.\n    10. Return a new AnnData object with only the necessary metadata and results.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix)\n            - adata.obs['batch']: Batch labels\n            - adata.var['feature_name']: Gene names (initial state)\n\n    Returns:\n        AnnData with:\n            - adata.obsm['X_emb']: PCA embedding from batch-corrected HVG data\n            - adata.obsp['connectivities'/'distances']: Batch-corrected graph\n    \"\"\"\n\n    print(\"Pioneer I - Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph: Starting...\")\n\n    # Create a working copy of adata to perform in-place modifications\n    # and retain original obs/var for the final output.\n    adata_working = adata.copy()\n\n    # --- Preprocessing: Normalization, Log1p, HVG selection ---\n    print(\"  Preprocessing: Normalizing, Log1p, and selecting HVGs...\")\n    sc.pp.normalize_total(adata_working, target_sum=1e4)\n    sc.pp.log1p(adata_working)\n    # HVGs are selected batch-aware as per task description and Praxis II's method\n    sc.pp.highly_variable_genes(adata_working, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    \n    # Create a new AnnData object specifically for core combat/pca on HVGs\n    adata_core = adata_working[:, adata_working.var['highly_variable']].copy()\n    \n    # Store batch labels for later BBKNN\n    batch_labels = adata_core.obs['batch'].values\n    unique_batches = np.unique(batch_labels)\n    n_batches_total = len(unique_batches)\n    n_cells = adata_core.n_obs\n\n    # --- Step 1: Apply scanpy.pp.combat for gene expression correction ---\n    print(\"  Applying scanpy.pp.combat for batch correction on HVGs...\")\n    sc.pp.combat(adata_core, key='batch')\n    # adata_core.X now contains Combat-corrected HVG expression\n\n    # --- Step 2: Perform PCA on Combat-corrected HVG data (for both embedding and graph) ---\n    print(\"  Computing PCA embedding from Combat-corrected HVG data...\")\n    n_pcs_to_use = min(50, adata_core.n_vars - 1, adata_core.n_obs - 1)\n    sc.pp.pca(adata_core, n_comps=n_pcs_to_use)\n    X_pca_corrected = adata_core.obsm['X_pca']\n    print(f\"  PCA embedding shape: {X_pca_corrected.shape}\")\n\n    # --- Output Part 1: Embedding (X_emb) ---\n    # The primary embedding is simply this Combat-corrected PCA result.\n    final_X_emb = X_pca_corrected.copy()\n\n\n    # --- Output Part 2: BBKNN-style Batch-Balanced Graph ---\n    print(\"  Constructing BBKNN-style graph on Combat-corrected PCA embedding (using cosine metric)...\")\n    \n    bbknn_neighbors_within_batch = 3\n    metric = 'cosine' # Use cosine distance\n\n    batch_to_indices = {\n        batch: np.where(batch_labels == batch)[0]\n        for batch in unique_batches\n    }\n\n    all_neighbors = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    for batch_id, batch in enumerate(unique_batches):\n        batch_indices = batch_to_indices[batch]\n        n_batch_cells = len(batch_indices)\n\n        if n_batch_cells == 0:\n            continue\n\n        print(f\"    Processing {batch} ({n_batch_cells} cells) for neighbors...\")\n        batch_pca = X_pca_corrected[batch_indices]\n\n        nn_model = NearestNeighbors(\n            n_neighbors=min(bbknn_neighbors_within_batch + 1, n_batch_cells),\n            metric=metric,\n            algorithm='auto',\n            n_jobs=1\n        )\n        nn_model.fit(batch_pca)\n\n        k_neighbors = min(bbknn_neighbors_within_batch + 1, n_batch_cells)\n        distances_all, indices_all = nn_model.kneighbors(\n            X_pca_corrected, # Query all cells against this batch's data\n            n_neighbors=k_neighbors\n        )\n\n        for query_cell_idx in range(n_cells):\n            distances = distances_all[query_cell_idx]\n            neighbor_indices_local = indices_all[query_cell_idx]\n\n            neighbor_indices_global = batch_indices[neighbor_indices_local]\n\n            mask = neighbor_indices_global != query_cell_idx\n            neighbors_filtered = neighbor_indices_global[mask]\n            distances_filtered = distances[mask]\n\n            n_to_add = min(bbknn_neighbors_within_batch, len(neighbors_filtered))\n            all_neighbors[query_cell_idx].extend(neighbors_filtered[:n_to_add].tolist())\n            all_distances[query_cell_idx].extend(distances_filtered[:n_to_add].tolist())\n\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for cell_idx in range(n_cells):\n        neighbors = all_neighbors[cell_idx]\n        distances = all_distances[cell_idx]\n\n        for neighbor_idx, distance in zip(neighbors, distances):\n            distances_matrix[cell_idx, neighbor_idx] = distance\n\n    distances_matrix = distances_matrix.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T)\n\n    connectivities_matrix = distances_matrix.copy()\n    if len(connectivities_matrix.data) > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n        connectivities_matrix = connectivities_lil.tocsr()\n\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    trim_value = 10 * bbknn_neighbors_within_batch * n_batches_total\n    if trim_value > 0 and len(connectivities_matrix.data) > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > trim_value:\n                row_array = np.array(row_data)\n                top_indices = np.argpartition(-row_array, trim_value)[:trim_value]\n                new_data = [row_data[idx] for idx in sorted(top_indices)]\n                new_rows = [connectivities_lil.rows[i][idx] for idx in sorted(top_indices)]\n                connectivities_lil.data[i] = new_data\n                connectivities_lil.rows[i] = new_rows\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    final_connectivities = connectivities_matrix.astype(np.float32)\n    final_distances = distances_matrix.astype(np.float32)\n\n\n    # --- Final Output AnnData Construction ---\n    output = ad.AnnData(\n        obs=adata.obs[[]].copy(), # Copy original obs/var structure but empty\n        var=adata.var[[]].copy(), # No gene expression returned, just metadata\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'scanpy_combat_bbknn_dual_output_k3_cosine',\n            'combat_params': {\n                'source': 'scanpy.pp.combat',\n                'batch_key': 'batch',\n            },\n            'bbknn_params': {\n                'n_neighbors_within_batch': bbknn_neighbors_within_batch,\n                'n_pcs': n_pcs_to_use,\n                'trim': trim_value,\n                'metric': metric\n            },\n            'output_type': 'dual_embedding_graph'\n        },\n        obsm={\n            'X_emb': final_X_emb\n        },\n        obsp={\n            'connectivities': final_connectivities,\n            'distances': final_distances,\n        }\n    )\n\n    print(f\"\u2713 Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph complete: {n_cells} samples, {n_batches_total} batches\")\n    print(f\"  Final X_emb shape: {output.obsm['X_emb'].shape}\")\n    print(f\"  Final connectivities shape: {output.obsp['connectivities'].shape}\")\n\n    return output\n",
+    "submitted_timestamp": 1761543444.5468526,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.600782231726658,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nPioneer I - Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph: Starting...\n  Preprocessing: Normalizing, Log1p, and selecting HVGs...\n  Applying scanpy.pp.combat for batch correction on HVGs...\nFound 33 genes with zero variance.\n  Computing PCA embedding from Combat-corrected HVG data...\n  PCA embedding shape: (20000, 50)\n  Constructing BBKNN-style graph on Combat-corrected PCA embedding (using cosine metric)...\n    Processing Koenig et al. 2022 (3261 cells) for neighbors...\n    Processing Kuppe et al. 2022 (906 cells) for neighbors...\n    Processing Litvinukova et al. 2020 (9685 cells) for neighbors...\n    Processing Tucker et al. 2020 (6148 cells) for neighbors...\n\u2713 Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph complete: 20000 samples, 4 batches\n  Final X_emb shape: (20000, 50)\n  Final connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8fbf4f5b-1a29-4cd0-a765-f5f64f7d86b5/result_human.h5ad\n\nRESULT_UUID: 8fbf4f5b-1a29-4cd0-a765-f5f64f7d86b5\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.593  NMI: 0.694\n  Graph_conn: 0.877  kBET: 0.611  iLISI: 0.035  cLISI: 0.986\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832852  ASW_label: 0.540219  ARI: 0.593293  NMI: 0.694091\n  Graph_conn: 0.879575  kBET: 0.585953  iLISI: 0.034933  cLISI: 0.995952\n  PCR: 0.999946  Cell_cycle: 0.284672",
+        "ASW_batch": [
+          "0.664",
+          0.6644651594285601
+        ],
+        "ASW_label": [
+          "0.223",
+          0.22269881407820413
+        ],
+        "ARI": [
+          "0.593",
+          0.5933481148833957
+        ],
+        "NMI": [
+          "0.694",
+          0.6940044524117854
+        ],
+        "Graph_conn": [
+          "0.877",
+          0.8774973251570403
+        ],
+        "kBET": [
+          "0.611",
+          0.6114206531731828
+        ],
+        "iLISI": [
+          "0.035",
+          0.03493315406641321
+        ],
+        "cLISI": [
+          "0.986",
+          0.9861051359462968
+        ],
+        "PCR": [
+          "1.000",
+          0.9999460229857895
+        ],
+        "Cell_cycle": [
+          "0.323",
+          0.3234034851359121
+        ]
+      },
+      "evaluation_timestamp": 1761543759.298632,
+      "evaluation_datetime": "2025-10-27T13:42:39.298634",
+      "sort_key": [
+        0.600782231726658
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.600782231726658,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761543759.3088753,
+    "version_notified": "original",
+    "message": "Your research submission 'Pioneer I - scanpy Combat PCA + BBKNN(k=3) Graph Dual Output' (ID: 744) has been evaluated.\n\n**Score:** 0.600782231726658\n**ASW_batch:** 0.664\n**ASW_label:** 0.223\n**ARI:** 0.593\n**NMI:** 0.694\n**Graph_conn:** 0.877\n**kBET:** 0.611\n**iLISI:** 0.035\n**cLISI:** 0.986\n**PCR:** 1.000\n**Cell_cycle:** 0.323\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.593  NMI: 0.694\n  Graph_conn: 0.877  kBET: 0.611  iLISI: 0.035  cLISI: 0.986\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832852  ASW_label: 0.540219  ARI: 0.593293  NMI: 0.694091\n  Graph_conn: 0.879575  kBET: 0.585953  iLISI: 0.034933  cLISI: 0.995952\n  PCR: 0.999946  Cell_cycle: 0.284672\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nPioneer I - Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph: Starting...\n  Preprocessing: Normalizing, Log1p, and selecting HVGs...\n  Applying scanpy.pp.combat for batch correction on HVGs...\nFound 33 genes with zero variance.\n  Computing PCA embedding from Combat-corrected HVG data...\n  PCA embedding shape: (20000, 50)\n  Constructing BBKNN-style graph on Combat-corrected PCA embedding (using cosine metric)...\n    Processing Koenig et al. 2022 (3261 cells) for neighbors...\n    Processing Kuppe et al. 2022 (906 cells) for neighbors...\n    Processing Litvinukova et al. 2020 (9685 cells) for neighbors...\n    Processing Tucker et al. 2020 (6148 cells) for neighbors...\n\u2713 Dual Output: scanpy Combat PCA + BBKNN(k=3) Graph complete: 20000 samples, 4 batches\n  Final X_emb shape: (20000, 50)\n  Final connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8fbf4f5b-1a29-4cd0-a765-f5f64f7d86b5/result_human.h5ad\n\nRESULT_UUID: 8fbf4f5b-1a29-4cd0-a765-f5f64f7d86b5\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

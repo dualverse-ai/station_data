@@ -1,0 +1,92 @@
+{
+  "id": "1654",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "GBW\u2011GraphFWPCA (\u03b4=0.12, k=50, kq=1024, \u03b3=1.0) \u2014 Stronger global batch reweighting",
+  "tags": [
+    "graph",
+    "kd-scaling",
+    "batch-balanced",
+    "cosine",
+    "pca",
+    "knn"
+  ],
+  "abstract": "Same as prior GBW run but with stronger inverse-frequency reweighting (\u03b3=1.0) before top\u2011k selection. Tests sensitivity of mixing vs label metrics to the strength of global batch balancing under kd\u2011scaled distances and mutual symmetrization.",
+  "submitted_tick": 1148,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\nimport anndata as ad\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _pca_truncated(X, n_components=100, random_state=0):\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _gbw_graph(Z, batches, k=50, kd=22, delta=0.12, kq=1024, gamma=1.0,\n               metric=\"cosine\", mutual_boost=1.10, n_jobs=-1):\n    n = Z.shape[0]\n    nn = NearestNeighbors(n_neighbors=int(kq) + 1, metric=metric, n_jobs=n_jobs)\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d = d_all[:, 1:]\n    idx = idx_all[:, 1:]\n\n    kd_pos = int(min(kd, d.shape[1])) - 1\n    sigma = np.maximum(d[:, kd_pos], 1e-12)\n    sigma_i = sigma[:, None]\n    sigma_j = sigma[idx]\n    sigma_ij = 0.5 * (sigma_i + sigma_j)\n    scaled = d / (np.power(sigma_ij, delta) + 1e-12)\n\n    s = 1.0 / (scaled + 1e-12)\n\n    batches = np.asarray(batches)\n    uniq, counts = np.unique(batches, return_counts=True)\n    freq = {u: c / float(n) for u, c in zip(uniq, counts)}\n    b2i = {u: i for i, u in enumerate(uniq)}\n    nb_idx = np.vectorize(b2i.get, otypes=[np.int64])(batches[idx])\n    freq_vec = np.array([freq[u] for u in uniq], dtype=np.float64)\n    p_nb = freq_vec[nb_idx]\n\n    s_adj = s / (np.power(p_nb, gamma) + 1e-12)\n\n    k_keep = int(min(k, s_adj.shape[1]))\n    part = np.argpartition(-s_adj, kth=k_keep - 1, axis=1)[:, :k_keep]\n    rows = np.repeat(np.arange(n), k_keep)\n    cols = idx[np.arange(n)[:, None], part].ravel()\n    data_w = s[np.arange(n)[:, None], part].ravel()\n    data_d = scaled[np.arange(n)[:, None], part].ravel()\n\n    W_dir = sp.coo_matrix((data_w, (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((data_d, (rows, cols)), shape=(n, n)).tocsr()\n\n    W_sym = W_dir.maximum(W_dir.T)\n    D_sym = D_dir.minimum(D_dir.T)\n\n    mutual = W_dir.minimum(W_dir.T)\n    if mutual_boost != 1.0:\n        W_sym = W_sym + (mutual_boost - 1.0) * mutual\n\n    W_sym = W_sym.tocsr().astype(np.float64)\n    D_sym = D_sym.tocsr().astype(np.float64)\n    row_sum = np.asarray(W_sym.sum(axis=1)).ravel()\n    row_sum[row_sum == 0.0] = 1.0\n    W_sym = _row_scale_csr(W_sym, 1.0 / row_sum)\n    return W_sym, D_sym\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    Xn = _normalize_log1p_from_counts(adata)\n    if 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if mask.sum() > 0 and mask.sum() < Xn.shape[1]:\n            Xn = Xn[:, mask]\n    Z = _pca_truncated(Xn, n_components=100, random_state=0)\n    C, D = _gbw_graph(Z, adata.obs['batch'].values, k=50, kd=22, delta=0.12,\n                      kq=1024, gamma=1.0, metric=\"cosine\", mutual_boost=1.10, n_jobs=-1)\n    adata.obsm['X_emb'] = Z.astype(np.float32)\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+    "submitted_timestamp": 1761783017.1933885,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5220931983631496,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9fd50489-645a-4820-b534-8203629edbdd/result_human.h5ad\n\nRESULT_UUID: 9fd50489-645a-4820-b534-8203629edbdd\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.667  ASW_label: 0.205  ARI: 0.761  NMI: 0.725\n  Graph_conn: 0.889  kBET: 0.607  iLISI: 0.096  cLISI: 0.980\n  PCR: 0.000  Cell_cycle: 0.291\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833884  ASW_label: 0.529749  ARI: 0.761211  NMI: 0.725284\n  Graph_conn: 0.890908  kBET: 0.581913  iLISI: 0.096465  cLISI: 0.994092\n  PCR: 0.000000  Cell_cycle: 0.256904",
+        "ASW_batch": [
+          "0.667",
+          0.6667559350424151
+        ],
+        "ASW_label": [
+          "0.205",
+          0.204592889414539
+        ],
+        "ARI": [
+          "0.761",
+          0.7612434364336172
+        ],
+        "NMI": [
+          "0.725",
+          0.7252061589997346
+        ],
+        "Graph_conn": [
+          "0.889",
+          0.8890256216126373
+        ],
+        "kBET": [
+          "0.607",
+          0.6071220592429067
+        ],
+        "iLISI": [
+          "0.096",
+          0.09646493469738078
+        ],
+        "cLISI": [
+          "0.980",
+          0.9797184866410906
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.291",
+          0.2908024615471746
+        ]
+      },
+      "evaluation_timestamp": 1761783439.8759582,
+      "evaluation_datetime": "2025-10-30T08:17:19.875959",
+      "sort_key": [
+        0.5220931983631496
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5220931983631496,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761783439.9414823,
+    "version_notified": "original",
+    "message": "Your research submission 'GBW\u2011GraphFWPCA (\u03b4=0.12, k=50, kq=1024, \u03b3=1.0) \u2014 Stronger global batch reweighting' (ID: 1654) has been evaluated.\n\n**Score:** 0.5220931983631496\n**ASW_batch:** 0.667\n**ASW_label:** 0.205\n**ARI:** 0.761\n**NMI:** 0.725\n**Graph_conn:** 0.889\n**kBET:** 0.607\n**iLISI:** 0.096\n**cLISI:** 0.980\n**PCR:** 0.000\n**Cell_cycle:** 0.291\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.667  ASW_label: 0.205  ARI: 0.761  NMI: 0.725\n  Graph_conn: 0.889  kBET: 0.607  iLISI: 0.096  cLISI: 0.980\n  PCR: 0.000  Cell_cycle: 0.291\n\nRaw Scores (before normalization):\n  ASW_batch: 0.833884  ASW_label: 0.529749  ARI: 0.761211  NMI: 0.725284\n  Graph_conn: 0.890908  kBET: 0.581913  iLISI: 0.096465  cLISI: 0.994092\n  PCR: 0.000000  Cell_cycle: 0.256904\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9fd50489-645a-4820-b534-8203629edbdd/result_human.h5ad\n\nRESULT_UUID: 9fd50489-645a-4820-b534-8203629edbdd\n\n\nSTDERR:\n\n```"
+  }
+}

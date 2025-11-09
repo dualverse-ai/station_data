@@ -1,0 +1,47 @@
+{
+  "id": "717",
+  "author": "Kairos I",
+  "research_task_id": "1",
+  "title": "Mirror Pipeline: Consolidate->Normalize->Validate->Novelty (shared outputs)",
+  "tags": [
+    "pipeline",
+    "shared",
+    "consolidate",
+    "normalize",
+    "validate",
+    "novelty"
+  ],
+  "abstract": "Reads Progressor raw logs, writes consolidated/normalized JSONL to shared, validates with Progressor schema, and emits novelty scores to shared if validation is clean.",
+  "submitted_tick": 295,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, re\nsys.path.append('storage/shared')\n\nfrom progressor_tools.consolidate_all import consolidate\nfrom progressor_tools.normalize_transgen_logs import normalize_file\nfrom progressor_tools.validate_transgen_logs import validate_file\nfrom progressor_tools.novelty_stub import run as run_novelty\n\nin_dir    = 'storage/progressor/raw_eval_logs'\nout_jsonl = 'storage/shared/progressor_outputs/all_transgen_logs.jsonl'\nout_norm  = 'storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl'\nschema    = 'storage/shared/progressor_tools/schema_hint_progressor_v1.json'\nnovelty_o = 'storage/shared/progressor_outputs/novelty_scores.jsonl'\n\n# Helper for list[...] type hints\nTYPE_MAP = {\"int\": int, \"float\": float, \"str\": str, \"bool\": bool}\ndef _parse_type(spec):\n    s = str(spec).strip().lower()\n    if s in TYPE_MAP:\n        return TYPE_MAP[s]\n    m = re.fullmatch(r\"list\\[(int|float|str|bool)\\]\", s)\n    if m:\n        inner = TYPE_MAP[m.group(1)]\n        def list_checker(v):\n            if not isinstance(v, list):\n                return False\n            if inner in (int, float):\n                try:\n                    for x in v:\n                        inner(x)\n                    return True\n                except Exception:\n                    return False\n            return all(isinstance(x, inner) for x in v)\n        return list_checker\n    return None\n\n# 1) Consolidate Progressor raw JSON files to shared JSONL\ncons_stats = consolidate(in_dir, out_jsonl)\n\n# 2) Normalize to shared normalized JSONL\nnorm_stats = normalize_file(out_jsonl, out_norm)\n\n# 3) Load schema hint (strict required + types incl list[str])\nif os.path.exists(schema):\n    with open(schema, 'r', encoding='utf-8') as f:\n        sh = json.load(f)\n    required   = sh.get('required') or []\n    th_raw     = sh.get('type_hints') or {}\n    type_hints = {k: _parse_type(v) for k, v in th_raw.items()}\nelse:\n    print(\"MIRROR_PIPELINE: schema not found; proceeding without strict types:\", schema)\n    required, type_hints = [], {}\n\n# 4) Validate normalized JSONL in shared\nvres = validate_file(out_norm, required=required, type_hints=type_hints)\n\nsummary = {\n    \"consolidate\": cons_stats,\n    \"normalize\": norm_stats,\n    \"validate\": {\n        \"path\": vres[\"path\"],\n        \"ok\": vres[\"ok_records\"],\n        \"total\": vres[\"total_lines\"],\n        \"json_errors\": vres[\"json_errors\"],\n        \"non_dict\": vres[\"non_dict_records\"],\n        \"missing_required\": vres[\"missing_required\"],\n        \"type_mismatches\": vres[\"type_mismatches\"],\n    }\n}\nprint(\"MIRROR_PIPELINE_SUMMARY:\", json.dumps(summary))\n\n# 5) Run novelty if validation is clean\nclean = (\n    summary[\"validate\"][\"ok\"] == summary[\"validate\"][\"total\"] and\n    summary[\"validate\"][\"json_errors\"] == 0 and\n    summary[\"validate\"][\"non_dict\"] == 0 and\n    summary[\"validate\"][\"missing_required\"] == 0 and\n    summary[\"validate\"][\"type_mismatches\"] == 0 and\n    summary[\"validate\"][\"total\"] > 0\n)\nif clean:\n    print(\"MIRROR_PIPELINE: validation clean -> running novelty stub to\", novelty_o)\n    os.makedirs(os.path.dirname(novelty_o), exist_ok=True)\n    run_novelty(in_path=out_norm, out_path=novelty_o)\nelse:\n    print(\"MIRROR_PIPELINE: validation not clean or no records; skipping novelty.\")\n",
+    "submitted_timestamp": 1761208060.1074128,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nCONSOLIDATE_OK files_seen: 12 files_read_ok: 9 json_errors: 3 records_written: 9 non_dict_skipped: 0 list_items_written: 0\nNORMALIZE_OK read: 9 written: 9 json_errors: 0 non_dict: 0\nVALIDATION_OK\npath: storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\ntotal_lines: 9 ok: 9 json_errors: 0 non_dict: 0\nmissing_required_count: 7\ntype_mismatches_count: 2\ntop_keys: ['eval_id', 'generation_id', 'title', 'tags', 'abstract', 'submission_code', 'execution_log', 'log_content']\nsample_errors: [{'line': 1, 'error': \"Missing fields: ['log_content']\"}, {'line': 1, 'error': \"Type mismatches: ['generation_id']\"}, {'line': 2, 'error': \"Missing fields: ['log_content']\"}, {'line': 2, 'error': \"Type mismatches: ['generation_id']\"}, {'line': 4, 'error': \"Missing fields: ['log_content']\"}, {'line': 6, 'error': \"Missing fields: ['log_content']\"}, {'line': 7, 'error': \"Missing fields: ['log_content']\"}, {'line': 8, 'error': \"Missing fields: ['execution_log', 'log_content']\"}, {'line': 9, 'error': \"Missing fields: ['execution_log', 'log_content']\"}]\nMIRROR_PIPELINE_SUMMARY: {\"consolidate\": {\"in_dir\": \"storage/progressor/raw_eval_logs\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.jsonl\", \"files_seen\": 12, \"files_read_ok\": 9, \"json_errors\": 3, \"records_written\": 9, \"non_dict_skipped\": 0, \"list_items_written\": 0}, \"normalize\": {\"in_path\": \"storage/shared/progressor_outputs/all_transgen_logs.jsonl\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"read_lines\": 9, \"written_lines\": 9, \"json_errors\": 0, \"non_dict_records\": 0}, \"validate\": {\"path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"ok\": 9, \"total\": 9, \"json_errors\": 0, \"non_dict\": 0, \"missing_required\": 7, \"type_mismatches\": 2}}\nMIRROR_PIPELINE: validation not clean or no records; skipping novelty.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761208062.3676462,
+      "evaluation_datetime": "2025-10-23T16:27:42.367649"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761208062.43112,
+    "version_notified": "original",
+    "message": "Your research submission 'Mirror Pipeline: Consolidate->Normalize->Validate->Novelty (shared outputs)' (ID: 717) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nCONSOLIDATE_OK files_seen: 12 files_read_ok: 9 json_errors: 3 records_written: 9 non_dict_skipped: 0 list_items_written: 0\nNORMALIZE_OK read: 9 written: 9 json_errors: 0 non_dict: 0\nVALIDATION_OK\npath: storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\ntotal_lines: 9 ok: 9 json_errors: 0 non_dict: 0\nmissing_required_count: 7\ntype_mismatches_count: 2\ntop_keys: ['eval_id', 'generation_id', 'title', 'tags', 'abstract', 'submission_code', 'execution_log', 'log_content']\nsample_errors: [{'line': 1, 'error': \"Missing fields: ['log_content']\"}, {'line': 1, 'error': \"Type mismatches: ['generation_id']\"}, {'line': 2, 'error': \"Missing fields: ['log_content']\"}, {'line': 2, 'error': \"Type mismatches: ['generation_id']\"}, {'line': 4, 'error': \"Missing fields: ['log_content']\"}, {'line': 6, 'error': \"Missing fields: ['log_content']\"}, {'line': 7, 'error': \"Missing fields: ['log_content']\"}, {'line': 8, 'error': \"Missing fields: ['execution_log', 'log_content']\"}, {'line': 9, 'error': \"Missing fields: ['execution_log', 'log_content']\"}]\nMIRROR_PIPELINE_SUMMARY: {\"consolidate\": {\"in_dir\": \"storage/progressor/raw_eval_logs\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.jsonl\", \"files_seen\": 12, \"files_read_ok\": 9, \"json_errors\": 3, \"records_written\": 9, \"non_dict_skipped\": 0, \"list_items_written\": 0}, \"normalize\": {\"in_path\": \"storage/shared/progressor_outputs/all_transgen_logs.jsonl\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"read_lines\": 9, \"written_lines\": 9, \"json_errors\": 0, \"non_dict_records\": 0}, \"validate\": {\"path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"ok\": 9, \"total\": 9, \"json_errors\": 0, \"non_dict\": 0, \"missing_required\": 7, \"type_mismatches\": 2}}\nMIRROR_PIPELINE: validation not clean or no records; skipping novelty.\n\n\nSTDERR:\n\n```"
+  }
+}

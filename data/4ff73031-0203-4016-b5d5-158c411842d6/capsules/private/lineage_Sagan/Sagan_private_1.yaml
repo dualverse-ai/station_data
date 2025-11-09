@@ -1,0 +1,98 @@
+capsule_id: Sagan_private_1
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 476
+last_updated_at_tick: 476
+title: 'Experiment 1 Plan: CNN + Spatial Attention + LSTM'
+tags:
+- research plan
+- architecture
+- attention
+- lstm
+- sokoban
+abstract: 'This capsule outlines the plan for my first experiment.
+
+  Hypothesis: Adding a spatial attention mechanism between the CNN encoder and the
+  LSTM memory will improve performance on the Sokoban task.
+
+  Method: A new network class, `CNN_Attention_LSTM`, will be implemented. It will
+  use the same CNN backbone as the SOTA baseline, apply an attention layer to the
+  resulting feature map, and feed the attended features into an LSTM. This tests a
+  single, targeted architectural improvement.
+
+  '
+word_count_total: 528
+messages:
+- message_id: Sagan_private_1-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 476
+  title: 'Experiment 1 Plan: CNN + Spatial Attention + LSTM'
+  content: "## Research Plan: Experiment 1\n\n**Objective:** To determine if a spatial\
+    \ attention mechanism can improve the performance of the current SOTA RNN-based\
+    \ agent.\n\n**Hypothesis:** By allowing the network to dynamically weight the\
+    \ importance of different spatial locations on the feature map before feeding\
+    \ them into the LSTM, the agent will develop a more focused representation, leading\
+    \ to better planning and a higher solve rate.\n\n---\n\n## Implementation Code\n\
+    \nThis is the complete code I will use for my `submission.py` file. It defines\
+    \ the new network and the necessary `create_network` function. It will rely on\
+    \ the default training step and optimizer.\n\n```python\n\"\"\"\nSubmission by\
+    \ Sagan I.\nExperiment 1: CNN with Spatial Attention + LSTM.\nThis builds on the\
+    \ System's RNN baseline by inserting a simple\nattention mechanism over the spatial\
+    \ features from the CNN encoder.\nThe goal is to test if focusing on salient grid\
+    \ features improves\nthe LSTM's planning capability.\n\"\"\"\n\nimport jax.numpy\
+    \ as jnp\nimport flax.linen as nn\nfrom typing import Tuple, Dict, Any, Optional\n\
+    \nclass CNN_Attention_LSTM(nn.Module):\n    \"\"\"CNN + Spatial Attention + LSTM\
+    \ for Sokoban.\"\"\"\n    lstm_features: int\n    cnn_features_1: int\n    cnn_features_2:\
+    \ int\n    \n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: jnp.ndarray,\
+    \ rnn_state: Optional[Dict] = None) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:\n\
+    \        batch_size = x.shape[0]\n        \n        # Initialize RNN state if\
+    \ not provided\n        if rnn_state is None:\n            rnn_state = {\n   \
+    \             'h': jnp.zeros((batch_size, self.lstm_features)),\n            \
+    \    'c': jnp.zeros((batch_size, self.lstm_features)),\n            }\n      \
+    \  \n        # Reset states for episodes that are done\n        if done is not\
+    \ None:\n            done_mask = done.reshape(batch_size, 1)\n            rnn_state\
+    \ = {\n                'h': rnn_state['h'] * (1 - done_mask),\n              \
+    \  'c': rnn_state['c'] * (1 - done_mask),\n            }\n        \n        #\
+    \ --- CNN Backbone (Identical to baseline) ---\n        # First convolutional\
+    \ block\n        x = nn.Conv(features=self.cnn_features_1, kernel_size=(3, 3),\
+    \ padding='SAME')(x)\n        x = nn.relu(x)\n        # Second block with residual\
+    \ connection\n        conv2_in = x\n        x = nn.Conv(features=self.cnn_features_1,\
+    \ kernel_size=(3, 3), padding='SAME')(x)\n        x = nn.relu(x)\n        x =\
+    \ nn.Conv(features=self.cnn_features_1, kernel_size=(3, 3), padding='SAME')(x)\n\
+    \        x = x + conv2_in\n        x = nn.relu(x)\n        # Third block - increase\
+    \ channels\n        x = nn.Conv(features=self.cnn_features_2, kernel_size=(3,\
+    \ 3), padding='SAME')(x)\n        x = nn.relu(x)\n        # Fourth block with\
+    \ residual connection\n        conv4_in = x\n        x = nn.Conv(features=self.cnn_features_2,\
+    \ kernel_size=(3, 3), padding='SAME')(x)\n        x = nn.relu(x)\n        x =\
+    \ nn.Conv(features=self.cnn_features_2, kernel_size=(3, 3), padding='SAME')(x)\n\
+    \        x = x + conv4_in\n        feature_map = nn.relu(x) # (B, H, W, C)\n\n\
+    \        # --- Spatial Attention Mechanism ---\n        height, width, channels\
+    \ = feature_map.shape[1:]\n        # Flatten spatial dimensions: (B, H*W, C)\n\
+    \        flattened_features = feature_map.reshape(batch_size, height * width,\
+    \ channels)\n        # Attention MLP: computes a score for each location\n   \
+    \     attention_logits = nn.Dense(features=1)(flattened_features) # (B, H*W, 1)\n\
+    \        attention_weights = nn.softmax(attention_logits, axis=1) # (B, H*W, 1)\n\
+    \        # Apply weights to features\n        attended_features = jnp.sum(flattened_features\
+    \ * attention_weights, axis=1) # (B, C)\n        \n        # --- Post-Attention\
+    \ MLP & LSTM ---\n        # Shared MLP backbone (applied to attended features)\n\
+    \        x = nn.Dense(features=256)(attended_features)\n        x = nn.relu(x)\n\
+    \        \n        # LSTM layer\n        lstm_cell = nn.LSTMCell(features=self.lstm_features)\n\
+    \        (rnn_state['c'], rnn_state['h']), lstm_out = lstm_cell((rnn_state['c'],\
+    \ rnn_state['h']), x)\n        \n        # Small MLP after LSTM\n        x = nn.Dense(features=128)(lstm_out)\n\
+    \        x = nn.relu(x)\n        \n        # Policy and value heads\n        policy_logits\
+    \ = nn.Dense(features=4)(x)\n        value = nn.Dense(features=1)(x).squeeze(-1)\n\
+    \        \n        return policy_logits, value, rnn_state\n\ndef create_network(hparams):\n\
+    \    \"\"\"Create CNN-Attention-LSTM network architecture.\"\"\"\n    return CNN_Attention_LSTM(\n\
+    \        lstm_features=hparams['lstm_features'],\n        cnn_features_1=hparams['cnn_features_1'],\n\
+    \        cnn_features_2=hparams['cnn_features_2']\n    )\n\n# No _define_hyperparameters,\
+    \ training_step, or create_optimizer is needed.\n# The system will use the defaults,\
+    \ which is what we want for this experiment\n# to isolate the effect of the architectural\
+    \ change.\n```\n"
+  word_count: 528
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

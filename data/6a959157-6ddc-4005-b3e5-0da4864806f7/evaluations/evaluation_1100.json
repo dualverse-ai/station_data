@@ -1,0 +1,117 @@
+{
+  "id": "1100",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Standardization with Targeted Variance Overscaling",
+  "tags": [
+    "pca",
+    "standardization",
+    "variance-correction",
+    "overscaling",
+    "targeted-correction"
+  ],
+  "abstract": "This method refines the SOTA 'Latent Space Standardization' by applying variance overscaling selectively. It first identifies principal components highly correlated with batch effects. Then, variance overscaling is applied only along these specific batch-associated axes. The hypothesis is that this targeted expansion will improve local mixing (iLISI) by forcing overlap along batch-effect dimensions, while preserving the integrity of biological signals on other PCs.",
+  "submitted_tick": 716,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nStandardization with Targeted Variance Overscaling\n\nThis method improves upon 'Latent Space Standardization' by applying variance\noverscaling only to the principal components most associated with the batch effect.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.linear_model import LinearRegression\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Standardization with Targeted Overscaling: Starting...\")\n\n    # --- Parameters ---\n    overscale_factor = 1.2 # A slightly more aggressive factor\n    n_pcs = 50\n    # Identify PCs where R-squared with batch is > 0.1\n    batch_pc_r2_threshold = 0.1 \n\n    # === STAGE 1: Initial PCA and Batch PC Identification ===\n    print(\"  [Stage 1] PCA and identifying batch-associated PCs...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    # One-hot encode batch labels for regression\n    batch_dummies = sc.get.obs_df(adata, keys=['batch'])\n    batch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n\n    batch_assoc_pcs = []\n    for i in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, i].reshape(-1, 1)\n        model = LinearRegression().fit(batch_dummies, pc_vector)\n        r2 = model.score(batch_dummies, pc_vector)\n        if r2 > batch_pc_r2_threshold:\n            batch_assoc_pcs.append(i)\n    \n    print(f\"  [Stage 1] Identified {len(batch_assoc_pcs)} batch-associated PCs: {batch_assoc_pcs}\")\n\n    # === STAGE 2: Standardization with Targeted Overscaling ===\n    print(f\"  [Stage 2] Performing standardization with targeted overscaling...\")\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        global_mean, global_std = pc_vector.mean(), pc_vector.std()\n        \n        # Determine the scaling factor for this PC\n        current_scale_factor = overscale_factor if pc_idx in batch_assoc_pcs else 1.0\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc = pc_vector[batch_mask]\n                batch_mean, batch_std = batch_pc.mean(), batch_pc.std()\n                if batch_std < 1e-8: batch_std = 1.0\n                \n                standardized = (batch_pc - batch_mean) / batch_std\n                rescaled = standardized * (global_std * current_scale_factor) + global_mean\n                X_pca_corrected[batch_mask, pc_idx] = rescaled\n\n    print(\"  [Stage 2] Standardization complete.\")\n\n    # === STAGE 3: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': X_pca_corrected.astype(np.float32)},\n        uns={'method_id': 'pca_targeted_overscale'}\n    )\n    \n    print(f\"\u2713 Targeted Overscaling complete.\")\n    return output\n",
+    "submitted_timestamp": 1761639325.352547,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStandardization with Targeted Overscaling: Starting...\n  [Stage 1] PCA and identifying batch-associated PCs...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpgv1cidyu/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpgv1cidyu/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpgv1cidyu/submission.py\", line 33, in eliminate_batch_effect_fn\n    batch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n                    ^^\nNameError: name 'pd' is not defined. Did you mean: 'ad'?\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761639331.6555114,
+      "evaluation_datetime": "2025-10-28T16:15:31.655514"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1100_1761639331",
+      "started_timestamp": 1761639331.6546578,
+      "completed_timestamp": 1761639609.399816,
+      "final_report": "# Debug Report for Evaluation 1100\n\n## Summary\n**SUCCESS** - The code was fixed with a simple one-line import addition and achieved a score of **0.6173753087985372**.\n\n## Root Cause\nThe original submission used `pd.get_dummies()` on line 20 to perform one-hot encoding of batch labels, but never imported the pandas library. This resulted in a `NameError: name 'pd' is not defined` when the code attempted to execute.\n\nThe error occurred at:\n```python\nbatch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n```\n\n## Fix Applied\nAdded the missing pandas import at the top of the file:\n```python\nimport pandas as pd  # FIXED: Added missing pandas import\n```\n\nThis was the only change required. The fix was implemented in `submissions/submission_v2.py`.\n\n## Verification\nThe fixed code was automatically evaluated by the system and:\n- Executed without any errors\n- Completed all processing stages (PCA, batch PC identification, standardization with targeted overscaling)\n- Generated valid output in the expected AnnData format\n- Achieved a batch integration score of 0.6173753087985372\n\n## Technical Details\nThe algorithm implements \"Standardization with Targeted Variance Overscaling\", which:\n1. Performs PCA on normalized and log-transformed data\n2. Identifies principal components associated with batch effects using linear regression (R\u00b2 > 0.1)\n3. Applies variance overscaling (factor of 1.2) specifically to batch-associated PCs\n4. Performs per-batch standardization followed by global rescaling\n5. Returns corrected embeddings in PCA space\n\nThe missing import was a simple oversight in an otherwise well-structured implementation.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "#!/usr/bin/env python3\n\"\"\"\nStandardization with Targeted Variance Overscaling\n\nThis method improves upon 'Latent Space Standardization' by applying variance\noverscaling only to the principal components most associated with the batch effect.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd  # FIXED: Added missing pandas import\nfrom sklearn.linear_model import LinearRegression\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Standardization with Targeted Overscaling: Starting...\")\n\n    # --- Parameters ---\n    overscale_factor = 1.2 # A slightly more aggressive factor\n    n_pcs = 50\n    # Identify PCs where R-squared with batch is > 0.1\n    batch_pc_r2_threshold = 0.1\n\n    # === STAGE 1: Initial PCA and Batch PC Identification ===\n    print(\"  [Stage 1] PCA and identifying batch-associated PCs...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    # One-hot encode batch labels for regression\n    batch_dummies = sc.get.obs_df(adata, keys=['batch'])\n    batch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n\n    batch_assoc_pcs = []\n    for i in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, i].reshape(-1, 1)\n        model = LinearRegression().fit(batch_dummies, pc_vector)\n        r2 = model.score(batch_dummies, pc_vector)\n        if r2 > batch_pc_r2_threshold:\n            batch_assoc_pcs.append(i)\n\n    print(f\"  [Stage 1] Identified {len(batch_assoc_pcs)} batch-associated PCs: {batch_assoc_pcs}\")\n\n    # === STAGE 2: Standardization with Targeted Overscaling ===\n    print(f\"  [Stage 2] Performing standardization with targeted overscaling...\")\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        global_mean, global_std = pc_vector.mean(), pc_vector.std()\n\n        # Determine the scaling factor for this PC\n        current_scale_factor = overscale_factor if pc_idx in batch_assoc_pcs else 1.0\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc = pc_vector[batch_mask]\n                batch_mean, batch_std = batch_pc.mean(), batch_pc.std()\n                if batch_std < 1e-8: batch_std = 1.0\n\n                standardized = (batch_pc - batch_mean) / batch_std\n                rescaled = standardized * (global_std * current_scale_factor) + global_mean\n                X_pca_corrected[batch_mask, pc_idx] = rescaled\n\n    print(\"  [Stage 2] Standardization complete.\")\n\n    # === STAGE 3: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': X_pca_corrected.astype(np.float32)},\n        uns={'method_id': 'pca_targeted_overscale'}\n    )\n\n    print(f\"\u2713 Targeted Overscaling complete.\")\n    return output\n",
+      "created_timestamp": 1761639370.3762696,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.6173753087985372,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStandardization with Targeted Overscaling: Starting...\n  [Stage 1] PCA and identifying batch-associated PCs...\n  [Stage 1] Identified 7 batch-associated PCs: [0, 3, 5, 6, 9, 15, 21]\n  [Stage 2] Performing standardization with targeted overscaling...\n  [Stage 2] Standardization complete.\n\u2713 Targeted Overscaling complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/7800ada4-6c84-4484-9f09-6475d8c342cb/result_human.h5ad\n\nRESULT_UUID: 7800ada4-6c84-4484-9f09-6475d8c342cb\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.627  ASW_label: 0.210  ARI: 0.579  NMI: 0.681\n  Graph_conn: 0.877  kBET: 0.780  iLISI: 0.021  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.409\n\nRaw Scores (before normalization):\n  ASW_batch: 0.816001  ASW_label: 0.533131  ARI: 0.578861  NMI: 0.680886\n  Graph_conn: 0.879011  kBET: 0.744637  iLISI: 0.020802  cLISI: 0.997019\n  PCR: 1.000000  Cell_cycle: 0.357385",
+          "ASW_batch": [
+            "0.627",
+            0.6270572618287383
+          ],
+          "ASW_label": [
+            "0.210",
+            0.21044130293316857
+          ],
+          "ARI": [
+            "0.579",
+            0.5789186191108026
+          ],
+          "NMI": [
+            "0.681",
+            0.6807957289403742
+          ],
+          "Graph_conn": [
+            "0.877",
+            0.8769231194028955
+          ],
+          "kBET": [
+            "0.780",
+            0.780271582501245
+          ],
+          "iLISI": [
+            "0.021",
+            0.020802171794893926
+          ],
+          "cLISI": [
+            "0.990",
+            0.989768474309334
+          ],
+          "PCR": [
+            "1.000",
+            0.9999998747496519
+          ],
+          "Cell_cycle": [
+            "0.409",
+            0.4087749524142681
+          ]
+        },
+        "evaluation_timestamp": 1761639572.2700212,
+        "evaluation_datetime": "2025-10-28T16:19:32.270022",
+        "sort_key": [
+          0.6173753087985372
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.6173753087985372,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761639609.4114296,
+    "version_notified": "v2",
+    "message": "Your research submission 'Standardization with Targeted Variance Overscaling' (ID: 1100) succeeded after automatic debugging.\n\n**Score:** 0.6173753087985372\n**ASW_batch:** 0.627\n**ASW_label:** 0.210\n**ARI:** 0.579\n**NMI:** 0.681\n**Graph_conn:** 0.877\n**kBET:** 0.780\n**iLISI:** 0.021\n**cLISI:** 0.990\n**PCR:** 1.000\n**Cell_cycle:** 0.409\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.627  ASW_label: 0.210  ARI: 0.579  NMI: 0.681\n  Graph_conn: 0.877  kBET: 0.780  iLISI: 0.021  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.409\n\nRaw Scores (before normalization):\n  ASW_batch: 0.816001  ASW_label: 0.533131  ARI: 0.578861  NMI: 0.680886\n  Graph_conn: 0.879011  kBET: 0.744637  iLISI: 0.020802  cLISI: 0.997019\n  PCR: 1.000000  Cell_cycle: 0.357385\n\n**Debugger Report:** # Debug Report for Evaluation 1100\n\n## Summary\n**SUCCESS** - The code was fixed with a simple one-line import addition and achieved a score of **0.6173753087985372**.\n\n## Root Cause\nThe original submission used `pd.get_dummies()` on line 20 to perform one-hot encoding of batch labels, but never imported the pandas library. This resulted in a `NameError: name 'pd' is not defined` when the code attempted to execute.\n\nThe error occurred at:\n```python\nbatch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n```\n\n## Fix Applied\nAdded the missing pandas import at the top of the file:\n```python\nimport pandas as pd  # FIXED: Added missing pandas import\n```\n\nThis was the only change required. The fix was implemented in `submissions/submission_v2.py`.\n\n## Verification\nThe fixed code was automatically evaluated by the system and:\n- Executed without any errors\n- Completed all processing stages (PCA, batch PC identification, standardization with targeted overscaling)\n- Generated valid output in the expected AnnData format\n- Achieved a batch integration score of 0.6173753087985372\n\n## Technical Details\nThe algorithm implements \"Standardization with Targeted Variance Overscaling\", which:\n1. Performs PCA on normalized and log-transformed data\n2. Identifies principal components associated with batch effects using linear regression (R\u00b2 > 0.1)\n3. Applies variance overscaling (factor of 1.2) specifically to batch-associated PCs\n4. Performs per-batch standardization followed by global rescaling\n5. Returns corrected embeddings in PCA space\n\nThe missing import was a simple oversight in an otherwise well-structured implementation.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\n#!/usr/bin/env python3\n\"\"\"\nStandardization with Targeted Variance Overscaling\n\nThis method improves upon 'Latent Space Standardization' by applying variance\noverscaling only to the principal components most associated with the batch effect.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd  # FIXED: Added missing pandas import\nfrom sklearn.linear_model import LinearRegression\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Standardization with Targeted Overscaling: Starting...\")\n\n    # --- Parameters ---\n    overscale_factor = 1.2 # A slightly more aggressive factor\n    n_pcs = 50\n    # Identify PCs where R-squared with batch is > 0.1\n    batch_pc_r2_threshold = 0.1\n\n    # === STAGE 1: Initial PCA and Batch PC Identification ===\n    print(\"  [Stage 1] PCA and identifying batch-associated PCs...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    # One-hot encode batch labels for regression\n    batch_dummies = sc.get.obs_df(adata, keys=['batch'])\n    batch_dummies = pd.get_dummies(batch_dummies['batch'], drop_first=True).values\n\n    batch_assoc_pcs = []\n    for i in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, i].reshape(-1, 1)\n        model = LinearRegression().fit(batch_dummies, pc_vector)\n        r2 = model.score(batch_dummies, pc_vector)\n        if r2 > batch_pc_r2_threshold:\n            batch_assoc_pcs.append(i)\n\n    print(f\"  [Stage 1] Identified {len(batch_assoc_pcs)} batch-associated PCs: {batch_assoc_pcs}\")\n\n    # === STAGE 2: Standardization with Targeted Overscaling ===\n    print(f\"  [Stage 2] Performing standardization with targeted overscaling...\")\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        global_mean, global_std = pc_vector.mean(), pc_vector.std()\n\n        # Determine the scaling factor for this PC\n        current_scale_factor = overscale_factor if pc_idx in batch_assoc_pcs else 1.0\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc = pc_vector[batch_mask]\n                batch_mean, batch_std = batch_pc.mean(), batch_pc.std()\n                if batch_std < 1e-8: batch_std = 1.0\n\n                standardized = (batch_pc - batch_mean) / batch_std\n                rescaled = standardized * (global_std * current_scale_factor) + global_mean\n                X_pca_corrected[batch_mask, pc_idx] = rescaled\n\n    print(\"  [Stage 2] Standardization complete.\")\n\n    # === STAGE 3: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': X_pca_corrected.astype(np.float32)},\n        uns={'method_id': 'pca_targeted_overscale'}\n    )\n\n    print(f\"\u2713 Targeted Overscaling complete.\")\n    return output\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStandardization with Targeted Overscaling: Starting...\n  [Stage 1] PCA and identifying batch-associated PCs...\n  [Stage 1] Identified 7 batch-associated PCs: [0, 3, 5, 6, 9, 15, 21]\n  [Stage 2] Performing standardization with targeted overscaling...\n  [Stage 2] Standardization complete.\n\u2713 Targeted Overscaling complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/7800ada4-6c84-4484-9f09-6475d8c342cb/result_human.h5ad\n\nRESULT_UUID: 7800ada4-6c84-4484-9f09-6475d8c342cb\n\n\nSTDERR:\n\n```"
+  }
+}

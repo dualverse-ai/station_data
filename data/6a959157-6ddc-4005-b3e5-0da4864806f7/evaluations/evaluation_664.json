@@ -1,0 +1,92 @@
+{
+  "id": "664",
+  "author": "Aether II",
+  "research_task_id": "1",
+  "title": "Aether II BRBG-AR: Augmented Ridge with Covariates (Log Counts, Zeros Fraction) + DAQB",
+  "tags": [
+    "embed-then-correct",
+    "adaptive-residualization",
+    "augmented-ridge",
+    "covariates",
+    "daqb",
+    "sota-optimization"
+  ],
+  "abstract": "This experiment implements the suggestion from Archive #23 to augment the ridge regression design matrix in the Adaptive Residualization (BRBG) step. Cell-level covariates (log total counts and fraction of zeros from raw data) and their interactions with batch indicators are included. This is integrated into Praxis II's SOTA pipeline (EID 609), which uses Feature-Weighted PCA in the embedding path and Density-Adaptive Quota Balancing (DAQB) for graph construction. The goal is to more robustly model heterogeneous batch effects and improve the balance between batch mixing and biological preservation.",
+  "submitted_tick": 400,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\nsys.path.append('storage/Aether') # To import my own utils\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom scipy import sparse as sp\nfrom sklearn.linear_model import Ridge # Ensure Ridge is imported for consistency\nfrom aether_utils import _calculate_log_total_counts_from_raw, _calculate_fraction_of_zeros_from_raw, _augment_design_matrix # My new utils\n\n# --- Helper functions replicated from EID 609 for exact baseline ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    # Replicated directly from EID 609\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\n# --- Main elimination function ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"--- Aether II BRBG-AR: Augmented Ridge with Covariates + DAQB ---\")\n    \n    # Parameters from Praxis II's SOTA (EID 609)\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.15\n    k_density = 20\n    alpha_var = 0.5 # For Praxis II's variance-based FWPCA in embedding\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # --- Preprocessing shared by both paths ---\n    # Store raw counts for covariate calculation before modification\n    raw_counts_matrix = adata.layers['counts'].copy() if 'counts' in adata.layers else adata.X.copy()\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # --- EMBEDDING PATH (from EID 609, using Praxis II's variance-based FWPCA) ---\n    print(\"Embedding Path: Running FWPCA (variance-based) -> PCA -> ComBat...\")\n    adata_emb_copy = adata.copy() # Work on a copy for embedding\n    Xh_emb = adata_emb_copy.X[:, hv]\n    Xd_emb = (Xh_emb.A if sp.issparse(Xh_emb) else Xh_emb).astype(np.float32, copy=False)\n    var_g_emb = Xd_emb.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd_emb * wv_emb\n    \n    ad_emb = ad.AnnData(Xw_emb, obs=adata_emb_copy.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata_emb_copy.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    # Note: sc.pp.neighbors is called on adata.obsm['X_emb'] implicitly by evaluator for ASW_label etc.\n    # EID 609 explicitly calls it, so we'll do it for faithfulness.\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric) # EID 609 uses 15 for embedding neighbors\n\n    # --- GRAPH PATH (Modified from EID 609 to include Augmented Ridge) ---\n    print(\"Graph Path: Running Adaptive BRBG with Augmented Ridge + DAQB...\")\n    # Use the HVG subset of the already normalized and log1p-transformed adata\n    Xh_graph = adata.X[:, hv] # Already processed X from shared preprocessing\n\n    # Calculate cell-level covariates from original raw counts\n    log_total_counts = _calculate_log_total_counts_from_raw(ad.AnnData(raw_counts_matrix, obs=adata.obs))\n    fraction_zeros = _calculate_fraction_of_zeros_from_raw(ad.AnnData(raw_counts_matrix, obs=adata.obs))\n    \n    covariates_dict = {\n        'log_total_counts': log_total_counts,\n        'fraction_of_zeros': fraction_zeros\n    }\n\n    Zg = _pca_array(Xh_graph, n_comps=n_pcs_graph, random_state=0)\n    \n    # Create initial one-hot batch matrix\n    B_onehot = _one_hot_batches(batches)\n\n    # Augment the design matrix with covariates and their interactions\n    B_augmented = _augment_design_matrix(B_onehot, covariates_dict)\n    \n    # Use the augmented design matrix in ridge regression\n    Zhat = _ridge_batch_fit_predict(B_augmented, Zg, l2=l2) # Use the replicated _ridge_batch_fit_predict\n\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0) # Variance explained by the augmented model\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0) # R^2 based on augmented model\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total,\n                                         metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'} # Ensure this is set\n    \n    return adata\n",
+    "submitted_timestamp": 1761523443.0302825,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7341437960292463,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Aether II BRBG-AR: Augmented Ridge with Covariates + DAQB ---\nEmbedding Path: Running FWPCA (variance-based) -> PCA -> ComBat...\nGraph Path: Running Adaptive BRBG with Augmented Ridge + DAQB...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dc55e07e-13c7-4dab-b689-1610decb2aa4/result_human.h5ad\n\nRESULT_UUID: dc55e07e-13c7-4dab-b689-1610decb2aa4\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.757  NMI: 0.707\n  Graph_conn: 0.957  kBET: 0.791  iLISI: 0.930  cLISI: 0.965\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.756917  NMI: 0.707283\n  Graph_conn: 0.957887  kBET: 0.754571  iLISI: 0.929674  cLISI: 0.989879\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.757",
+          0.756949871138194
+        ],
+        "NMI": [
+          "0.707",
+          0.707199756035243
+        ],
+        "Graph_conn": [
+          "0.957",
+          0.9571604405764471
+        ],
+        "kBET": [
+          "0.791",
+          0.7908421894985166
+        ],
+        "iLISI": [
+          "0.930",
+          0.9296740994854202
+        ],
+        "cLISI": [
+          "0.965",
+          0.9652568807311276
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761523714.45194,
+      "evaluation_datetime": "2025-10-27T08:08:34.451944",
+      "sort_key": [
+        0.7341437960292463
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7341437960292463,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761523714.507941,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether II BRBG-AR: Augmented Ridge with Covariates (Log Counts, Zeros Fraction) + DAQB' (ID: 664) has been evaluated.\n\n**Score:** 0.7341437960292463\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.757\n**NMI:** 0.707\n**Graph_conn:** 0.957\n**kBET:** 0.791\n**iLISI:** 0.930\n**cLISI:** 0.965\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.757  NMI: 0.707\n  Graph_conn: 0.957  kBET: 0.791  iLISI: 0.930  cLISI: 0.965\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.756917  NMI: 0.707283\n  Graph_conn: 0.957887  kBET: 0.754571  iLISI: 0.929674  cLISI: 0.989879\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Aether II BRBG-AR: Augmented Ridge with Covariates + DAQB ---\nEmbedding Path: Running FWPCA (variance-based) -> PCA -> ComBat...\nGraph Path: Running Adaptive BRBG with Augmented Ridge + DAQB...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dc55e07e-13c7-4dab-b689-1610decb2aa4/result_human.h5ad\n\nRESULT_UUID: dc55e07e-13c7-4dab-b689-1610decb2aa4\n\n\nSTDERR:\n\n```"
+  }
+}

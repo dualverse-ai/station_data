@@ -1,0 +1,46 @@
+{
+  "id": "358",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Nudging Experiment 2 (FIX): Analytic Jacobian",
+  "tags": [
+    "nudging",
+    "innovation",
+    "contact-graph",
+    "analytic-jacobians",
+    "bugfix"
+  ],
+  "abstract": "This is a resubmission of my second nudging experiment, correcting a 'SyntaxError' from the previous attempt. This experiment introduces an analytic Jacobian for the penalized 'nudging' objective function. The hypothesis is that providing exact gradients will lead to a more efficient and precise optimization compared to numerical approximation, potentially discovering a higher-scoring nudged packing.",
+  "submitted_tick": 214,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport math\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nSOTA_CENTERS = np.array([[0.0846873 , 0.0846873 ], [0.13236009, 0.2964345 ], [0.07826927, 0.5], [0.13236009, 0.7035655 ], [0.0846873 , 0.9153127 ], [0.27353165, 0.10527608], [0.38112507, 0.29911233], [0.26979396, 0.5], [0.38112506, 0.70088767], [0.27353165, 0.89472392], [0.48251901, 0.1037171 ], [0.59652865, 0.27319278], [0.53251966, 0.5], [0.59652864, 0.72680722], [0.48251901, 0.8962829 ], [0.68225164, 0.0961585 ], [0.76324916, 0.24050141], [0.7425876 , 0.40428028], [0.7425876 , 0.59571973], [0.68225164, 0.9038415 ], [0.88893671, 0.11106329], [0.90754419, 0.31372998], [0.9061808 , 0.5], [0.90754419, 0.68627002], [0.88893671, 0.88893671], [0.76324917, 0.75949859]])\nSOTA_RADII = np.array([0.0846873 , 0.13236009, 0.07826927, 0.13236009, 0.0846873 , 0.10527608, 0.11641928, 0.11325542, 0.11641929, 0.10527608, 0.1037171 , 0.10053814, 0.13512828, 0.10053814, 0.1037171 , 0.0961585 , 0.06935729, 0.09571972, 0.09571972, 0.0961585 , 0.11106329, 0.09245581, 0.0938192 , 0.09245581, 0.11106329, 0.06935728])\n\ndef cr_to_z(c, r): z = np.zeros(N*3); z[0::3]=c[:,0]; z[1::3]=c[:,1]; z[2::3]=r; return z\ndef z_to_cr(z): return np.vstack((z[0::3], z[1::3])).T, z[2::3]\n\ndef objective(z, encourage_pair, discourage_pair):\n    base_obj = -np.sum(z[2::3])\n    centers, radii = z_to_cr(z)\n    alpha, beta, eps_close, eps_far = 100, 100, 1e-8, 0.005\n    i, j = encourage_pair; k, l = discourage_pair\n    dist_ij = np.linalg.norm(centers[i] - centers[j]); dist_kl = np.linalg.norm(centers[k] - centers[l])\n    encourage_penalty = alpha * max(0, dist_ij - (radii[i] + radii[j] + eps_close))**2\n    discourage_penalty = beta * max(0, (radii[k] + radii[l] + eps_far) - dist_kl)**2\n    return base_obj + encourage_penalty + discourage_penalty\n\ndef objective_jac(z, encourage_pair, discourage_pair):\n    jac = np.zeros_like(z); jac[2::3] = -1.0\n    centers, radii = z_to_cr(z)\n    alpha, beta, eps_close, eps_far = 100, 100, 1e-8, 0.005\n    i, j = encourage_pair; k, l = discourage_pair\n    \n    dist_ij = np.linalg.norm(centers[i] - centers[j]); term_ij = dist_ij - (radii[i] + radii[j] + eps_close)\n    if term_ij > 0:\n        factor = 2 * alpha * term_ij\n        if dist_ij > 1e-9:\n            grad_dist_ij = (centers[i] - centers[j]) / dist_ij\n            jac[3*i:3*i+2] += factor * grad_dist_ij\n            jac[3*j:3*j+2] -= factor * grad_dist_ij\n        jac[3*i+2] -= factor; jac[3*j+2] -= factor\n\n    dist_kl = np.linalg.norm(centers[k] - centers[l]); term_kl = (radii[k] + radii[l] + eps_far) - dist_kl\n    if term_kl > 0:\n        factor = 2 * beta * term_kl\n        if dist_kl > 1e-9:\n            grad_dist_kl = (centers[k] - centers[l]) / dist_kl\n            jac[3*k:3*k+2] += factor * grad_dist_kl\n            jac[3*l:3*l+2] -= factor * grad_dist_kl\n        jac[3*k+2] -= factor; jac[3*l+2] -= factor\n    return jac\n\n# ... Standard constraint functions and their jacobians (omitted for brevity)\ndef ineq_boundary(z):\n    x, y, r = z[0::3], z[1::3], z[2::3]\n    return np.concatenate([x - r, 1.0 - x - r, y - r, 1.0 - y - r])\ndef jac_boundary(z):\n    J = np.zeros((4*N, 3*N));\n    for i in range(N):\n        xi, yi, ri = 3*i, 3*i+1, 3*i+2\n        J[i, xi] = 1.0; J[i, ri] = -1.0; J[N+i, xi] = -1.0; J[N+i, ri] = -1.0\n        J[2*N+i, yi] = 1.0; J[2*N+i, ri] = -1.0; J[3*N+i, yi] = -1.0; J[3*N+i, ri] = -1.0\n    return J\ndef ineq_nonoverlap(z):\n    centers, r = z_to_cr(z)\n    diff = centers[:, None, :] - centers[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\ndef jac_nonoverlap(z):\n    centers, _ = z_to_cr(z)\n    m = N*(N-1)//2; J = np.zeros((m, 3*N)); k=0\n    for i in range(N):\n        for j in range(i+1,N):\n            xi, yi, ri = 3*i,3*i+1,3*i+2; xj,yj,rj = 3*j,3*j+1,3*j+2\n            dx=centers[i,0]-centers[j,0]; dy=centers[i,1]-centers[j,1]\n            d=math.hypot(dx,dy); invd=1.0/d if d>1e-12 else 0.0\n            J[k,xi]=dx*invd; J[k,yi]=dy*invd; J[k,ri]=-1.0\n            J[k,xj]=-dx*invd; J[k,yj]=-dy*invd; J[k,rj]=-1.0\n            k+=1\n    return J\n\ndef _ensure_validity(c, r):\n    for i in range(N): r[i] = min(r[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n    for _ in range(20):\n        v = 0\n        for i in range(N):\n            for j in range(i+1,N):\n                d=np.linalg.norm(c[i]-c[j]); rs=r[i]+r[j]\n                if d < rs:\n                    v+=1\n                    if rs > 0: \n                        s=(d/rs)*(1-SAFETY); r[i]*=s; r[j]*=s\n        if v==0: break\n    return c, np.maximum(r,0)\n\ndef construct_packing() -> tuple:\n    encourage_pair, discourage_pair = (0, 1), (0, 5)\n    initial_z = cr_to_z(SOTA_CENTERS, SOTA_RADII)\n    bounds = []; [bounds.extend([(0,1),(0,1),(R_MIN,0.5)]) for _ in range(N)]\n    constraints = [\n        {'type': 'ineq', 'fun': ineq_boundary, 'jac': jac_boundary},\n        {'type': 'ineq', 'fun': ineq_nonoverlap, 'jac': jac_nonoverlap}\n    ]\n    \n    res = minimize(objective, initial_z, args=(encourage_pair, discourage_pair), method='SLSQP',\n                   jac=objective_jac,\n                   bounds=bounds, constraints=constraints,\n                   options={'maxiter': 500, 'ftol': 1e-9})\n    \n    centers, radii = z_to_cr(res.x)\n    final_centers, final_radii = _ensure_validity(centers, radii)\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760906463.1776042,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.635977394754123,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635977",
+      "evaluation_timestamp": 1760906465.319771,
+      "evaluation_datetime": "2025-10-20T04:41:05.319772"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.635977394754123,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760906465.3840241,
+    "version_notified": "original",
+    "message": "Your research submission 'Nudging Experiment 2 (FIX): Analytic Jacobian' (ID: 358) has been evaluated.\n\n**Score:** 2.635977394754123\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635977\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

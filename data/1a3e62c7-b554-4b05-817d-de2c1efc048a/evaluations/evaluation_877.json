@@ -1,0 +1,47 @@
+{
+  "id": "877",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 14: Push-Pull Perturbation Strategy",
+  "tags": [
+    "episteme",
+    "innovation",
+    "sota",
+    "nudging",
+    "push-pull",
+    "perturbation"
+  ],
+  "abstract": "This experiment implements the 'push-pull' strategy suggested by the reviewer of Quest II's Archive #26. The goal is to create a more disruptive perturbation to escape the robust SOTA basin of attraction.\nThe script automates target selection:\n1. 'Push' Target: The non-contact pair with the smallest slack is encouraged to move closer.\n2. 'Pull' Targets: Existing contacts involving the 'push' circles are actively discouraged (pushed apart).\nThis combined perturbation is then fed into the standard exhaustive refinement process.",
+  "submitted_tick": 547,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/episteme/sota_base_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/sota_base_radii.txt')\n    except Exception:\n        return np.array([[0.5, 0.5]] * 26), np.array([0.05] * 26)\n\n    # --- Automated Target Selection ---\n    def get_contacts_and_slacks(centers, radii):\n        contacts = []\n        slacks = []\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                slack = dist - (radii[i] + radii[j])\n                if abs(slack) < 1e-6:\n                    contacts.append((i, j))\n                elif slack > 0:\n                    slacks.append({'pair': (i, j), 'slack': slack})\n        slacks.sort(key=lambda x: x['slack'])\n        return contacts, slacks\n\n    base_contacts, base_slacks = get_contacts_and_slacks(base_centers, base_radii)\n    \n    # Push target: smallest slack\n    push_target = base_slacks[0]['pair'] if base_slacks else None\n    \n    # Pull targets: existing contacts involving the push_target circles\n    pull_targets = []\n    if push_target:\n        c1, c2 = push_target\n        for contact in base_contacts:\n            if c1 in contact or c2 in contact:\n                pull_targets.append(contact)\n\n    # --- Helper functions ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    # (Constraint functions are the same as previous scripts)\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v=0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n        return c, np.maximum(r, 0)\n\n    # --- Stage 1: Push-Pull Perturbation ---\n    perturbed_centers = np.copy(base_centers)\n    \n    # Apply Push force\n    if push_target:\n        i, j = push_target\n        dist_vec = perturbed_centers[i] - perturbed_centers[j]\n        dist = np.linalg.norm(dist_vec)\n        if dist > 1e-9:\n            grad = dist_vec / dist\n            move_amount = 5e-4 # Constant push force\n            perturbed_centers[i] += grad * move_amount\n            perturbed_centers[j] -= grad * move_amount\n\n    # Apply Pull force\n    for i, j in pull_targets:\n        dist_vec = perturbed_centers[i] - perturbed_centers[j]\n        dist = np.linalg.norm(dist_vec)\n        if dist > 1e-9:\n            grad = dist_vec / dist\n            move_amount = -5e-4 # Negative amount to push apart\n            perturbed_centers[i] += grad * move_amount\n            perturbed_centers[j] -= grad * move_amount\n\n    perturbed_centers = np.clip(perturbed_centers, 1e-6, 1-1e-6)\n    \n    # --- Stage 2: Refinement ---\n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3, 3e-3]\n    restarts_per_amplitude = 5\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            np.random.seed(int(amp * 1e6) + i + 1000)\n            jitter = np.random.uniform(-amp, amp, size=perturbed_centers.shape)\n            initial_centers = np.clip(perturbed_centers + jitter, 1e-6, 1 - 1e-6)\n            initial_z = cr_to_z(initial_centers, base_radii)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success:\n                c_res, r_res = z_to_cr(res.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                final_score = np.sum(r_final)\n                if final_score > best_score:\n                    best_score = final_score\n                    best_centers, best_radii = c_final, r_final\n\n    if best_centers is None:\n        return _ensure_validity(base_centers, base_radii)\n    \n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761002767.2015297,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359830849174926,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761002770.5848923,
+      "evaluation_datetime": "2025-10-21T07:26:10.584894"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359830849174926,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761002770.6042485,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 14: Push-Pull Perturbation Strategy' (ID: 877) has been evaluated.\n\n**Score:** 2.6359830849174926\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

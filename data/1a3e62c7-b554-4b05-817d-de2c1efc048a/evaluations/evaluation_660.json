@@ -1,0 +1,47 @@
+{
+  "id": "660",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Utility: Prometheus 620 \u2014 extract crossing motifs (dual\u2011tol \u2229, interior@1e\u20118) on Noesis geometry",
+  "tags": [
+    "utility",
+    "sets-only",
+    "gate",
+    "crossing-motifs",
+    "analysis",
+    "prometheus"
+  ],
+  "abstract": "From Prometheus SOTA_620 Top\u2011K slack sets (K25@1e\u20119, K15@1e\u20118), compute the dual\u2011tol intersection, filter interior discs at tol=1e\u20118 on Noesis geometry, and enumerate disjoint crossing pairs (strict and inclusive). Log example motifs with slacks and boundary flags; return baseline pack.",
+  "submitted_tick": 416,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, re\nimport numpy as np\n\nN = 26\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\nP_K25   = 'storage/prometheus/exports_for_noesis/sota_620_top_k_slack_1e9.json'\nP_K15   = 'storage/prometheus/exports_for_noesis/sota_620_top_k_slack_1e8.json'\nOUT_JSON = 'storage/noesis/nmap/prometheus_620_crossing_examples.json'\n\ndef load_snapshot():\n    c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n    r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n    return c, r\n\ndef slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    s = {'xL': x - r, 'xR': 1 - x - r, 'yB': y - r, 'yT': 1 - y - r}\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    sp = dist - (r[:,None] + r[None,:])\n    return s, sp\n\ndef read_pairs_json(path):\n    S = set(); parsed = 0\n    if not os.path.exists(path): return S, {'exists': False, 'parsed': 0}\n    data = json.load(open(path,'r'))\n    cand = []\n    if isinstance(data, dict):\n        for k in ('pairs','top_k','topk','data','list','items'):\n            if k in data and isinstance(data[k], (list,tuple)): cand = data[k]; break\n        if not cand and isinstance(data.get('0'), list): cand = list(data.values())\n    elif isinstance(data, list):\n        cand = data\n    for it in cand:\n        i=j=None\n        if isinstance(it, dict):\n            if 'pair' in it and isinstance(it['pair'], (list,tuple)) and len(it['pair'])>=2:\n                i, j = it['pair'][0], it['pair'][1]\n            else:\n                i = it.get('i', it.get('disc_i', it.get('a')))\n                j = it.get('j', it.get('disc_j', it.get('b')))\n        elif isinstance(it, (list,tuple)) and len(it)>=2:\n            i, j = it[0], it[1]\n        try:\n            i = int(i); j = int(j)\n        except Exception:\n            continue\n        if 0 <= i < N and 0 <= j < N:\n            S.add((min(i,j), max(i,j))); parsed += 1\n        elif 1 <= i <= N and 1 <= j <= N:\n            i0, j0 = i-1, j-1\n            if 0 <= i0 < N and 0 <= j0 < N:\n                S.add((min(i0,j0), max(i0,j0))); parsed += 1\n    return S, {'exists': True, 'parsed': parsed}\n\ndef _orient(a,b,c):\n    return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])\ndef _on_seg(a,b,p):\n    return min(a[0],b[0])-1e-18 <= p[0] <= max(a[0],b[0])+1e-18 and min(a[1],b[1])-1e-18 <= p[1] <= max(a[1],b[1])+1e-18\ndef cross_strict(a,b,c,d):\n    o1=_orient(a,b,c); o2=_orient(a,b,d); o3=_orient(c,d,a); o4=_orient(c,d,b)\n    return (o1*o2<0) and (o3*o4<0)\ndef cross_incl(a,b,c,d):\n    o1=_orient(a,b,c); o2=_orient(a,b,d); o3=_orient(c,d,a); o4=_orient(c,d,b)\n    if (o1*o2<0) and (o3*o4<0): return True\n    if abs(o1)<1e-18 and _on_seg(a,b,c): return True\n    if abs(o2)<1e-18 and _on_seg(a,b,d): return True\n    if abs(o3)<1e-18 and _on_seg(c,d,a): return True\n    if abs(o4)<1e-18 and _on_seg(c,d,b): return True\n    return False\ndef disjoint(p,q):\n    i,j=p; k,l=q\n    return (i!=k) and (i!=l) and (j!=k) and (j!=l)\n\ndef construct_packing():\n    c, r = load_snapshot()\n    s, sp = slacks(c, r)\n    bmask_1e8 = ( (s['xL'] <= 1e-8+1e-12) | (s['xR'] <= 1e-8+1e-12) | (s['yB'] <= 1e-8+1e-12) | (s['yT'] <= 1e-8+1e-12) )\n\n    prom_k25, _ = read_pairs_json(P_K25)\n    prom_k15, _ = read_pairs_json(P_K15)\n    inter_dual = sorted(list(prom_k25 & prom_k15))\n    inter_dual_interior = [(i,j) for (i,j) in inter_dual if (not bmask_1e8[i]) and (not bmask_1e8[j])]\n\n    motifs = []\n    for a_idx in range(len(inter_dual_interior)):\n        i,j = inter_dual_interior[a_idx]\n        A,B = c[i], c[j]\n        for b_idx in range(a_idx+1, len(inter_dual_interior)):\n            k,l = inter_dual_interior[b_idx]\n            if not disjoint((i,j),(k,l)): continue\n            C,D = c[k], c[l]\n            cs = cross_strict(A,B,C,D)\n            ci = cross_incl(A,B,C,D)\n            if cs or ci:\n                # collect details\n                motifs.append({\n                    'pairs': [(i,j),(k,l)],\n                    'cross_strict': bool(cs),\n                    'cross_inclusive': bool(ci),\n                    'slacks_before': {\n                        f'{i}-{j}': float(sp[i,j]),\n                        f'{k}-{l}': float(sp[k,l])\n                    },\n                    'boundary_flags@1e-8': {\n                        str(i): bool(bmask_1e8[i]),\n                        str(j): bool(bmask_1e8[j]),\n                        str(k): bool(bmask_1e8[k]),\n                        str(l): bool(bmask_1e8[l]),\n                    }\n                })\n    out = {\n        'prometheus_eval': 620,\n        'dual_intersection_size': len(inter_dual),\n        'dual_interior_size@1e-8': len(inter_dual_interior),\n        'crossing_motifs': motifs[:10]  # cap for brevity\n    }\n    os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)\n    with open(OUT_JSON, 'w') as f: json.dump(out, f, indent=2)\n    print('PROM_620_CROSSING_JSON:', OUT_JSON, 'MOTIF_COUNT:', len(motifs))\n    # Return baseline with tiny final shrink\n    r_out = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1760967549.8968842,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nPROM_620_CROSSING_JSON: storage/noesis/nmap/prometheus_620_crossing_examples.json MOTIF_COUNT: 7\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760967551.8432372,
+      "evaluation_datetime": "2025-10-20T21:39:11.843239"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760967551.894793,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Prometheus 620 \u2014 extract crossing motifs (dual\u2011tol \u2229, interior@1e\u20118) on Noesis geometry' (ID: 660) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nPROM_620_CROSSING_JSON: storage/noesis/nmap/prometheus_620_crossing_examples.json MOTIF_COUNT: 7\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

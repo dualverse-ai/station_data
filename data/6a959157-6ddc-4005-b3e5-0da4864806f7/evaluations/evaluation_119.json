@@ -1,0 +1,91 @@
+{
+  "id": "119",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "SOTA Replication v3 (Correct HVG Selection)",
+  "tags": [
+    "replication",
+    "residualization",
+    "balanced-knn",
+    "hvg-fix",
+    "praxis-method"
+  ],
+  "abstract": "This is the definitive attempt to replicate the SOTA (ID 100). A debugging experiment (ID 118) revealed that my previous failures were due to using a pre-computed subset of 1488 highly variable genes (HVGs) instead of calculating a fresh set of 2000 HVGs after normalization, as the SOTA method does. This submission corrects this critical preprocessing step. It uses my own residualization code and Praxis I's verified graph module, now operating on the correct gene subset. The goal is to finally and definitively replicate the SOTA score.",
+  "submitted_tick": 62,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom balanced_graph import build_balanced_knn\n\ndef _my_residualize(Z, batches, gamma=0.75, l2=1e-3):\n    \"\"\"My own implementation of the residualization.\"\"\"\n    Z_centered = Z - Z.mean(axis=0)\n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices]\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    Z_resid = Z_centered - gamma * (B @ W)\n    return Z_resid + Z.mean(axis=0)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Step 1: Preprocessing with CORRECT HVG selection...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    \n    # KEY FIX: Ignore pre-computed 'batch_hvg' and calculate 2000 HVGs.\n    sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch', subset=True)\n    \n    print(f\"Data shape after correct HVG selection: {adata.shape}\")\n\n    print(\"Step 2: PCA...\")\n    sc.pp.pca(adata, n_comps=50)\n    Z = adata.obsm['X_pca']\n    batches = adata.obs['batch'].values\n    \n    print(\"Step 3: Residualization...\")\n    Z_resid = _my_residualize(Z, batches, gamma=0.75, l2=1e-3)\n    \n    print(\"Step 4: Graph construction using Praxis I's module...\")\n    C, D = build_balanced_knn(\n        Z_resid, batches, n_neighbors_total=42, metric='cosine',\n        weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n    \n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = Z_resid\n    if C is not None and D is not None:\n        output.obsp['connectivities'] = C\n        output.obsp['distances'] = D\n    \n    return output\n",
+    "submitted_timestamp": 1761412560.1602166,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5739636630426366,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing with CORRECT HVG selection...\nData shape after correct HVG selection: (20000, 2000)\nStep 2: PCA...\nStep 3: Residualization...\nStep 4: Graph construction using Praxis I's module...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e9f4d0e9-1429-4cd1-b71d-0f74003bf2da/result_human.h5ad\n\nRESULT_UUID: e9f4d0e9-1429-4cd1-b71d-0f74003bf2da\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.620  ASW_label: 0.222  ARI: 0.474  NMI: 0.675\n  Graph_conn: 0.881  kBET: 0.630  iLISI: 0.010  cLISI: 0.992\n  PCR: 0.888  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813012  ASW_label: 0.539564  ARI: 0.474354  NMI: 0.675054\n  Graph_conn: 0.883328  kBET: 0.603604  iLISI: 0.009713  cLISI: 0.997579\n  PCR: 0.887652  Cell_cycle: 0.305355",
+        "ASW_batch": [
+          "0.620",
+          0.6204227283124468
+        ],
+        "ASW_label": [
+          "0.222",
+          0.2215663933792135
+        ],
+        "ARI": [
+          "0.474",
+          0.47442533472670895
+        ],
+        "NMI": [
+          "0.675",
+          0.6749626166796011
+        ],
+        "Graph_conn": [
+          "0.881",
+          0.8813148766870156
+        ],
+        "kBET": [
+          "0.630",
+          0.6302028955030767
+        ],
+        "iLISI": [
+          "0.010",
+          0.009712517619404318
+        ],
+        "cLISI": [
+          "0.992",
+          0.9916898524702311
+        ],
+        "PCR": [
+          "0.888",
+          0.8876521382615714
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.3476872767870973
+        ]
+      },
+      "evaluation_timestamp": 1761412753.072645,
+      "evaluation_datetime": "2025-10-26T01:19:13.072645",
+      "sort_key": [
+        0.5739636630426366
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5739636630426366,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761412753.0847895,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Replication v3 (Correct HVG Selection)' (ID: 119) has been evaluated.\n\n**Score:** 0.5739636630426366\n**ASW_batch:** 0.620\n**ASW_label:** 0.222\n**ARI:** 0.474\n**NMI:** 0.675\n**Graph_conn:** 0.881\n**kBET:** 0.630\n**iLISI:** 0.010\n**cLISI:** 0.992\n**PCR:** 0.888\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.620  ASW_label: 0.222  ARI: 0.474  NMI: 0.675\n  Graph_conn: 0.881  kBET: 0.630  iLISI: 0.010  cLISI: 0.992\n  PCR: 0.888  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.813012  ASW_label: 0.539564  ARI: 0.474354  NMI: 0.675054\n  Graph_conn: 0.883328  kBET: 0.603604  iLISI: 0.009713  cLISI: 0.997579\n  PCR: 0.887652  Cell_cycle: 0.305355\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing with CORRECT HVG selection...\nData shape after correct HVG selection: (20000, 2000)\nStep 2: PCA...\nStep 3: Residualization...\nStep 4: Graph construction using Praxis I's module...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e9f4d0e9-1429-4cd1-b71d-0f74003bf2da/result_human.h5ad\n\nRESULT_UUID: e9f4d0e9-1429-4cd1-b71d-0f74003bf2da\n\n\nSTDERR:\n\n```"
+  }
+}

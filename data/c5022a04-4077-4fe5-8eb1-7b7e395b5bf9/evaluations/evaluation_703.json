@@ -1,0 +1,46 @@
+{
+  "id": "703",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "JAX-based Gradient Descent Simulation",
+  "tags": [
+    "jax",
+    "physics-based",
+    "simulation",
+    "gradient descent",
+    "autograd"
+  ],
+  "abstract": "Revisiting the physics-based simulation approach with a more robust implementation using JAX. This method defines a potential energy function for the packing, where energy is high for invalid states (overlaps, out-of-bounds) and lower for higher sums of radii. JAX's automatic differentiation is used to compute the exact gradient of this energy (the 'forces'), and JIT compilation is used to run thousands of gradient descent steps efficiently. The simulation starts from the current SOTA packing to test if this principled, hardware-accelerated approach can refine it further.",
+  "submitted_tick": 434,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nimport numpy as np\n\ndef construct_packing() -> tuple[np.ndarray, np.ndarray]:\n    n = 32\n    \n    # Load the SOTA packing as the starting point\n    try:\n        data = np.load('storage/prometheus/sota_2_92.npz')\n        initial_centers = jnp.array(data['centers'])\n        initial_radii = jnp.array(data['radii'])\n    except FileNotFoundError:\n        # Fallback to hexagonal if SOTA not found\n        # (Simplified hex generator for JAX compatibility)\n        indices = jnp.arange(0, n)\n        x = (indices % 4) * 0.25 + 0.125\n        y = (indices // 4) * 0.125 + 0.0625\n        initial_centers = jnp.vstack([x, y]).T\n        initial_radii = jnp.full(n, 0.05)\n\n    # Combine centers and radii into a single parameter vector for JAX\n    params = jnp.concatenate([initial_centers.flatten(), initial_radii])\n\n    def potential_energy(p):\n        centers = p[:n*2].reshape((n, 2))\n        radii = p[n*2:]\n        \n        # 1. Penalty from overlaps\n        dist_matrix = jnp.sqrt(jnp.sum((centers[:, None, :] - centers[None, :, :])**2, axis=-1))\n        radii_sum_matrix = radii[:, None] + radii[None, :]\n        # Use a ReLU-like function for overlap penalty\n        overlap = jax.nn.relu(radii_sum_matrix - dist_matrix)\n        # Ignore diagonal and double counting\n        overlap_penalty = jnp.sum(jnp.triu(overlap, k=1)) * 10.0 # High penalty factor\n\n        # 2. Penalty from wall boundaries\n        wall_penalty_x1 = jnp.sum(jax.nn.relu(radii - centers[:, 0]))\n        wall_penalty_x2 = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1.0))\n        wall_penalty_y1 = jnp.sum(jax.nn.relu(radii - centers[:, 1]))\n        wall_penalty_y2 = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1.0))\n        total_wall_penalty = (wall_penalty_x1 + wall_penalty_x2 + wall_penalty_y1 + wall_penalty_y2) * 10.0\n\n        # 3. Penalty for non-positive radii\n        non_positive_penalty = jnp.sum(jax.nn.relu(0.0001 - radii)) * 100.0\n\n        # 4. Objective term (we want to maximize sum of radii, so minimize -sum)\n        objective_term = -jnp.sum(radii)\n        \n        return objective_term + overlap_penalty + total_wall_penalty + non_positive_penalty\n\n    # JIT-compile the energy gradient function for performance\n    grad_fn = jax.jit(jax.grad(potential_energy))\n    \n    # Simple gradient descent loop\n    learning_rate = 0.0001\n    n_steps = 10000\n    \n    for i in range(n_steps):\n        grads = grad_fn(params)\n        params -= learning_rate * grads\n        # Clip centers to stay within bounds as a hard constraint\n        params = params.at[:n*2].set(jnp.clip(params[:n*2], 0.0, 1.0))\n        \n    # Extract final centers and radii\n    final_centers = np.array(params[:n*2].reshape((n, 2)))\n    final_radii = np.array(params[n*2:])\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760912296.5381887,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Centers contain NaN or infinite values",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Centers contain NaN or infinite values",
+      "evaluation_timestamp": 1760912315.2053378,
+      "evaluation_datetime": "2025-10-20T06:18:35.205341"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760912315.2221532,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX-based Gradient Descent Simulation' (ID: 703) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Centers contain NaN or infinite values\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

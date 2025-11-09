@@ -1,0 +1,47 @@
+{
+  "id": "260",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "JAX Native Optimizer v3: PGD Center-Finding + LP Radius-Inflation",
+  "tags": [
+    "jax",
+    "custom optimizer",
+    "gradient descent",
+    "linear programming",
+    "hybrid method",
+    "vmap"
+  ],
+  "abstract": "This submission refines the JAX-native optimizer by adopting a two-phase hybrid approach. Phase 1 uses the previously validated PGD/penalty method, but only to find optimal center positions while radii are fixed to a small, safe value. Phase 2 takes these fixed centers and uses a deterministic Linear Programming (LP) solver to 'inflate' the radii to their maximum possible values without overlap. This decouples the two optimization problems for a more robust and potentially higher-scoring solution.",
+  "submitted_tick": 128,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom jax import jit, vmap, grad, random\nfrom scipy.optimize import linprog\n\nN_CIRCLES = 32\n\ndef create_seeds(key, n_starts):\n    keys = random.split(key, n_starts)\n    @vmap\n    def _create_seed(subkey):\n        return random.uniform(subkey, (N_CIRCLES, 2), minval=0.1, maxval=0.9)\n    return _create_seed(keys)\n\ndef penalty_fn(centers, penalty_weight=100.0, fixed_radius=0.05):\n    # Penalty on centers only, for overlap. Boundary is handled by projection.\n    dist_sq = jnp.sum((centers[:, jnp.newaxis, :] - centers[jnp.newaxis, :, :])**2, axis=-1)\n    I, J = np.triu_indices(N_CIRCLES, 1)\n    # Penalty if centers are closer than 2*r\n    overlaps = jnp.maximum(0, (2 * fixed_radius)**2 - dist_sq[I, J])\n    return penalty_weight * jnp.sum(overlaps)\n\n@jit\ndef pgd_center_update(centers, learning_rate):\n    g = grad(penalty_fn)(centers)\n    centers_new = centers - learning_rate * g\n    return jnp.clip(centers_new, 1e-6, 1.0 - 1e-6)\n\ndef solve_radii_lp(centers):\n    # For fixed centers, find max sum(r_i) s.t. constraints\n    # c @ r -> min  =>  -sum(r_i) -> min  => sum(r_i) -> max\n    c = -np.ones(N_CIRCLES)\n    \n    # Constraint 1: r_i + r_j <= d_ij  (overlap)\n    I, J = np.triu_indices(N_CIRCLES, 1)\n    A_overlap = np.zeros((len(I), N_CIRCLES))\n    A_overlap[np.arange(len(I)), I] = 1\n    A_overlap[np.arange(len(I)), J] = 1\n    d_ij = np.sqrt(np.sum((centers[I] - centers[J])**2, axis=1))\n    b_overlap = d_ij\n\n    # Constraint 2: r_i <= min(c_ix, 1-c_ix, c_iy, 1-c_iy) (boundary)\n    A_boundary = np.eye(N_CIRCLES)\n    b_boundary = np.min(np.hstack([centers, 1 - centers]), axis=1)\n\n    A_ub = np.vstack([A_overlap, A_boundary])\n    b_ub = np.hstack([b_overlap, b_boundary])\n\n    # All radii r_i >= 0\n    bounds = (0, None)\n    \n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    return res.x if res.success else np.zeros(N_CIRCLES)\n\ndef construct_packing() -> tuple:\n    n_starts = 256 # More starts, as PGD is simpler now\n    n_steps = 1000\n    learning_rate = 1e-3\n\n    master_key = random.PRNGKey(42)\n    \n    # --- Phase 1: Find good center positions using JAX PGD ---\n    initial_centers = create_seeds(master_key, n_starts)\n    \n    def optimization_body(centers, _):\n        return vmap(pgd_center_update, in_axes=(0, None))(centers, learning_rate), None\n    \n    final_centers_batch, _ = jax.lax.scan(optimization_body, initial_centers, None, length=n_steps)\n    \n    # --- Phase 2: Inflate radii using LP for each candidate ---\n    best_radii = None\n    best_score = -1.0\n\n    # Cannot vmap scipy.linprog, so we must loop\n    # But this is still fast as it's a convex problem\n    for i in range(n_starts):\n        centers = np.asarray(final_centers_batch[i])\n        radii = solve_radii_lp(centers)\n        score = np.sum(radii)\n        if score > best_score:\n            best_score = score\n            best_radii = radii\n            best_centers = centers\n    \n    best_radii *= (1.0 - 1e-12) # Safety shrink\n\n    return np.asarray(best_centers), np.asarray(best_radii)\n",
+    "submitted_timestamp": 1760818734.5965142,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.138296552000292,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.138297",
+      "evaluation_timestamp": 1760818740.1015923,
+      "evaluation_datetime": "2025-10-19T04:19:00.101594"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.138296552000292,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760818740.1242328,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX Native Optimizer v3: PGD Center-Finding + LP Radius-Inflation' (ID: 260) has been evaluated.\n\n**Score:** 2.138296552000292\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.138297\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

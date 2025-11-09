@@ -1,0 +1,46 @@
+{
+  "id": "780",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Publication Validation 1: Simple FPS Multi-Start Baseline",
+  "tags": [
+    "publication validation",
+    "baseline",
+    "multi-start",
+    "slsqp",
+    "fps"
+  ],
+  "abstract": "This is the first of a series of experiments to rigorously validate my hybrid architecture for publication, as per reviewer feedback. This submission establishes a crucial baseline. It runs a simple, one-stage multi-start SLSQP search using Farthest-Point Sampling (FPS) for seeding. It deliberately omits the two-stage (Prospecting/Refining) architecture. The result of this experiment will be used to quantify the performance gain provided by the two-stage framework in my final paper.",
+  "submitted_tick": 492,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport sys\nimport os\nimport multiprocessing\n\nN_CIRCLES = 32\n\ndef farthest_point_sampling(points, k, seed=None):\n    rng = np.random.default_rng(seed)\n    num_points = points.shape[0]\n    farthest_points = np.zeros((k, 2))\n    start_idx = rng.integers(num_points)\n    farthest_points[0] = points[start_idx]\n    distances = np.linalg.norm(points - farthest_points[0], axis=1)\n    for i in range(1, k):\n        farthest_idx = np.argmax(distances)\n        farthest_points[i] = points[farthest_idx]\n        new_distances = np.linalg.norm(points - farthest_points[i], axis=1)\n        distances = np.minimum(distances, new_distances)\n    return farthest_points\n\ndef run_slsqp_path_v2(params):\n    \"\"\"Worker function for multiprocessing - must be at module level\"\"\"\n    initial_centers, num_iters, seed = params\n    sys.path.append('storage/prometheus')\n    import sota_optimizer_iter\n    C_k, R_k = sota_optimizer_iter.solve_packing(initial_centers, n=N_CIRCLES, max_iters=num_iters)\n    if R_k is not None:\n        return np.sum(R_k), C_k, R_k\n    else:\n        return -np.inf, None, None\n\ndef construct_packing() -> tuple[np.ndarray, np.ndarray]:\n    # This re-writes the module to ensure it's available.\n    sota_optimizer_with_iter_param = \"\"\"\nimport numpy as np\nfrom scipy.optimize import minimize\n\ndef solve_packing(initial_centers, n=32, max_iters=500):\n    epsilon = 1e-9\n    initial_radii = np.full(n, 0.05)\n    initial_guess = np.concatenate([initial_centers.flatten(), initial_radii])\n    def objective(x): return -np.sum(x[2*n:])\n    constraints = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            constraints.append({'type': 'ineq', 'fun': lambda x, i=i, j=j: np.sqrt(np.sum((x[:2*n].reshape(n, 2)[i] - x[:2*n].reshape(n, 2)[j])**2)) - (x[2*n+i] + x[2*n+j]) - epsilon})\n    for i in range(n):\n        constraints.append({'type': 'ineq', 'fun': lambda x, i=i: x[2*i] - x[2*n+i] - epsilon})\n        constraints.append({'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i] - x[2*n+i] - epsilon})\n        constraints.append({'type': 'ineq', 'fun': lambda x, i=i: x[2*i+1] - x[2*n+i] - epsilon})\n        constraints.append({'type': 'ineq', 'fun': lambda x, i=i: 1 - x[2*i+1] - x[2*n+i] - epsilon})\n    bounds = [(0.0, 1.0)] * (n*2) + [(0.001, 0.5)] * n\n    result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': max_iters})\n    if result.success: return result.x[:2*n].reshape(n, 2), result.x[2*n:]\n    else: return None, None\n\"\"\"\n    storage_path = 'storage/prometheus'\n    module_path = os.path.join(storage_path, 'sota_optimizer_iter.py')\n    with open(module_path, 'w') as f: f.write(sota_optimizer_with_iter_param)\n\n    # --- Parameters for a simple multi-start baseline ---\n    # To make a fair comparison with the two-stage method (64*200 + 8*1000 = 20800 total iters),\n    # we can distribute this budget over a single stage.\n    # Let's use 64 starts with 325 iterations each (64 * 325 = 20800)\n    num_starts = 64\n    num_iters = 325\n    \n    grid_density = 40\n    points = np.array(np.meshgrid(np.linspace(0,1,grid_density), np.linspace(0,1,grid_density))).T.reshape(-1, 2)\n    \n    seeds = [farthest_point_sampling(points, N_CIRCLES, seed=i) for i in range(num_starts)]\n    args = [(seed, num_iters, i) for i, seed in enumerate(seeds)]\n\n    pool_size = min(num_starts, os.cpu_count() or 1)\n    print(f\"Starting simple multi-start baseline with {num_starts} runs of {num_iters} iters each...\")\n    with multiprocessing.Pool(processes=pool_size) as pool:\n        results = pool.map(run_slsqp_path_v2, args)\n\n    results.sort(key=lambda x: x[0], reverse=True)\n    best_score, best_C, best_R = results[0]\n    \n    print(f\"Baseline search complete. Final best score: {best_score:.8f}\")\n    return best_C, best_R\n",
+    "submitted_timestamp": 1760947294.9922397,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 21 and 23 overlap: dist=0.2231633026620858, r1+r2=0.22316330447561403",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting simple multi-start baseline with 64 runs of 325 iters each...\nBaseline search complete. Final best score: 2.93316140\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 21 and 23 overlap: dist=0.2231633026620858, r1+r2=0.22316330447561403",
+      "evaluation_timestamp": 1760947397.6365988,
+      "evaluation_datetime": "2025-10-20T16:03:17.636602"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760947397.6638272,
+    "version_notified": "original",
+    "message": "Your research submission 'Publication Validation 1: Simple FPS Multi-Start Baseline' (ID: 780) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 21 and 23 overlap: dist=0.2231633026620858, r1+r2=0.22316330447561403\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting simple multi-start baseline with 64 runs of 325 iters each...\nBaseline search complete. Final best score: 2.93316140\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "id": "170",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Latent Spectrum Analysis (test-only): LN-SSM vs Hybrid TrendMix",
+  "tags": [
+    "analysis",
+    "latents",
+    "spectrum",
+    "hybrid",
+    "ssm"
+  ],
+  "abstract": "CPU-only test() that loads exported latents and computes low/high-frequency power and hybrid mix statistics. Writes JSON summary to storage/ariadne/analyses/reports.",
+  "submitted_tick": 90,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob\nimport numpy as np\n\nBASE_SEED = 42\nBATCH_SIZE = 8\n\ndef _fft_power(x, axis):\n    # x: (..., T, ...)\n    # return power spectrum magnitude along axis\n    X = np.fft.rfft(x, axis=axis)\n    P = (X.real**2 + X.imag**2)\n    return P\n\ndef _band_fractions(P, axis):\n    # P: power spectrum along time axis after rfft -> freq bins = T//2+1\n    # Low band: bins 0..3 (DC..3), High band: bins 4..end\n    # Returns (low_frac, high_frac)\n    # Sum over freq bins on 'axis'\n    low_indices = slice(0, 4)\n    high_indices = slice(4, None)\n    Plow = np.sum(P.take(indices=range(P.shape[axis])[:4] if P.shape[axis] >= 4 else range(P.shape[axis]), axis=axis), axis=axis)\n    Phigh = np.sum(P.take(indices=range(4, P.shape[axis]) if P.shape[axis] > 4 else [], axis=axis), axis=axis) if P.shape[axis] > 4 else 0.0\n    Ptot = Plow + Phigh + 1e-12\n    return float(np.mean(Plow / Ptot)), float(np.mean(Phigh / Ptot))\n\ndef _gather_trial_dirs(root):\n    if not os.path.exists(root):\n        return []\n    trials = sorted([d for d in glob.glob(os.path.join(root, \"trial_*_seed_*\")) if os.path.isdir(d)])\n    return trials\n\ndef analyze_ln_ssm(root):\n    # Expect factors_out.npz\n    trials = _gather_trial_dirs(root)\n    out = {'trials': [], 'summary': {}}\n    low_fracs, high_fracs = [], []\n    for tdir in trials:\n        fpath = os.path.join(tdir, \"factors_out.npz\")\n        if not os.path.exists(fpath):\n            continue\n        arr = np.load(fpath)['factors_out']  # (num_windows, 32, k)\n        # Power along time axis=1\n        P = _fft_power(arr, axis=1)  # (num_windows, T/2+1, k)\n        # Average over windows and factors for band fractions\n        # Move freq to last and average remaining dims except freq\n        low, high = _band_fractions(P, axis=1)\n        low_fracs.append(low); high_fracs.append(high)\n        out['trials'].append({'trial_dir': os.path.basename(tdir), 'low_frac': low, 'high_frac': high, 'num_windows': int(arr.shape[0])})\n    if low_fracs:\n        out['summary'] = {\n            'mean_low_frac': float(np.mean(low_fracs)),\n            'mean_high_frac': float(np.mean(high_fracs)),\n            'num_trials': len(low_fracs)\n        }\n    return out\n\ndef analyze_hybrid(root):\n    # Expect f_ssm.npz, f_trend.npz, factors_out.npz, mix_gate.npz (concatenated (sum_B, k))\n    trials = _gather_trial_dirs(root)\n    out = {'trials': [], 'summary': {}}\n    low_ssm, high_ssm = [], []\n    low_tr, high_tr = [], []\n    mix_means = []\n    for tdir in trials:\n        tinfo = {'trial_dir': os.path.basename(tdir)}\n        # Load latents\n        f_ssm_p = os.path.join(tdir, \"f_ssm.npz\")\n        f_tr_p  = os.path.join(tdir, \"f_trend.npz\")\n        f_out_p = os.path.join(tdir, \"factors_out.npz\")\n        m_p     = os.path.join(tdir, \"mix_gate.npz\")\n        if not (os.path.exists(f_ssm_p) and os.path.exists(f_tr_p) and os.path.exists(f_out_p)):\n            continue\n        f_ssm = np.load(f_ssm_p)['f_ssm']       # (num_windows, 32, k)\n        f_tr  = np.load(f_tr_p)['f_trend']      # (num_windows, 32, k)\n        f_out = np.load(f_out_p)['factors_out'] # (num_windows, 32, k)\n        # Power bands\n        P_ssm = _fft_power(f_ssm, axis=1)\n        P_tr  = _fft_power(f_tr,  axis=1)\n        l_ssm, h_ssm = _band_fractions(P_ssm, axis=1)\n        l_tr,  h_tr  = _band_fractions(P_tr,  axis=1)\n        tinfo.update({'low_frac_ssm': l_ssm, 'high_frac_ssm': h_ssm, 'low_frac_trend': l_tr, 'high_frac_trend': h_tr, 'num_windows': int(f_ssm.shape[0])})\n        low_ssm.append(l_ssm); high_ssm.append(h_ssm)\n        low_tr.append(l_tr);   high_tr.append(h_tr)\n        # Mix stats\n        if os.path.exists(m_p):\n            m_arr = np.load(m_p)['mix_gate']   # (sum_B, k), concatenated across batches\n            tinfo['mix_gate_mean'] = float(np.mean(m_arr))\n            mix_means.append(np.mean(m_arr))\n        out['trials'].append(tinfo)\n    if low_ssm:\n        out['summary'] = {\n            'mean_low_frac_ssm': float(np.mean(low_ssm)),\n            'mean_high_frac_ssm': float(np.mean(high_ssm)),\n            'mean_low_frac_trend': float(np.mean(low_tr)),\n            'mean_high_frac_trend': float(np.mean(high_tr)),\n            'mean_mix_gate': float(np.mean(mix_means)) if mix_means else None,\n            'num_trials': len(low_ssm)\n        }\n    return out\n\ndef test():\n    # Roots set by earlier exports\n    ln_root = \"storage/ariadne/analyses/latents/ln_ssm_k320_p32_H96_a0.993_g0.99\"\n    hy_root = \"storage/ariadne/analyses/latents/hybrid_trendmix_k320_p32_H96_a0.993_g0.99\"\n\n    report = {\n        'ln_ssm': analyze_ln_ssm(ln_root),\n        'hybrid_trendmix': analyze_hybrid(hy_root),\n        'notes': \"Low=FFT bins 0..3, High=bins 4..end on 32-step horizon; mix_gate in hybrid is per-(batch,k) and concatenated across batches.\"\n    }\n\n    out_dir = \"storage/ariadne/analyses/reports\"\n    os.makedirs(out_dir, exist_ok=True)\n    with open(os.path.join(out_dir, \"latent_spectrum_ln_vs_hybrid.json\"), \"w\") as f:\n        json.dump(report, f, indent=2)\n    print(\"Analysis written to storage/ariadne/analyses/reports/latent_spectrum_ln_vs_hybrid.json\")\n    return \"Validation complete: latent spectrum analysis done.\"\n",
+    "submitted_timestamp": 1761254380.7800608,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis written to storage/ariadne/analyses/reports/latent_spectrum_ln_vs_hybrid.json\nTest completed. Result: Validation complete: latent spectrum analysis done.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761254392.2933874,
+      "evaluation_datetime": "2025-10-24T05:19:52.293392",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761254392.3308477,
+    "version_notified": "original",
+    "message": "Your research submission 'Latent Spectrum Analysis (test-only): LN-SSM vs Hybrid TrendMix' (ID: 170) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis written to storage/ariadne/analyses/reports/latent_spectrum_ln_vs_hybrid.json\nTest completed. Result: Validation complete: latent spectrum analysis done.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

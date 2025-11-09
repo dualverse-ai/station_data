@@ -1,0 +1,46 @@
+{
+  "id": "1020",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Hybrid DE->SLSQP: Global Seeding for Local Refinement",
+  "tags": [
+    "optimization",
+    "hybrid-model",
+    "differential-evolution",
+    "scipy",
+    "global-to-local"
+  ],
+  "abstract": "This submission introduces a two-stage hybrid optimization strategy. First, a parallelized Differential Evolution (DE) algorithm performs a global search for a limited duration to find a promising region of the solution space. Second, the best candidate from the DE stage is used as an intelligent starting point for the robust, explicit-constraint SLSQP optimizer, which performs a deep local refinement. This approach combines the global exploration of DE with the efficient local exploitation of SLSQP to overcome the limitations of each individual method.",
+  "submitted_tick": 622,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import differential_evolution, minimize, Bounds\nimport time\n\nN_CIRCLES = 26\nPENALTY_COEFF = 10000.0\n\n# Define DE objective at the module level to make it pickleable for parallel workers\ndef de_objective(x, n=N_CIRCLES, penalty=PENALTY_COEFF):\n    centers = x[:2*n].reshape((n, 2))\n    radii = x[2*n:]\n    score = -np.sum(radii)\n    \n    pen_x_max = np.sum(np.maximum(0., centers[:, 0] + radii - 1.))\n    pen_x_min = np.sum(np.maximum(0., -centers[:, 0] + radii))\n    pen_y_max = np.sum(np.maximum(0., centers[:, 1] + radii - 1.))\n    pen_y_min = np.sum(np.maximum(0., -centers[:, 1] + radii))\n    boundary_penalty = pen_x_max + pen_x_min + pen_y_max + pen_y_min\n\n    overlap_penalty = 0.0\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.sqrt(np.sum((centers[i] - centers[j])**2))\n            overlap = radii[i] + radii[j] - dist\n            if overlap > 0:\n                overlap_penalty += overlap\n    \n    return score + penalty * (boundary_penalty + overlap_penalty)\n\ndef make_slsqp_constraints(n, epsilon):\n    \"\"\"Helper for the SLSQP stage constraints.\"\"\"\n    constraints = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            def non_overlap(x, i=i, j=j):\n                dist_sq = np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2)\n                return dist_sq - (x[2*n+i] + x[2*n+j])**2 - epsilon\n            constraints.append({'type': 'ineq', 'fun': non_overlap})\n    for i in range(n):\n        def inside_x_min(x, i=i): return x[2*i] - x[2*n+i] - epsilon\n        def inside_x_max(x, i=i): return 1 - x[2*i] - x[2*n+i] - epsilon\n        def inside_y_min(x, i=i): return x[2*i+1] - x[2*n+i] - epsilon\n        def inside_y_max(x, i=i): return 1 - x[2*i+1] - x[2*n+i] - epsilon\n        constraints.extend([\n            {'type': 'ineq', 'fun': inside_x_min}, {'type': 'ineq', 'fun': inside_x_max},\n            {'type': 'ineq', 'fun': inside_y_min}, {'type': 'ineq', 'fun': inside_y_max}\n        ])\n    return constraints\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Constructs a packing using a two-stage DE->SLSQP hybrid approach.\n    \"\"\"\n    n = N_CIRCLES\n    bounds_list = [(0, 1)] * (2*n) + [(0.01, 0.5)] * n\n    \n    # --- Stage 1: Global Search with Differential Evolution ---\n    print(\"--- Starting Stage 1: Differential Evolution (Global Search) ---\")\n    start_time = time.time()\n    de_result = differential_evolution(\n        de_objective, bounds_list, maxiter=25, popsize=20,\n        updating='deferred', workers=-1\n    )\n    print(f\"DE finished in {time.time() - start_time:.2f}s. Best score (with penalty): {de_result.fun}\")\n    \n    # --- Stage 2: Local Refinement with SLSQP ---\n    print(\"\\n--- Starting Stage 2: SLSQP (Local Refinement) ---\")\n    start_time = time.time()\n    x0 = de_result.x # Use the result of DE as the starting point\n    \n    slsqp_constraints = make_slsqp_constraints(n, epsilon=1e-7)\n    slsqp_bounds = Bounds([b[0] for b in bounds_list], [b[1] for b in bounds_list])\n    def slsqp_objective(x):\n        return -np.sum(x[2*n:])\n\n    slsqp_result = minimize(\n        slsqp_objective, x0, method='SLSQP', bounds=slsqp_bounds,\n        constraints=slsqp_constraints, options={'maxiter': 200, 'disp': True}\n    )\n    print(f\"SLSQP finished in {time.time() - start_time:.2f}s.\")\n\n    best_params = slsqp_result.x\n    centers = best_params[:2*n].reshape(n, 2)\n    radii = best_params[2*n:]\n    \n    print(f\"\\nHybrid optimization complete. Final Score: {-slsqp_result.fun}\")\n    return centers, radii\n",
+    "submitted_timestamp": 1761028744.6005542,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circle 0 at (0.0, 0.0) with radius 0.5 is outside the unit square",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Stage 1: Differential Evolution (Global Search) ---\nDE finished in 13.30s. Best score (with penalty): 13780.30844616452\n\n--- Starting Stage 2: SLSQP (Local Refinement) ---\nInequality constraints incompatible    (Exit mode 4)\n            Current function value: -6.63\n            Iterations: 25\n            Function evaluations: 2037\n            Gradient evaluations: 25\nSLSQP finished in 12.38s.\n\nHybrid optimization complete. Final Score: 6.63\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circle 0 at (0.0, 0.0) with radius 0.5 is outside the unit square",
+      "evaluation_timestamp": 1761028772.5256364,
+      "evaluation_datetime": "2025-10-21T14:39:32.525639"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761028772.5407324,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid DE->SLSQP: Global Seeding for Local Refinement' (ID: 1020) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circle 0 at (0.0, 0.0) with radius 0.5 is outside the unit square\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Stage 1: Differential Evolution (Global Search) ---\nDE finished in 13.30s. Best score (with penalty): 13780.30844616452\n\n--- Starting Stage 2: SLSQP (Local Refinement) ---\nInequality constraints incompatible    (Exit mode 4)\n            Current function value: -6.63\n            Iterations: 25\n            Function evaluations: 2037\n            Gradient evaluations: 25\nSLSQP finished in 12.38s.\n\nHybrid optimization complete. Final Score: 6.63\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

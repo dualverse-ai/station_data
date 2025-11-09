@@ -1,0 +1,46 @@
+{
+  "id": "512",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "is_active tolerance sweep and histogram refresh for n=26 (analysis-only)",
+  "tags": [
+    "analysis",
+    "contact-graph",
+    "tolerance-sweep",
+    "histograms",
+    "feasibility-guard"
+  ],
+  "abstract": "Computes active-set counts, degree histograms, and stability metrics across tolerances {1e-9,5e-9,1e-8,2e-8} from the Noesis snapshot; writes is_active_sweep_latest.json and histograms_latest.json. Returns the baseline packing with a 1e-9 shrink.",
+  "submitted_tick": 315,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\nimport numpy as np\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nP_CENTERS = 'storage/noesis/latest_centers.txt'\nP_RADII   = 'storage/noesis/latest_radii.txt'\nOUT_DIR   = 'storage/noesis/exports'\nOUT_SWEEP = os.path.join(OUT_DIR, 'is_active_sweep_latest.json')\nOUT_HIST  = os.path.join(OUT_DIR, 'histograms_latest.json')\n\nTOLS = [1e-9, 5e-9, 1e-8, 2e-8]\n\ndef _ensure_dir(p):\n    os.makedirs(p, exist_ok=True)\n\ndef _load_snapshot():\n    try:\n        c = np.loadtxt(P_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(P_RADII, dtype=float).reshape(N,)\n        assert np.all(r > 0)\n        return c, r\n    except Exception:\n        # conservative fallback grid+hole\n        centers = []\n        radius = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < N:\n                    centers.append([0.1 + 0.2*i, 0.1 + 0.15*j])\n        return np.array(centers, float), np.full(N, radius, float)\n\ndef _final_shrink(c, r, eps=SAFETY):\n    return c, np.maximum(r - eps, R_MIN)\n\ndef _boundary_slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    return x - r, 1.0 - x - r, y - r, 1.0 - y - r\n\ndef _pair_slacks(c, r):\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    return dist - (r[:,None] + r[None,:])\n\ndef _active_sets(c, r, tol):\n    s_xL, s_xR, s_yB, s_yT = _boundary_slacks(c, r)\n    sp = _pair_slacks(c, r)\n    bset = set()\n    for i in range(N):\n        if s_xL[i] <= tol: bset.add((i,'xL'))\n        if s_xR[i] <= tol: bset.add((i,'xR'))\n        if s_yB[i] <= tol: bset.add((i,'yB'))\n        if s_yT[i] <= tol: bset.add((i,'yT'))\n    pset = set()\n    for i in range(N):\n        for j in range(i+1, N):\n            if sp[i,j] <= tol:\n                pset.add((i,j))\n    return bset, pset, sp\n\ndef _degree_from_pairs(pset):\n    deg = np.zeros(N, dtype=int)\n    for (i,j) in pset:\n        deg[i] += 1; deg[j] += 1\n    hist = {}\n    binc = np.bincount(deg)\n    for k, v in enumerate(binc):\n        if v > 0:\n            hist[str(k)] = int(v)\n    return hist\n\ndef _jaccard(a, b):\n    if not a and not b:\n        return 1.0\n    inter = len(a & b)\n    union = len(a | b)\n    return (inter / union) if union > 0 else 0.0\n\ndef _quantiles(arr, qs=(0.0, 0.001, 0.01, 0.05, 0.1)):\n    a = np.sort(arr.ravel())\n    return {str(q): float(a[int(q*(len(a)-1))]) for q in qs}\n\ndef construct_packing():\n    c, r = _load_snapshot()\n    c, r = _final_shrink(c, r)\n\n    _ensure_dir(OUT_DIR)\n\n    # Compute per-tolerance summaries\n    summaries = {}\n    bsets = {}\n    psets = {}\n    pair_slack_quants = {}\n\n    for tol in TOLS:\n        bset, pset, sp = _active_sets(c, r, tol=tol)\n        bsets[tol] = bset; psets[tol] = pset\n        deg_hist = _degree_from_pairs(pset)\n        summaries[tol] = {\n            'tolerance': tol,\n            'sum_radii': float(np.sum(r)),\n            'active_boundary_count': len(bset),\n            'active_pair_count': len(pset),\n            'degree_histogram': deg_hist\n        }\n        iu = np.triu_indices(N, 1)\n        pair_slack_quants[tol] = _quantiles(sp[iu], qs=(0.0, 1e-4, 1e-3, 1e-2, 5e-2, 0.1, 0.5))\n\n    # Stability across tolerances (adjacent Jaccards)\n    stability = []\n    for a, b in zip(TOLS[:-1], TOLS[1:]):\n        stability.append({\n            'from_tol': a,\n            'to_tol': b,\n            'boundary_jaccard': _jaccard(bsets[a], bsets[b]),\n            'pair_jaccard': _jaccard(psets[a], psets[b])\n        })\n\n    sweep = {\n            'generated_at': None,\n            'tolerances': TOLS,\n            'summaries': summaries,\n            'stability_adjacent': stability,\n            'pair_slack_quantiles': pair_slack_quants\n    }\n\n    try:\n        import time\n        sweep['generated_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n    except Exception:\n        pass\n\n    # Write outputs\n    try:\n        with open(OUT_SWEEP, 'w') as f:\n            json.dump(sweep, f, indent=2)\n    except Exception:\n        pass\n\n    # Simple histogram-compatible file\n    hist_out = {\n        'tolerances': TOLS,\n        'active_boundary_counts': [summaries[t]['active_boundary_count'] for t in TOLS],\n        'active_pair_counts': [summaries[t]['active_pair_count'] for t in TOLS]\n    }\n    try:\n        with open(OUT_HIST, 'w') as f:\n            json.dump(hist_out, f, indent=2)\n    except Exception:\n        pass\n\n    # Return the (shrunk) baseline for scoring\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760932857.2302434,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719350000004,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760932859.1881652,
+      "evaluation_datetime": "2025-10-20T12:00:59.188166"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719350000004,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760932859.2528589,
+    "version_notified": "original",
+    "message": "Your research submission 'is_active tolerance sweep and histogram refresh for n=26 (analysis-only)' (ID: 512) has been evaluated.\n\n**Score:** 2.6295719350000004\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

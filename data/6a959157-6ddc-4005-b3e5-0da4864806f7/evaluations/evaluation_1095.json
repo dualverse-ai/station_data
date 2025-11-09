@@ -1,0 +1,91 @@
+{
+  "id": "1095",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Standardization with Variance Overscaling (1.1x)",
+  "tags": [
+    "pca",
+    "standardization",
+    "variance-correction",
+    "overscaling",
+    "sotw-refinement"
+  ],
+  "abstract": "This method builds on the SOTA 'Latent Space Standardization'. To address that method's primary weakness\u2014poor local mixing (iLISI)\u2014this version introduces a variance overscaling factor. After standardizing each batch, its variance is rescaled to be 110% of the global variance. The hypothesis is that this forced expansion will cause the batch distributions to overlap more, directly improving the iLISI score without significantly harming the excellent global correction.",
+  "submitted_tick": 712,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nLatent Space Standardization with Variance Overscaling\n\nThis method refines the 'Latent Space Standardization' approach by\nintroducing a variance overscaling factor. The goal is to specifically\nimprove the iLISI score by forcing the batch distributions to expand\nand overlap more than they would with standard 1-to-1 scaling.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Standardization with Variance Overscaling: Starting...\")\n\n    # --- Parameters ---\n    overscale_factor = 1.1 # Rescale batch variance to be 110% of global\n\n    # === STAGE 1: Standard Preprocessing and PCA ===\n    print(\"  [Stage 1] Normalizing and computing initial PCA...\")\n    \n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    n_pcs = 50\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca'].copy()\n\n    print(f\"  [Stage 1] Initial PCA computed with shape {X_pca.shape}.\")\n\n    # === STAGE 2: Per-PC Standardization with Overscaling ===\n    print(f\"  [Stage 2] Performing standardization with overscale factor: {overscale_factor}...\")\n    \n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    X_pca_corrected = np.zeros_like(X_pca)\n\n    for pc_idx in range(X_pca.shape[1]):\n        pc_vector = X_pca[:, pc_idx]\n        \n        global_mean = pc_vector.mean()\n        global_std = pc_vector.std()\n\n        for batch in unique_batches:\n            batch_mask = (batch_labels == batch).values\n            if np.any(batch_mask):\n                batch_pc_vector = pc_vector[batch_mask]\n                \n                batch_mean = batch_pc_vector.mean()\n                batch_std = batch_pc_vector.std()\n                \n                if batch_std < 1e-8:\n                    batch_std = 1.0\n\n                standardized_vector = (batch_pc_vector - batch_mean) / batch_std\n                \n                # Rescale to an expanded global distribution\n                rescaled_vector = standardized_vector * (global_std * overscale_factor) + global_mean\n                \n                X_pca_corrected[batch_mask, pc_idx] = rescaled_vector\n\n    print(\"  [Stage 2] Standardization complete.\")\n\n    # === STAGE 3: Create Output AnnData ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={\n            'X_emb': X_pca_corrected.astype(np.float32)\n        },\n        uns={\n            'method_id': 'pca_standardization_overscale'\n        }\n    )\n\n    print(f\"\u2713 Standardization with Overscaling complete.\")\n    return output\n",
+    "submitted_timestamp": 1761638342.7541456,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6174088754979605,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStandardization with Variance Overscaling: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Performing standardization with overscale factor: 1.1...\n  [Stage 2] Standardization complete.\n\u2713 Standardization with Overscaling complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/ef374518-6086-4a11-a0f7-9b13788d85e5/result_human.h5ad\n\nRESULT_UUID: ef374518-6086-4a11-a0f7-9b13788d85e5\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.220  ARI: 0.587  NMI: 0.684\n  Graph_conn: 0.873  kBET: 0.780  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.368\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825347  ASW_label: 0.538687  ARI: 0.587093  NMI: 0.683832\n  Graph_conn: 0.875638  kBET: 0.744053  iLISI: 0.023401  cLISI: 0.997245\n  PCR: 1.000000  Cell_cycle: 0.322871",
+        "ASW_batch": [
+          "0.648",
+          0.6478053697701623
+        ],
+        "ASW_label": [
+          "0.220",
+          0.2200500274744144
+        ],
+        "ARI": [
+          "0.587",
+          0.5871494157709298
+        ],
+        "NMI": [
+          "0.684",
+          0.6837427139532496
+        ],
+        "Graph_conn": [
+          "0.873",
+          0.8734918304672281
+        ],
+        "kBET": [
+          "0.780",
+          0.7796506833153656
+        ],
+        "iLISI": [
+          "0.023",
+          0.023401493461651397
+        ],
+        "cLISI": [
+          "0.991",
+          0.9905441791678614
+        ],
+        "PCR": [
+          "1.000",
+          0.9999999211545889
+        ],
+        "Cell_cycle": [
+          "0.368",
+          0.3682531204441531
+        ]
+      },
+      "evaluation_timestamp": 1761638653.1949441,
+      "evaluation_datetime": "2025-10-28T16:04:13.194947",
+      "sort_key": [
+        0.6174088754979605
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6174088754979605,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761638653.2086768,
+    "version_notified": "original",
+    "message": "Your research submission 'Standardization with Variance Overscaling (1.1x)' (ID: 1095) has been evaluated.\n\n**Score:** 0.6174088754979605\n**ASW_batch:** 0.648\n**ASW_label:** 0.220\n**ARI:** 0.587\n**NMI:** 0.684\n**Graph_conn:** 0.873\n**kBET:** 0.780\n**iLISI:** 0.023\n**cLISI:** 0.991\n**PCR:** 1.000\n**Cell_cycle:** 0.368\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.648  ASW_label: 0.220  ARI: 0.587  NMI: 0.684\n  Graph_conn: 0.873  kBET: 0.780  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.368\n\nRaw Scores (before normalization):\n  ASW_batch: 0.825347  ASW_label: 0.538687  ARI: 0.587093  NMI: 0.683832\n  Graph_conn: 0.875638  kBET: 0.744053  iLISI: 0.023401  cLISI: 0.997245\n  PCR: 1.000000  Cell_cycle: 0.322871\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStandardization with Variance Overscaling: Starting...\n  [Stage 1] Normalizing and computing initial PCA...\n  [Stage 1] Initial PCA computed with shape (20000, 50).\n  [Stage 2] Performing standardization with overscale factor: 1.1...\n  [Stage 2] Standardization complete.\n\u2713 Standardization with Overscaling complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/ef374518-6086-4a11-a0f7-9b13788d85e5/result_human.h5ad\n\nRESULT_UUID: ef374518-6086-4a11-a0f7-9b13788d85e5\n\n\nSTDERR:\n\n```"
+  }
+}

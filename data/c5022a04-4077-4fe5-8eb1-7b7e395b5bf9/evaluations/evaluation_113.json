@@ -1,0 +1,45 @@
+{
+  "id": "113",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Force-Directed Simulation with Dynamic Radii Adaptation",
+  "tags": [
+    "optimization",
+    "force-directed",
+    "physics-based",
+    "dynamic-radii"
+  ],
+  "abstract": "This submission refines the force-directed simulation by integrating periodic calls to `compute_max_radii` within the main simulation loop. This allows the repulsive forces to dynamically adapt to the maximized radii of the circles, which is crucial for achieving an efficient packing. To manage runtime, `num_simulation_steps` is reduced, and force parameters are adjusted to encourage stable convergence with dynamic circle sizes. This approach directly addresses the decoupling issue from previous attempts, aiming for a significant score improvement.",
+  "submitted_tick": 42,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\ndef compute_max_radii(centers: np.ndarray) -> np.ndarray:\n  \"\"\"\n  Compute the maximum possible radii for a given set of circle centers\n  within a unit square, ensuring no overlap and staying within bounds.\n  (Optimized with vectorized boundary checks and precomputed distances).\n\n  Args:\n    centers: (n, 2) array of (x, y) coordinates in [0, 1] x [0, 1].\n\n  Returns:\n    radii: (n,) array of non-negative radii.\n  \"\"\"\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7 \n  overlap_safety_margin = 1e-8 \n  min_positive_radius = 1e-9 \n\n  # Vectorized computation of distances to borders\n  x_coords = centers[:, 0]\n  y_coords = centers[:, 1]\n  \n  radii = np.minimum.reduce([\n      x_coords - boundary_epsilon,\n      y_coords - boundary_epsilon,\n      1 - x_coords - boundary_epsilon,\n      1 - y_coords - boundary_epsilon\n  ])\n  \n  radii = np.maximum(radii, min_positive_radius) \n\n  # Precompute pairwise squared distances once for efficiency\n  distances_sq = np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :])**2, axis=2)\n  np.fill_diagonal(distances_sq, np.inf) # Avoid self-comparison\n\n  # Iteratively shrink radii to resolve overlaps (loops remain due to dependencies)\n  for _ in range(40): # 40 iterations for thoroughness\n    for i in range(n):\n      for j in range(i + 1, n): # Only check unique pairs\n        dist_sq = distances_sq[i, j] # Use precomputed value\n        dist = np.sqrt(dist_sq) \n\n        rad_sum = radii[i] + radii[j]\n        \n        if dist < rad_sum + overlap_safety_margin: \n          if rad_sum > 0: \n            scale_factor = (dist - overlap_safety_margin) / rad_sum\n            if scale_factor > (min_positive_radius * 2 / rad_sum): \n              radii[i] *= scale_factor\n              radii[j] *= scale_factor\n            else: \n                radii[i] = min_positive_radius\n                radii[j] = min_positive_radius\n          else: \n              radii[i] = min_positive_radius\n              radii[j] = min_positive_radius\n\n  return np.maximum(radii, min_positive_radius)\n\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 32 circles in the unit square using a force-directed\n    simulation approach with dynamic radii adaptation.\n\n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (32, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (32,) with radius of each circle\n    \"\"\"\n    n = 32\n    \n    # Simulation parameters\n    num_simulation_steps = 500 # Reduced total steps to accommodate periodic compute_max_radii\n    radii_update_interval = 10 # Call compute_max_radii every X steps\n    dt = 0.01 # Time step\n    k_repulsion = 0.1 # Strength of circle-circle repulsion (increased)\n    k_boundary = 0.2 # Strength of boundary repulsion (increased)\n    damping_factor = 0.9 # Damping to stabilize movements\n    clip_margin = 1e-7 # Margin for clipping centers\n\n    # Initial state: random centers\n    centers = np.random.rand(n, 2)\n    velocities = np.zeros((n, 2)) # Initialize velocities\n\n    # Initial radii calculation to set up first forces\n    radii = compute_max_radii(centers) \n\n    for step in range(num_simulation_steps):\n        # Periodically update radii\n        if step % radii_update_interval == 0:\n            radii = compute_max_radii(centers)\n\n        total_forces = np.zeros((n, 2))\n\n        # 1. Circle-Circle Repulsion\n        diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :] # (n, n, 2)\n        dist_sq = np.sum(diff**2, axis=2) # (n, n)\n        dist = np.sqrt(dist_sq) # (n, n)\n        np.fill_diagonal(dist, np.inf) # Avoid self-repulsion\n\n        # Calculate overlap degree based on current radii (dynamic adaptation)\n        radii_sum_matrix = radii[:, np.newaxis] + radii[np.newaxis, :] # (n, n)\n        overlap_degree = np.maximum(0, radii_sum_matrix - dist) # (n, n)\n        \n        # Normalize difference vectors for force direction\n        norm_diff = diff / (dist[:, :, np.newaxis] + 1e-10) # Add epsilon to prevent div by zero\n\n        repulsion_forces = k_repulsion * overlap_degree[:, :, np.newaxis] * norm_diff \n        total_forces += np.sum(repulsion_forces, axis=1) # Sum forces from all other circles for each circle\n\n        # 2. Boundary Repulsion (using current radii for boundary check)\n        # Force from left wall (x=0)\n        total_forces[:, 0] += k_boundary * np.maximum(0, radii - centers[:, 0])\n        # Force from right wall (x=1)\n        total_forces[:, 0] -= k_boundary * np.maximum(0, centers[:, 0] - (1 - radii))\n        # Force from bottom wall (y=0)\n        total_forces[:, 1] += k_boundary * np.maximum(0, radii - centers[:, 1])\n        # Force from top wall (y=1)\n        total_forces[:, 1] -= k_boundary * np.maximum(0, centers[:, 1] - (1 - radii))\n\n        # 3. Update Velocities and Positions\n        velocities += total_forces * dt # Apply forces to velocities\n        velocities *= damping_factor # Apply damping to velocities\n        centers += velocities * dt # Update positions based on (damped) velocities\n        \n        # Clip centers to ensure they stay strictly within bounds\n        centers = np.clip(centers, clip_margin, 1 - clip_margin)\n\n    # Final radii calculation after simulation converges\n    final_radii = compute_max_radii(centers)\n\n    return centers, final_radii\n",
+    "submitted_timestamp": 1760789827.4316695,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.3442368863501186,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.344237",
+      "evaluation_timestamp": 1760789831.0546947,
+      "evaluation_datetime": "2025-10-18T20:17:11.054697"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.3442368863501186,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760789831.1317174,
+    "version_notified": "original",
+    "message": "Your research submission 'Force-Directed Simulation with Dynamic Radii Adaptation' (ID: 113) has been evaluated.\n\n**Score:** 1.3442368863501186\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.344237\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

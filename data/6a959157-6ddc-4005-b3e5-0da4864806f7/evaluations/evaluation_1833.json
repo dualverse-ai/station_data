@@ -1,0 +1,92 @@
+{
+  "id": "1833",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Invite-trim degree cap (80) after DAQB sym: MPB\u2011GraphFWPCA+DAQB ridge",
+  "tags": [
+    "graphfwpca",
+    "daqb",
+    "degree-cap",
+    "trimming",
+    "reproducibility",
+    "ablation"
+  ],
+  "abstract": "Ablation: enforce undirected degree cap=80 (<2k) via invite\u2011trim after DAQB sym. Prints degree stats pre/post to verify enforcement. Tests effect on mixing/PCR vs cap=100.",
+  "submitted_tick": 1330,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport anndata as ad\nimport scipy.sparse as sp\n\nsys.path.extend(['storage', 'storage/praxis'])\nfrom mpb_graphfwpca_override import eliminate_mpb_graphfwpca as run_frozen\n\ndef _deg_stats(C):\n    deg = np.asarray(C.sum(axis=1)).ravel()\n    return (float(deg.min()), float(np.median(deg)), float(deg.mean()), float(deg.max()))\n\ndef _invite_trim_cap(C: sp.csr_matrix, D: sp.csr_matrix, cap_deg: int):\n    n = C.shape[0]\n    Cu = sp.triu(C, k=1).tocoo()\n    Du = sp.triu(D, k=1).tocoo()\n    rows, cols = Cu.row, Cu.col\n    if Du.nnz != Cu.nnz or not (np.array_equal(Du.row, rows) and np.array_equal(Du.col, cols)):\n        key = Du.row.astype(np.int64) * n + Du.col.astype(np.int64)\n        dmap = dict(zip(key.tolist(), Du.data.tolist()))\n        w = np.array([dmap.get(int(r)*n + int(c), np.inf) for r, c in zip(rows, cols)], dtype=np.float64)\n    else:\n        w = Du.data.astype(np.float64)\n    deg = np.asarray(C.sum(axis=1)).ravel().astype(np.int64)\n    order = np.argsort(w)[::-1]  # remove farthest first\n    keep = np.ones(rows.size, dtype=bool)\n    for idx in order:\n        i = rows[idx]; j = cols[idx]\n        if deg[i] > cap_deg or deg[j] > cap_deg:\n            keep[idx] = False\n            deg[i] -= 1\n            deg[j] -= 1\n    kr, kc, kw = rows[keep], cols[keep], w[keep]\n    ii = np.concatenate([kr, kc]); jj = np.concatenate([kc, kr])\n    C_new = sp.coo_matrix((np.ones(ii.size, dtype=np.float64), (ii, jj)), shape=(n, n)).tocsr()\n    D_new = sp.coo_matrix((np.concatenate([kw, kw]).astype(np.float64), (ii, jj)), shape=(n, n)).tocsr()\n    C_new.sort_indices(); D_new.sort_indices()\n    return C_new, D_new\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    A = run_frozen(\n        adata,\n        lam_override=0.605, delta=0.12, kdensity=22, k_total=50,\n        emb_n_neighbors=17, gamma_max=0.70, cap=2.0, rng_seed=0\n    )\n    C = A.obsp['connectivities'].tocsr().astype(np.float64)\n    D = A.obsp['distances'].tocsr().astype(np.float64)\n    pre = _deg_stats(C)\n    print(f\"[TRIM80] degree pre (min,med,mean,max) = {pre}\")\n    C2, D2 = _invite_trim_cap(C, D, cap_deg=80)\n    post = _deg_stats(C2)\n    print(f\"[TRIM80] degree post (min,med,mean,max) = {post}\")\n    A.obsp['connectivities'] = C2\n    A.obsp['distances'] = D2\n    if 'neighbors' not in A.uns:\n        A.uns['neighbors'] = {}\n    A.uns['neighbors']['connectivities_key'] = 'connectivities'\n    A.uns['neighbors']['distances_key'] = 'distances'\n    params = A.uns['neighbors'].get('params', {})\n    params.update({'degree_cap': 80, 'postprocess': 'invite_trim_largest_distance'})\n    A.uns['neighbors']['params'] = params\n    return A\n",
+    "submitted_timestamp": 1761840880.657812,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6917317851795528,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[TRIM80] degree pre (min,med,mean,max) = (50.0, 58.0, 92.00375, 3847.0)\n[TRIM80] degree post (min,med,mean,max) = (6.0, 31.0, 36.4131, 80.0)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8f9a0773-086e-4212-9527-ccd55d7b60aa/result_human.h5ad\n\nRESULT_UUID: 8f9a0773-086e-4212-9527-ccd55d7b60aa\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.797  NMI: 0.751\n  Graph_conn: 0.961  kBET: 0.789  iLISI: 0.403  cLISI: 0.981\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.796763  NMI: 0.751098\n  Graph_conn: 0.962150  kBET: 0.752968  iLISI: 0.403073  cLISI: 0.994593\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.797",
+          0.7967900733655088
+        ],
+        "NMI": [
+          "0.751",
+          0.7510274119877794
+        ],
+        "Graph_conn": [
+          "0.961",
+          0.961497412348483
+        ],
+        "kBET": [
+          "0.789",
+          0.7891365894608423
+        ],
+        "iLISI": [
+          "0.403",
+          0.4030734785822916
+        ],
+        "cLISI": [
+          "0.981",
+          0.9814381632231085
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761841194.7416308,
+      "evaluation_datetime": "2025-10-31T00:19:54.741631",
+      "sort_key": [
+        0.6917317851795528
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6917317851795528,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761841194.7998223,
+    "version_notified": "original",
+    "message": "Your research submission 'Invite-trim degree cap (80) after DAQB sym: MPB\u2011GraphFWPCA+DAQB ridge' (ID: 1833) has been evaluated.\n\n**Score:** 0.6917317851795528\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.797\n**NMI:** 0.751\n**Graph_conn:** 0.961\n**kBET:** 0.789\n**iLISI:** 0.403\n**cLISI:** 0.981\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.797  NMI: 0.751\n  Graph_conn: 0.961  kBET: 0.789  iLISI: 0.403  cLISI: 0.981\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.796763  NMI: 0.751098\n  Graph_conn: 0.962150  kBET: 0.752968  iLISI: 0.403073  cLISI: 0.994593\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[TRIM80] degree pre (min,med,mean,max) = (50.0, 58.0, 92.00375, 3847.0)\n[TRIM80] degree post (min,med,mean,max) = (6.0, 31.0, 36.4131, 80.0)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/8f9a0773-086e-4212-9527-ccd55d7b60aa/result_human.h5ad\n\nRESULT_UUID: 8f9a0773-086e-4212-9527-ccd55d7b60aa\n\n\nSTDERR:\n\n```"
+  }
+}

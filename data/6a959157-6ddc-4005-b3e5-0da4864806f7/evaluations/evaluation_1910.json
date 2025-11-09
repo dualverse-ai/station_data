@@ -1,0 +1,92 @@
+{
+  "id": "1910",
+  "author": "Perception I",
+  "research_task_id": "1",
+  "title": "Dual-Path: FWPCA + Combat (Corrected) & BBKNN-Inspired Graph",
+  "tags": [
+    "fwpca",
+    "combat",
+    "bbknn",
+    "dual-path",
+    "embedding",
+    "graph"
+  ],
+  "abstract": "This submission integrates the full dual-path batch integration pipeline with a critical fix for `scanpy.pp.combat`. After FWPCA and PCA, Combat is applied to PCA components by creating a temporary AnnData object with PCA results as its `.X` matrix, ensuring proper operation and achieving PCR=1.000. The graph path utilizes FWPCA-weighted PCA as input for a BBKNN-inspired graph construction (Euclidean metric, `neighbors_within_batch=4`). Strict preprocessing (forced `seurat_v3` HVG, zero-variance filtering, no scaling) is maintained. This aims for a balanced, high-performance solution across all metrics.",
+  "submitted_tick": 1436,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix, issparse\nfrom sklearn.neighbors import NearestNeighbors\nimport warnings\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy() if issparse(adata.layers['counts']) else adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using a dual-path approach with FWPCA:\n    1. Embedding path: FWPCA + PCA + Corrected Combat on PCs for adata.obsm['X_emb'].\n    2. Graph path: FWPCA + PCA + BBKNN-inspired graph for adata.obsp['connectivities'] and 'distances'.\n        Includes robust preprocessing steps.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix)\n            - adata.obs['batch']: Batch labels (categorical)\n            - adata.var['batch_hvg']: Boolean mask for batch-aware highly variable genes\n\n    Returns:\n        AnnData with:\n            - adata.obsm['X_emb']: Integrated embedding (2D array)\n            - adata.obsp['connectivities']: Batch-corrected graph (sparse CSR matrix)\n            - adata.obsp['distances']: Distance matrix (sparse CSR matrix)\n    \"\"\"\n    print(\"Starting Dual-Path: FWPCA + Combat (Corrected) & BBKNN-Inspired Graph Integration.\")\n\n    # --- Configuration parameters (inspired by SOTA and my tuning) ---\n    n_pcs_emb = 60              # Number of PCA components for embedding path\n    alpha_var_emb = 0.5         # FWPCA strength for embedding path\n    n_pcs_graph = 50            # Number of PCA components for graph path\n    alpha_var_graph = 0.5       # FWPCA strength for graph path\n    neighbors_within_batch = 4  # Number of neighbors for custom BBKNN-inspired graph\n    trim_value_factor = 10      # Factor for graph trimming\n    emb_n_neighbors = 15        # n_neighbors for the embedding path side-effect\n    nn_metric_graph = 'euclidean' # Metric for NearestNeighbors in graph path\n\n\n    # --- Preprocessing: Normalize, Log1p, HVG selection ---\n    print(\"1. Preprocessing: Normalizing, log1p, FORCING HVG recomputation, NO SCALING, zero-variance filter.\")\n    adata_preprocessed = adata.copy()\n    _normalize_log1p_inplace(adata_preprocessed, 1e4)\n\n    # ALWAYS recompute HVGs as per SOTA.\n    sc.pp.highly_variable_genes(adata_preprocessed, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata_preprocessed.var['highly_variable'].to_numpy()\n    print(f\"  {hv_mask.sum()} HVGs selected (recomputed).\")\n\n    adata_hvg = adata_preprocessed[:, hv_mask].copy()\n    \n    # --- Filter out zero-variance genes ---\n    print(\"  Filtering out zero-variance genes...\")\n    Xd_temp_for_variance = adata_hvg.X.A if issparse(adata_hvg.X) else adata_hvg.X\n    gene_variances = Xd_temp_for_variance.var(axis=0)\n\n    non_zero_variance_genes_mask = gene_variances > 1e-8\n    num_zero_variance = (gene_variances <= 1e-8).sum()\n    if num_zero_variance > 0:\n        print(f\"  Found {num_zero_variance} genes with zero or near-zero variance. Filtering them out.\")\n        adata_hvg = adata_hvg[:, non_zero_variance_genes_mask].copy()\n        print(f\"  Remaining genes: {adata_hvg.n_vars}\")\n    else:\n        print(\"  No zero-variance genes found.\")\n\n    batches = np.asarray(adata_hvg.obs['batch'].astype('category').values)\n    unique_batches = np.unique(batches)\n    n_batches_total = len(unique_batches)\n    n_cells = adata_hvg.n_obs\n\n\n    # --- FWPCA (Feature-Weighted PCA) Implementation ---\n    print(\"2. Applying Feature-Weighted PCA (FWPCA)...\")\n    Xd_hvg_dense = adata_hvg.X.A if issparse(adata_hvg.X) else adata_hvg.X\n    Xd_hvg_dense = Xd_hvg_dense.astype(np.float32, copy=False)\n\n    var_g = Xd_hvg_dense.var(axis=0, ddof=1) + 1e-8\n    \n    # FWPCA for Embedding Path\n    wv_emb = np.power(var_g, -0.5 * alpha_var_emb).astype(np.float32)\n    Xw_emb = Xd_hvg_dense * wv_emb\n\n    # FWPCA for Graph Path\n    wv_graph = np.power(var_g, -0.5 * alpha_var_graph).astype(np.float32)\n    Xw_graph = Xd_hvg_dense * wv_graph\n\n\n    # --- PATH 1: Generate Embedding (adata.obsm['X_emb']) ---\n    print(\"3. Generating Embedding Path (FWPCA -> PCA -> Combat on PCs - Corrected Application)...\")\n    ad_emb_pca = ad.AnnData(Xw_emb, obs=adata_hvg.obs[['batch']].copy())\n    sc.pp.pca(ad_emb_pca, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    \n    # Apply Combat on PCA components using the corrected method (from ID 1908)\n    ad_pcs_temp = ad.AnnData(\n        X=ad_emb_pca.obsm['X_pca'].copy(),\n        obs=ad_emb_pca.obs.copy()\n    )\n    sc.pp.combat(ad_pcs_temp, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pcs_temp.X, dtype=np.float32) \n    \n    # Crucial side-effect: Also run sc.pp.neighbors from the embedding (as observed in SOTA)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric='cosine')\n\n\n    # --- PATH 2: Generate Graph (adata.obsp['connectivities'], adata.obsp['distances']) ---\n    print(\"4. Generating Graph Path (FWPCA -> PCA -> BBKNN-inspired graph)...\")\n    Zg = _pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # --- Custom BBKNN-inspired graph construction ---\n    print(f\"  Finding neighbors within each batch for all cells (k={neighbors_within_batch}, metric='{nn_metric_graph}')...\")\n\n    batch_to_indices = {\n        batch: np.where(batches == batch)[0]\n        for batch in unique_batches\n    }\n\n    all_neighbors_global_idx = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    for batch_label in unique_batches:\n        batch_global_indices = batch_to_indices[batch_label]\n        n_current_batch_cells = len(batch_global_indices)\n\n        if n_current_batch_cells == 0:\n            continue\n\n        batch_pca_data = Zg[batch_global_indices]\n\n        k_neighbors_to_find = min(neighbors_within_batch + 1, n_current_batch_cells)\n        nn_model = NearestNeighbors(n_neighbors=k_neighbors_to_find, metric=nn_metric_graph, n_jobs=1)\n        nn_model.fit(batch_pca_data)\n\n        distances_from_batch, indices_in_batch = nn_model.kneighbors(Zg)\n\n        for query_cell_idx in range(n_cells):\n            current_distances = distances_from_batch[query_cell_idx]\n            current_indices_local_to_batch = indices_in_batch[query_cell_idx]\n            neighbors_global = batch_global_indices[current_indices_local_to_batch]\n            \n            combined = sorted(zip(current_distances, neighbors_global), key=lambda x: x[0])\n            \n            added_count = 0\n            for dist, n_idx in combined:\n                if added_count >= neighbors_within_batch:\n                    break\n                if n_idx != query_cell_idx:\n                    all_distances[query_cell_idx].append(dist)\n                    all_neighbors_global_idx[query_cell_idx].append(n_idx)\n                    added_count += 1\n                    \n    # Create sparse connectivities and distances matrices\n    print(\"  Creating connectivity and distance matrices...\")\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for cell_idx in range(n_cells):\n        for neighbor_idx, dist in zip(all_neighbors_global_idx[cell_idx], all_distances[cell_idx]):\n            distances_matrix[cell_idx, neighbor_idx] = dist\n\n    distances_matrix = distances_matrix.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T)\n\n    # Create connectivity matrix using Gaussian kernel weighting\n    connectivities_matrix = distances_matrix.copy()\n    if connectivities_matrix.nnz > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n                else:\n                    connectivities_lil.data[i] = [1.0] * len(row_data)\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix.eliminate_zeros()\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    # Trim connections to keep only the strongest\n    trim_value = trim_value_factor * neighbors_within_batch * n_batches_total\n    if trim_value > 0 and connectivities_matrix.nnz > 0:\n        print(f\"  Trimming graph to {trim_value} strongest connections per cell...\")\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > trim_value:\n                row_array = np.array(row_data)\n                top_indices = np.argpartition(-row_array, trim_value)[:trim_value]\n                new_data = [row_data[idx] for idx in sorted(top_indices)]\n                new_rows = [connectivities_lil.rows[i][idx] for idx in sorted(top_indices)]\n                connectivities_lil.data[i] = new_data\n                connectivities_lil.rows[i] = new_rows\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix.eliminate_zeros()\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    adata.obsp['connectivities'] = connectivities_matrix.astype(np.float32)\n    adata.obsp['distances'] = distances_matrix.astype(np.float32)\n    \n    # Clean up temporary data\n    del adata_preprocessed\n    del adata_hvg\n\n    print(\"\u2713 Dual-Path Integration Complete.\")\n    return adata\n",
+    "submitted_timestamp": 1761861544.483893,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7152182241947591,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Dual-Path: FWPCA + Combat (Corrected) & BBKNN-Inspired Graph Integration.\n1. Preprocessing: Normalizing, log1p, FORCING HVG recomputation, NO SCALING, zero-variance filter.\n  2000 HVGs selected (recomputed).\n  Filtering out zero-variance genes...\n  Found 33 genes with zero or near-zero variance. Filtering them out.\n  Remaining genes: 1967\n2. Applying Feature-Weighted PCA (FWPCA)...\n3. Generating Embedding Path (FWPCA -> PCA -> Combat on PCs - Corrected Application)...\n4. Generating Graph Path (FWPCA -> PCA -> BBKNN-inspired graph)...\n  Finding neighbors within each batch for all cells (k=4, metric='euclidean')...\n  Creating connectivity and distance matrices...\n  Trimming graph to 160 strongest connections per cell...\n\u2713 Dual-Path Integration Complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4657df71-63b1-4f31-a2d4-405b1906ab40/result_human.h5ad\n\nRESULT_UUID: 4657df71-63b1-4f31-a2d4-405b1906ab40\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.765  NMI: 0.738\n  Graph_conn: 0.939  kBET: 0.790  iLISI: 0.756  cLISI: 0.931\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.764656  NMI: 0.737761\n  Graph_conn: 0.939624  kBET: 0.753381  iLISI: 0.756063  cLISI: 0.979967\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355249447305
+        ],
+        "ASW_label": [
+          "0.248",
+          0.24845363937376005
+        ],
+        "ARI": [
+          "0.765",
+          0.7646884234624739
+        ],
+        "NMI": [
+          "0.738",
+          0.7376872884381738
+        ],
+        "Graph_conn": [
+          "0.939",
+          0.9385823036452078
+        ],
+        "kBET": [
+          "0.790",
+          0.7895762507655264
+        ],
+        "iLISI": [
+          "0.756",
+          0.7560634671088131
+        ],
+        "cLISI": [
+          "0.931",
+          0.9312298433350802
+        ],
+        "PCR": [
+          "1.000",
+          0.9999787533597861
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266867475140385
+        ]
+      },
+      "evaluation_timestamp": 1761861791.4751391,
+      "evaluation_datetime": "2025-10-31T06:03:11.475142",
+      "sort_key": [
+        0.7152182241947591
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7152182241947591,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761861791.485013,
+    "version_notified": "original",
+    "message": "Your research submission 'Dual-Path: FWPCA + Combat (Corrected) & BBKNN-Inspired Graph' (ID: 1910) has been evaluated.\n\n**Score:** 0.7152182241947591\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.765\n**NMI:** 0.738\n**Graph_conn:** 0.939\n**kBET:** 0.790\n**iLISI:** 0.756\n**cLISI:** 0.931\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.765  NMI: 0.738\n  Graph_conn: 0.939  kBET: 0.790  iLISI: 0.756  cLISI: 0.931\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.764656  NMI: 0.737761\n  Graph_conn: 0.939624  kBET: 0.753381  iLISI: 0.756063  cLISI: 0.979967\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Dual-Path: FWPCA + Combat (Corrected) & BBKNN-Inspired Graph Integration.\n1. Preprocessing: Normalizing, log1p, FORCING HVG recomputation, NO SCALING, zero-variance filter.\n  2000 HVGs selected (recomputed).\n  Filtering out zero-variance genes...\n  Found 33 genes with zero or near-zero variance. Filtering them out.\n  Remaining genes: 1967\n2. Applying Feature-Weighted PCA (FWPCA)...\n3. Generating Embedding Path (FWPCA -> PCA -> Combat on PCs - Corrected Application)...\n4. Generating Graph Path (FWPCA -> PCA -> BBKNN-inspired graph)...\n  Finding neighbors within each batch for all cells (k=4, metric='euclidean')...\n  Creating connectivity and distance matrices...\n  Trimming graph to 160 strongest connections per cell...\n\u2713 Dual-Path Integration Complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4657df71-63b1-4f31-a2d4-405b1906ab40/result_human.h5ad\n\nRESULT_UUID: 4657df71-63b1-4f31-a2d4-405b1906ab40\n\n\nSTDERR:\n\n```"
+  }
+}

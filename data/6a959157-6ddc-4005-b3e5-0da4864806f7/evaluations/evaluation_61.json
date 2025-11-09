@@ -1,0 +1,92 @@
+{
+  "id": "61",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Combat Correction with Standard Scanpy UMAP",
+  "tags": [
+    "combat",
+    "scanpy",
+    "umap",
+    "pca",
+    "embedding",
+    "graph-based"
+  ],
+  "abstract": "This method first applies a manual implementation of the Combat empirical Bayes algorithm to generate a batch-corrected gene expression matrix. Following this global correction, a standard Scanpy workflow is executed: PCA is performed on the Combat-corrected data, a k-nearest neighbor graph is constructed using `scanpy.pp.neighbors` from the PCA space, and finally, a UMAP embedding is generated from this graph. The output consists of both the UMAP embedding (`X_emb`) and the graph (`connectivities`, `distances`), aiming to provide a robustly integrated dataset that leverages Combat's strengths while benefiting from Scanpy's manifold learning capabilities.",
+  "submitted_tick": 28,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy import stats\nfrom scipy.sparse import csr_matrix, lil_matrix, issparse\nimport warnings\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Combat Helper Functions (copied from baseline) ---\ndef _aprior(delta_hat):\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8\n    return (2 * s2 + m**2) / s2\n\ndef _bprior(delta_hat):\n    m = np.mean(delta_hat)\n    s2 = np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8\n    return (m * s2 + m**3) / s2\n\ndef _it_sol(s_data, g_hat, d_hat, g_bar, t2, a, b, conv=0.0001):\n    n = (~np.isnan(s_data)).sum(axis=1)\n    g_old = g_hat.copy()\n    d_old = d_hat.copy()\n\n    change = 1\n    count = 0\n    max_iter = 200\n\n    while change > conv and count < max_iter:\n        with warnings.catch_warnings():\n            warnings.simplefilter(\"ignore\", RuntimeWarning)\n            g_new = (t2 * n * g_hat + d_old * g_bar) / (t2 * n + d_old)\n            g_new = np.nan_to_num(g_new, nan=0.0)\n\n        sum2 = s_data - g_new.reshape((g_new.shape[0], 1)) @ np.ones((1, s_data.shape[1]))\n        sum2 = sum2**2\n        sum2 = sum2.sum(axis=1)\n        d_new = (0.5 * sum2 + b) / (n / 2.0 + a - 1.0)\n        d_new = np.nan_to_num(d_new, nan=0.0)\n\n        change = max(\n            (np.abs(g_new - g_old) / (np.abs(g_old) + 1e-8)).max(),\n            (np.abs(d_new - d_old) / (np.abs(d_old) + 1e-8)).max()\n        )\n\n        g_old = g_new\n        d_old = d_new\n        count += 1\n    return g_new, d_new\n\n# --- Main Combat Function (extracted for reusability) ---\ndef run_combat_correction(adata: ad.AnnData):\n    \"\"\"\n    Performs Combat batch correction and returns the corrected expression matrix.\n    \"\"\"\n    adata_copy = adata.copy()\n    \n    sc.pp.normalize_total(adata_copy, target_sum=1e4)\n    sc.pp.log1p(adata_copy)\n\n    if issparse(adata_copy.X):\n        data = adata_copy.X.toarray()\n    else:\n        data = adata_copy.X.copy()\n    data = data.T # Genes x Samples\n\n    batch_labels = adata_copy.obs['batch'].values\n    unique_batches = np.unique(batch_labels)\n    n_batches_total = len(unique_batches)\n    n_genes, n_samples = data.shape\n\n    batch_design = np.zeros((n_samples, n_batches_total))\n    batch_info = []\n    for i, batch in enumerate(unique_batches):\n        batch_mask = batch_labels == batch\n        batch_indices = np.where(batch_mask)[0]\n        batch_design[batch_indices, i] = 1\n        batch_info.append(batch_indices)\n    n_batches = np.array([len(indices) for indices in batch_info])\n\n    B_hat = np.dot(batch_design.T, batch_design)\n    B_hat_inv = np.linalg.inv(B_hat + np.eye(B_hat.shape[0]) * 1e-8)\n    B_hat_pseudo_inv = np.dot(B_hat_inv, batch_design.T)\n\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = np.dot(B_hat_pseudo_inv, data.T).T\n\n    var_pooled = np.zeros(n_genes)\n    for i, batch_indices in enumerate(batch_info):\n        batch_data = data[:, batch_indices]\n        batch_mean = batch_means[:, i:i+1]\n        diff = batch_data - batch_mean\n        var_pooled += np.sum(diff**2, axis=1)\n\n    with warnings.catch_warnings():\n        warnings.simplefilter(\"ignore\", RuntimeWarning)\n        var_pooled = var_pooled / (n_samples - n_batches_total)\n        var_pooled = np.nan_to_num(var_pooled, nan=1e-8)\n\n    stand_mean = np.dot(grand_mean, np.ones((1, n_samples)))\n    s_data = np.zeros_like(data)\n\n    for i, batch_indices in enumerate(batch_info):\n        batch_data = data[:, batch_indices]\n        batch_mean = batch_means[:, i:i+1]\n        safe_var_pooled = np.maximum(var_pooled[:, np.newaxis], 1e-8)\n        s_data[:, batch_indices] = (batch_data - batch_mean) / np.sqrt(safe_var_pooled)\n\n    gamma_hat = np.dot(np.linalg.inv(np.dot(batch_design.T, batch_design) + np.eye(batch_design.shape[1]) * 1e-8),\n                      np.dot(batch_design.T, s_data.T)).T\n\n    delta_hat = []\n    for batch_indices in batch_info:\n        batch_var = np.var(s_data[:, batch_indices], axis=1, ddof=1)\n        batch_var = np.nan_to_num(batch_var, nan=1e-8)\n        batch_var = np.maximum(batch_var, 1e-8)\n        delta_hat.append(batch_var)\n\n    gamma_bar = np.mean(gamma_hat, axis=1)\n    t2 = np.var(gamma_hat, axis=1)\n\n    a_prior = [_aprior(d) for d in delta_hat]\n    b_prior = [_bprior(d) for d in delta_hat]\n\n    gamma_star = []\n    delta_star = []\n\n    for i, batch_indices in enumerate(batch_info):\n        gamma, delta = _it_sol(\n            s_data[:, batch_indices],\n            gamma_hat[:, i],\n            delta_hat[i],\n            gamma_bar,\n            t2,\n            a_prior[i],\n            b_prior[i]\n        )\n        gamma_star.append(gamma)\n        delta_star.append(delta)\n\n    gamma_star = np.array(gamma_star).T\n    delta_star = np.array(delta_star).T\n\n    bayesdata = s_data.copy()\n\n    for j, batch_indices in enumerate(batch_info):\n        dsq = np.sqrt(np.maximum(delta_star[:, j], 1e-8))\n        dsq = dsq.reshape((len(dsq), 1))\n        denom = np.dot(dsq, np.ones((1, n_batches[j])))\n\n        batch_gamma = gamma_star[:, j].reshape(-1, 1)\n        numer = bayesdata[:, batch_indices] - batch_gamma @ np.ones((1, n_batches[j]))\n\n        bayesdata[:, batch_indices] = numer / (denom + 1e-8)\n\n    vpsq = np.sqrt(np.maximum(var_pooled, 1e-8)).reshape((len(var_pooled), 1))\n    bayesdata = bayesdata * np.dot(vpsq, np.ones((1, n_samples))) + stand_mean\n\n    X_corrected = bayesdata.T\n    X_corrected = np.nan_to_num(X_corrected, nan=0.0, posinf=0.0, neginf=0.0)\n\n    return X_corrected\n\n# --- Main Integration Function ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Combat batch integration followed by standard Scanpy PCA, neighbors, and UMAP.\n\n    1. Applies Combat for expression correction.\n    2. Performs PCA on the Combat-corrected data.\n    3. Builds a k-nearest neighbor graph using `scanpy.pp.neighbors`.\n    4. Computes UMAP from the k-NN graph for X_emb.\n    \"\"\"\n    \n    adata_working = adata.copy()\n\n    # 1. Apply Combat for expression correction\n    # This function already handles normalization and log1p internally.\n    X_combat_corrected = run_combat_correction(adata_working)\n\n    # 2. Update adata_working with corrected expression\n    adata_working.X = X_combat_corrected\n    \n    # 3. Dimensionality reduction using PCA on Combat-corrected data\n    # The input `adata.X` already contains 2000 HVGs. Combat correction operates on these.\n    # So, `X_combat_corrected` already represents the corrected expression for these HVGs.\n    n_pcs_actual = min(50, X_combat_corrected.shape[1] - 1, X_combat_corrected.shape[0] - 1)\n    sc.pp.pca(adata_working, n_comps=n_pcs_actual)\n\n    # 4. Build k-nearest neighbor graph using standard scanpy.pp.neighbors\n    # This will build the graph based on the PCA space (adata_working.obsm['X_pca'])\n    sc.pp.neighbors(adata_working, n_neighbors=15, n_pcs=n_pcs_actual) # Using 15 neighbors as a common default\n\n    # 5. UMAP embedding from the k-NN graph\n    sc.tl.umap(adata_working)\n\n    # Store the UMAP embedding in adata.obsm['X_emb']\n    # Ensure adata has the correct obs_names to align with adata_working\n    adata.obs_names = adata_working.obs_names\n    adata.obsm['X_emb'] = adata_working.obsm['X_umap']\n\n    # Transfer graph to output adata.obsp\n    adata.obsp['connectivities'] = adata_working.obsp['connectivities']\n    adata.obsp['distances'] = adata_working.obsp['distances']\n    \n    # Clean up intermediate obsm if desired\n    if 'X_pca' in adata_working.obsm: # X_pca is generated by sc.pp.pca in adata_working\n        del adata_working.obsm['X_pca']\n    if 'X_umap' in adata_working.obsm:\n        del adata_working.obsm['X_umap']\n    if 'neighbors' in adata_working.uns: # Remove the neighbors key if only X_emb and obsp are strictly required\n        del adata_working.uns['neighbors']\n\n\n    return adata\n",
+    "submitted_timestamp": 1761402207.583361,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.49746837784145004,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e1eb9c3e-f855-4454-ba49-0f952a1caff1/result_human.h5ad\n\nRESULT_UUID: e1eb9c3e-f855-4454-ba49-0f952a1caff1\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.188  ARI: 0.315  NMI: 0.620\n  Graph_conn: 0.680  kBET: 0.713  iLISI: 0.004  cLISI: 0.991\n  PCR: 0.824  Cell_cycle: 0.640\n\nRaw Scores (before normalization):\n  ASW_batch: 0.520301  ASW_label: 0.519926  ARI: 0.314663  NMI: 0.620434\n  Graph_conn: 0.685224  kBET: 0.681118  iLISI: 0.004384  cLISI: 0.997401\n  PCR: 0.823772  Cell_cycle: 0.554566",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.188",
+          0.18760647114885215
+        ],
+        "ARI": [
+          "0.315",
+          0.31475633531990826
+        ],
+        "NMI": [
+          "0.620",
+          0.6203266029914719
+        ],
+        "Graph_conn": [
+          "0.680",
+          0.6797930184596135
+        ],
+        "kBET": [
+          "0.713",
+          0.7126837534069052
+        ],
+        "iLISI": [
+          "0.004",
+          0.004383968387666008
+        ],
+        "cLISI": [
+          "0.991",
+          0.9910784407057255
+        ],
+        "PCR": [
+          "0.824",
+          0.8237724918949985
+        ],
+        "Cell_cycle": [
+          "0.640",
+          0.6402826960993598
+        ]
+      },
+      "evaluation_timestamp": 1761402520.9013534,
+      "evaluation_datetime": "2025-10-25T22:28:40.901354",
+      "sort_key": [
+        0.49746837784145004
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.49746837784145004,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761402520.9109519,
+    "version_notified": "original",
+    "message": "Your research submission 'Combat Correction with Standard Scanpy UMAP' (ID: 61) has been evaluated.\n\n**Score:** 0.49746837784145004\n**ASW_batch:** 0.000\n**ASW_label:** 0.188\n**ARI:** 0.315\n**NMI:** 0.620\n**Graph_conn:** 0.680\n**kBET:** 0.713\n**iLISI:** 0.004\n**cLISI:** 0.991\n**PCR:** 0.824\n**Cell_cycle:** 0.640\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.188  ARI: 0.315  NMI: 0.620\n  Graph_conn: 0.680  kBET: 0.713  iLISI: 0.004  cLISI: 0.991\n  PCR: 0.824  Cell_cycle: 0.640\n\nRaw Scores (before normalization):\n  ASW_batch: 0.520301  ASW_label: 0.519926  ARI: 0.314663  NMI: 0.620434\n  Graph_conn: 0.685224  kBET: 0.681118  iLISI: 0.004384  cLISI: 0.997401\n  PCR: 0.823772  Cell_cycle: 0.554566\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e1eb9c3e-f855-4454-ba49-0f952a1caff1/result_human.h5ad\n\nRESULT_UUID: e1eb9c3e-f855-4454-ba49-0f952a1caff1\n\n\nSTDERR:\n\n```"
+  }
+}

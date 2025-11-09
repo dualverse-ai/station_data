@@ -1,0 +1,46 @@
+{
+  "id": "397",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Compute Jaccards: Inquire_207 vs {Noesis_243, Scientia_259, Prometheus_298} @ tol=1e8",
+  "tags": [
+    "utility",
+    "mapping",
+    "jaccard",
+    "consensus",
+    "exports-only"
+  ],
+  "abstract": "Parse Inquire\u2019s newly published n=26 sets and compute Jaccards vs Noesis_243, Scientia_259, Prometheus_298 at tol=1e\u22128. Write JSON/CSV under storage/noesis/nmap/ and refresh 4-lineage consensus. Returns Noesis pack (no optimization).",
+  "submitted_tick": 235,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\nimport numpy as np\n\nN = 26\n\n# ---------- IO helpers ----------\ndef ensure_dir(p):\n  d = os.path.dirname(p)\n  if d and not os.path.exists(d):\n    os.makedirs(d, exist_ok=True)\n\ndef read_lines(path):\n  with open(path, 'r', encoding='utf-8') as f:\n    return [ln.strip() for ln in f if ln.strip()]\n\ndef read_pairs_csv(path):\n  # Expect header \"i,j\"\n  s = set()\n  try:\n    lines = read_lines(path)\n  except Exception:\n    return s\n  for idx, ln in enumerate(lines):\n    if idx == 0:\n      # header, skip if contains non-digits\n      continue\n    parts = [p.strip() for p in ln.split(',')]\n    if len(parts) != 2:\n      continue\n    try:\n      i = int(parts[0]); j = int(parts[1])\n    except Exception:\n      continue\n    if i == j: \n      continue\n    a, b = (i, j) if i < j else (j, i)\n    s.add((a, b))\n  return s\n\ndef read_boundary_csv(path):\n  # Expect header \"disc,label\"; labels in {xmin,xmax,ymin,ymax}\n  allowed = {\"xmin\",\"xmax\",\"ymin\",\"ymax\"}\n  s = set()\n  try:\n    lines = read_lines(path)\n  except Exception:\n    return s\n  for idx, ln in enumerate(lines):\n    if idx == 0:\n      continue\n    parts = [p.strip() for p in ln.split(',')]\n    if len(parts) != 2:\n      continue\n    try:\n      d = int(parts[0])\n    except Exception:\n      continue\n    lab = parts[1].lower()\n    if lab in allowed:\n      s.add((d, lab))\n  return s\n\ndef load_sets(lineage, custom_paths=None):\n  \"\"\"\n  Return dict with keys: 'B','P', 'sizes'\n  Tries standard nmap/n26 paths, allows lineage-specific prefixes.\n  \"\"\"\n  candP = []\n  candB = []\n  if custom_paths is not None:\n    candP.extend(custom_paths.get('P', []))\n    candB.extend(custom_paths.get('B', []))\n\n  # Standard candidates\n  base_nmap = f\"storage/{lineage}/nmap/n26\"\n  base_std  = f\"storage/{lineage}/nmap/n26\"\n  base_alt  = f\"storage/{lineage}/exports\"\n\n  # Pairs\n  candP.extend([\n    f\"{base_nmap}/active_pairs_tol1e8.csv\",\n    f\"{base_std}/active_pairs_tol1e8.csv\",\n    f\"{base_alt}/active_pairs_tol1e8.csv\",\n  ])\n  # Boundary\n  candB.extend([\n    f\"{base_nmap}/active_boundary_tol1e8.csv\",\n    f\"{base_std}/active_boundary_tol1e8.csv\",\n    f\"{base_alt}/active_boundary_tol1e8.csv\",\n  ])\n\n  # Read first existing\n  P = set()\n  for p in candP:\n    if os.path.exists(p):\n      P = read_pairs_csv(p)\n      break\n\n  B = set()\n  for p in candB:\n    if os.path.exists(p):\n      B = read_boundary_csv(p)\n      break\n\n  return {\"B\": B, \"P\": P, \"sizes\": {\"B\": len(B), \"P\": len(P)}}\n\ndef jaccard(A, B):\n  inter = len(A & B)\n  uni   = len(A | B) if (A or B) else 0\n  J = (inter / uni) if uni > 0 else 1.0\n  return inter, uni, J\n\ndef write_jaccard(name, A_name, B_name, A_set, B_set, outdir=\"storage/noesis/nmap\"):\n  inter, uni, J = jaccard(A_set, B_set)\n  data = {\n    \"name\": name,\n    \"A\": A_name,\n    \"B\": B_name,\n    \"A_size\": len(A_set),\n    \"B_size\": len(B_set),\n    \"intersection\": inter,\n    \"union\": uni,\n    \"jaccard\": J\n  }\n  ensure_dir(f\"{outdir}/{name}.json\")\n  with open(f\"{outdir}/{name}.json\", \"w\", encoding=\"utf-8\") as f:\n    json.dump(data, f, indent=2)\n  with open(f\"{outdir}/{name}.csv\", \"w\", encoding=\"utf-8\") as f:\n    f.write(\"A,B,A_size,B_size,intersection,union,jaccard\\n\")\n    f.write(f\"{A_name},{B_name},{len(A_set)},{len(B_set)},{inter},{uni},{J:.6f}\\n\")\n\ndef write_consensus(name, sets_dict, outdir=\"storage/noesis/nmap\"):\n  \"\"\"\n  sets_dict: {label: {\"B\": set(...), \"P\": set(...)}}\n  \"\"\"\n  labels = sorted(sets_dict.keys())\n  Bs = [sets_dict[k][\"B\"] for k in labels]\n  Ps = [sets_dict[k][\"P\"] for k in labels]\n  B_inter = set.intersection(*Bs) if Bs else set()\n  B_union = set.union(*Bs) if Bs else set()\n  P_inter = set.intersection(*Ps) if Ps else set()\n  P_union = set.union(*Ps) if Ps else set()\n  sizes = {k: {\"B\": len(sets_dict[k][\"B\"]), \"P\": len(sets_dict[k][\"P\"])} for k in labels}\n  data = {\n    \"name\": name,\n    \"labels\": labels,\n    \"sizes\": sizes,\n    \"boundary\": {\"intersection\": len(B_inter), \"union\": len(B_union)},\n    \"pairs\":    {\"intersection\": len(P_inter), \"union\": len(P_union)}\n  }\n  ensure_dir(f\"{outdir}/{name}.json\")\n  with open(f\"{outdir}/{name}.json\", \"w\", encoding=\"utf-8\") as f:\n    json.dump(data, f, indent=2)\n  with open(f\"{outdir}/{name}.csv\", \"w\", encoding=\"utf-8\") as f:\n    f.write(\"labels,\" + \",\".join(labels) + \"\\n\")\n    f.write(\"B_sizes,\" + \",\".join(str(sizes[k][\"B\"]) for k in labels) + \"\\n\")\n    f.write(\"P_sizes,\" + \",\".join(str(sizes[k][\"P\"]) for k in labels) + \"\\n\")\n    f.write(f\"B_intersection,{len(B_inter)}\\n\")\n    f.write(f\"B_union,{len(B_union)}\\n\")\n    f.write(f\"P_intersection,{len(P_inter)}\\n\")\n    f.write(f\"P_union,{len(P_union)}\\n\")\n\n# ---------- Load sets ----------\n# Inquire: prefer explicitly named files in nmap/n26\ninquire_paths = {\n  \"P\": [\"storage/Inquire/nmap/n26/Inquire_207_SOTA_active_pairs_tol1e8.csv\"],\n  \"B\": [\"storage/Inquire/nmap/n26/Inquire_207_SOTA_active_boundary_tol1e8.csv\"],\n}\nI = load_sets(\"Inquire\", inquire_paths)\n\n# Noesis 243\nnoesis_paths = {\n  \"P\": [\"storage/noesis/exports/sota_243/active_pairs_tol1e8.csv\"],\n  \"B\": [\"storage/noesis/exports/sota_243/active_boundary_tol1e8.csv\"],\n}\nN = load_sets(\"noesis\", noesis_paths)\n\n# Scientia 259\nS = load_sets(\"Scientia\", None)\n\n# Prometheus 298\nPm = load_sets(\"Prometheus\", None)\n\n# ---------- Jaccards ----------\noutdir = \"storage/noesis/nmap\"\nwrite_jaccard(\"jaccard_inquire_eval207_vs_noesis243_tol1e8\", \"Inquire_207\", \"Noesis_243\", I[\"P\"], N[\"P\"], outdir=outdir)\nwrite_jaccard(\"jaccard_inquire_eval207_vs_scientia259_tol1e8\", \"Inquire_207\", \"Scientia_259\", I[\"P\"], S[\"P\"], outdir=outdir)\nwrite_jaccard(\"jaccard_inquire_eval207_vs_prometheus298_tol1e8\", \"Inquire_207\", \"Prometheus_298\", I[\"P\"], Pm[\"P\"], outdir=outdir)\n\n# ---------- Consensus (available four-lineage) ----------\nsets4 = {\n  \"Noesis_243\": N,\n  \"Scientia_259\": S,\n  \"Prometheus_298\": Pm,\n  \"Inquire_207\": I\n}\nwrite_consensus(\"consensus_n26_4lineage_latest_tol1e8\", sets4, outdir=outdir)\n\n# ---------- Return a valid pack (Noesis SOTA 243 or latest fallback) ----------\ndef load_pack():\n  # Preferred: exported SOTA 243\n  try:\n    c = np.loadtxt('storage/noesis/exports/sota_243/centers.txt')\n    r = np.loadtxt('storage/noesis/exports/sota_243/radii.txt')\n    c = np.array(c, dtype=float).reshape(N, 2)\n    r = np.array(r, dtype=float).reshape(N,)\n    return c, r\n  except Exception:\n    pass\n  # Fallback: latest\n  try:\n    c = np.loadtxt('storage/noesis/latest_centers.txt')\n    r = np.loadtxt('storage/noesis/latest_radii.txt')\n    c = np.array(c, dtype=float).reshape(N, 2)\n    r = np.array(r, dtype=float).reshape(N,)\n    return c, r\n  except Exception:\n    # Very last resort: tiny grid (feasible, low score)\n    coords = [0.1,0.3,0.5,0.7,0.9]\n    centers = [[x,y] for x in coords for y in coords][:25] + [[0.2,0.2]]\n    radii = [0.09999]*25 + [0.0414]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef construct_packing():\n  return load_pack()\n",
+    "submitted_timestamp": 1760911219.824266,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5411499999999996,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541150",
+      "evaluation_timestamp": 1760911221.7142627,
+      "evaluation_datetime": "2025-10-20T06:00:21.714265"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5411499999999996,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760911221.8532245,
+    "version_notified": "original",
+    "message": "Your research submission 'Compute Jaccards: Inquire_207 vs {Noesis_243, Scientia_259, Prometheus_298} @ tol=1e8' (ID: 397) has been evaluated.\n\n**Score:** 2.5411499999999996\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541150\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "292",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v1 Final v6 \u2014 Direct ingest from shared JSONL; compute A2\u2032, D1\u2013D3, R2\u2032 ratios",
+  "tags": [
+    "sas",
+    "plasticity",
+    "analysis",
+    "reconciliation"
+  ],
+  "abstract": "Load CPS_v1 beacons from shared JSONL (CPS_v1_Zephyr_IV.jsonl), extract A2\u2032, D1\u2013D3, R2\u2032, compute ratios Dk/R2\u2032 vs 2.5, and write a derived summary JSON for dashboards. Read-only except writing derived JSON.",
+  "submitted_tick": 395,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import json, re, os, sys\nPATH = 'storage/shared/meta/sas/beacons/CPS_v1_Zephyr_IV.jsonl'\nOUT  = 'storage/shared/meta/sas/derived/cps_v1_final.json'\nEXPECTED = 2.5\n\nRX = {\n    \"A2p\": re.compile(r\"CPS_v1:\\s*A2[_ ]?baseline[_ ]?sentinel\", re.I),\n    \"D1\":  re.compile(r\"CPS_v1:\\s*D1[_ ]?deep[_ ]?train\", re.I),\n    \"D2\":  re.compile(r\"CPS_v1:\\s*D2[_ ]?deep[_ ]?train\", re.I),\n    \"D3\":  re.compile(r\"CPS_v1:\\s*D3[_ ]?deep[_ ]?train\", re.I),\n    \"R2p\": re.compile(r\"CPS_v1:\\s*R2[_ ]?recovery[_ ]?sentinel\", re.I),\n}\nTMAP = {\"A2p\":385, \"D1\":386, \"D2\":387, \"D3\":388, \"R2p\":390}\n\ndef fnum(x):\n    try: return float(x)\n    except: return None\n\ndef load_lines(path):\n    recs=[]\n    if not os.path.exists(path):\n        return recs\n    with open(path,'r',encoding='utf-8') as f:\n        for line in f:\n            line=line.strip()\n            if not line: continue\n            try:\n                recs.append(json.loads(line))\n            except Exception:\n                pass\n    return recs\n\ndef norm(r):\n    return {\n      'agent': r.get('agent'),\n      'phase': r.get('phase_label') or r.get('phase') or r.get('notes') or '',\n      'lt': r.get('last_sentinel_tick') or r.get('tick'),\n      'delta': fnum(r.get('sentinel_delta')),\n      'state': r.get('state'),\n      'path_est': fnum(r.get('path_complexity_est'))\n    }\n\nrecs = [norm(r) for r in load_lines(PATH) if isinstance(r, dict)]\n# newest wins for each key\nsel = {k: None for k in [\"A2p\",\"D1\",\"D2\",\"D3\",\"R2p\"]}\nfor r in recs:\n    ph = r['phase'] or ''\n    for k, rx in RX.items():\n        if rx.search(ph):\n            sel[k] = r\n\n# fallback by last_sentinel_tick if any missing\nfor r in recs:\n    try:\n        lt = int(r['lt']) if r['lt'] is not None else None\n    except Exception:\n        lt = None\n    if lt is not None:\n        for k, t in TMAP.items():\n            if sel[k] is None and lt == t:\n                sel[k] = r\n\ndef ratio(dk, r2p):\n    if not dk or not r2p: return None\n    if r2p['delta'] and r2p['delta'] > 0 and dk['delta'] is not None:\n        return dk['delta'] / r2p['delta']\n    return None\n\nout = {\n  'source_path': PATH,\n  'present': {k: sel[k] is not None for k in sel},\n  'deltas': {k: (None if sel[k] is None else sel[k]['delta']) for k in sel},\n  'states': {k: (None if sel[k] is None else sel[k]['state']) for k in sel},\n  'ratios_vs_R2p': {\n    'D1': ratio(sel['D1'], sel['R2p']),\n    'D2': ratio(sel['D2'], sel['R2p']),\n    'D3': ratio(sel['D3'], sel['R2p'])\n  },\n  'expected_ratio': EXPECTED\n}\nrs = [out['ratios_vs_R2p'][k] for k in ['D1','D2','D3'] if isinstance(out['ratios_vs_R2p'][k], (int,float))]\nout['deep_mean_ratio_vs_R2p'] = (sum(rs)/len(rs) if rs else None)\n\n# write derived summary for dashboards\nos.makedirs(os.path.dirname(OUT), exist_ok=True)\nwith open(OUT, 'w', encoding='utf-8') as f:\n    json.dump(out, f, indent=2)\n\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757930447.6235728,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"source_path\": \"storage/shared/meta/sas/beacons/CPS_v1_Zephyr_IV.jsonl\",\n  \"present\": {\n    \"A2p\": true,\n    \"D1\": true,\n    \"D2\": true,\n    \"D3\": true,\n    \"R2p\": true\n  },\n  \"deltas\": {\n    \"A2p\": 1100.0,\n    \"D1\": 1200.0,\n    \"D2\": 1150.0,\n    \"D3\": 1100.0,\n    \"R2p\": 3184.0\n  },\n  \"states\": {\n    \"A2p\": \"Clean\",\n    \"D1\": \"Clean\",\n    \"D2\": \"Clean\",\n    \"D3\": \"Clean\",\n    \"R2p\": \"Active\"\n  },\n  \"ratios_vs_R2p\": {\n    \"D1\": 0.3768844221105528,\n    \"D2\": 0.3611809045226131,\n    \"D3\": 0.3454773869346734\n  },\n  \"expected_ratio\": 2.5,\n  \"deep_mean_ratio_vs_R2p\": 0.3611809045226131\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757930449.6627538,
+      "evaluation_datetime": "2025-09-15T18:00:49.662756"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757930449.7395287,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v1 Final v6 \u2014 Direct ingest from shared JSONL; compute A2\u2032, D1\u2013D3, R2\u2032 ratios' (ID: 292) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"source_path\": \"storage/shared/meta/sas/beacons/CPS_v1_Zephyr_IV.jsonl\",\n  \"present\": {\n    \"A2p\": true,\n    \"D1\": true,\n    \"D2\": true,\n    \"D3\": true,\n    \"R2p\": true\n  },\n  \"deltas\": {\n    \"A2p\": 1100.0,\n    \"D1\": 1200.0,\n    \"D2\": 1150.0,\n    \"D3\": 1100.0,\n    \"R2p\": 3184.0\n  },\n  \"states\": {\n    \"A2p\": \"Clean\",\n    \"D1\": \"Clean\",\n    \"D2\": \"Clean\",\n    \"D3\": \"Clean\",\n    \"R2p\": \"Active\"\n  },\n  \"ratios_vs_R2p\": {\n    \"D1\": 0.3768844221105528,\n    \"D2\": 0.3611809045226131,\n    \"D3\": 0.3454773869346734\n  },\n  \"expected_ratio\": 2.5,\n  \"deep_mean_ratio_vs_R2p\": 0.3611809045226131\n}\n\n\nSTDERR:\n\n```"
+  }
+}

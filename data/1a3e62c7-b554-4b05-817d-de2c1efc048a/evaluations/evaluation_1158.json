@@ -1,0 +1,47 @@
+{
+  "id": "1158",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Strict finalize multi\u2011stage quench (20 min total) with artifact save",
+  "tags": [
+    "optimization",
+    "quench",
+    "line-search",
+    "lp",
+    "exact",
+    "schedule"
+  ],
+  "abstract": "Loads best saved artifact, then applies a 3\u2011stage strict constraint\u2011aware backtracking quench (450s/450s/300s) with increasing k_pairs and decreasing step (\u03b10). Exact LP objective throughout; deterministic seed. Saves final artifact to storage.",
+  "submitted_tick": 690,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, glob, time, datetime\nimport numpy as np\nimport sys\nsys.path.append('storage/noesis/pack')\nimport active_quench as AQ\nimport sa_lp_exact_params as P\n\ndef ensure_dir(d):\n    os.makedirs(d, exist_ok=True)\n\ndef load_best_npz():\n    runs_dir = os.path.join(\"storage\", \"noesis\", \"pack\", \"runs\")\n    files = sorted(glob.glob(os.path.join(runs_dir, \"polished_*.npz\")))\n    best = None\n    best_S = -1.0\n    for fp in files:\n        try:\n            with np.load(fp, allow_pickle=False) as f:\n                C = f[\"centers\"].astype(float)\n                r = f[\"radii\"].astype(float)\n                S = float(np.array(f[\"score\"]).reshape(-1)[0]) if \"score\" in f.files else float(np.sum(r))\n            if C.shape == (26,2) and r.shape == (26,) and S > best_S:\n                best = (fp, C, r, S)\n                best_S = S\n        except Exception:\n            continue\n    return best\n\ndef save_artifact(C, r, S, tag=\"polished\"):\n    runs_dir = os.path.join(\"storage\", \"noesis\", \"pack\", \"runs\")\n    ensure_dir(runs_dir)\n    ts = datetime.datetime.utcnow().strftime(\"%Y%m%d_%H%M%S\")\n    path = os.path.join(runs_dir, f\"{tag}_{ts}.npz\")\n    np.savez(path, centers=C, radii=r, score=float(S), timestamp_utc=ts)\n    return path\n\ndef construct_packing():\n    seed = 20251111\n    best = load_best_npz()\n\n    # Initialize centers\n    if best is not None:\n        _, C0, r0, S0 = best\n    else:\n        # Fallback: short exact\u2011accept SA seed (6 min)\n        C0, r0, S0 = P.exact_sa_params(budget_sec=360.0, seed=seed)\n\n    # Stage 1: 450s, moderate k_pairs, modest step\n    C1, r1, S1 = AQ.active_pair_quench(\n        C0, budget_sec=450.0, seed=seed+1,\n        k_pairs=40, alpha0=8e-4, backtrack=0.5, alpha_min=1e-6, boundary_push=0.4\n    )\n\n    # Stage 2: 450s, more constraints, smaller step\n    C2, r2, S2 = AQ.active_pair_quench(\n        C1, budget_sec=450.0, seed=seed+2,\n        k_pairs=52, alpha0=5e-4, backtrack=0.5, alpha_min=1e-6, boundary_push=0.5\n    )\n\n    # Stage 3: 300s, many constraints, tiny step\n    C3, r3, S3 = AQ.active_pair_quench(\n        C2, budget_sec=300.0, seed=seed+3,\n        k_pairs=64, alpha0=3e-4, backtrack=0.5, alpha_min=1e-6, boundary_push=0.5\n    )\n\n    # Pick best across stages (robust in case of non\u2011monotone behavior)\n    Cs = [C0, C1, C2, C3]\n    Rs = [r0, r1, r2, r3]\n    Ss = [S0, S1, S2, S3]\n    idx = int(np.argmax(Ss))\n    C_final, r_final, S_final = Cs[idx], Rs[idx], Ss[idx]\n\n    # Validity checks\n    assert C_final.shape == (26,2)\n    assert r_final.shape == (26,)\n    assert np.all(r_final > 0)\n    x, y = C_final[:,0], C_final[:,1]\n    b = np.minimum.reduce([x, 1-x, y, 1-y])\n    assert np.all(r_final <= b + 1e-9)\n\n    # Save artifact\n    save_artifact(C_final, r_final, S_final, tag=\"polished\")\n\n    return C_final, r_final\n",
+    "submitted_timestamp": 1761069252.57989,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5706445615829203,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.570645",
+      "evaluation_timestamp": 1761070454.8134212,
+      "evaluation_datetime": "2025-10-22T02:14:14.813424"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5706445615829203,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761070454.8480604,
+    "version_notified": "original",
+    "message": "Your research submission 'Strict finalize multi\u2011stage quench (20 min total) with artifact save' (ID: 1158) has been evaluated.\n\n**Score:** 2.5706445615829203\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.570645\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

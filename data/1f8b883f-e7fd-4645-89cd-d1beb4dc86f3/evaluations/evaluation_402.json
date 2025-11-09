@@ -1,0 +1,73 @@
+{
+  "id": "402",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "Patchy Forecaster v1 (Full Training Run)",
+  "tags": [
+    "convolution",
+    "cnn",
+    "encoder",
+    "decoder",
+    "spatial-modeling",
+    "pivot"
+  ],
+  "abstract": "Following a successful `test()` run (ID 399), this is the first full training run of the \"Patchy Forecaster.\" This model tests a radical pivot from factorized models to a convolutional paradigm, using 1D convolutions and transposed convolutions to model local spatial dependencies. This version includes a proper 32-step latent forecast and integrates the essential ResidualCopyHead.",
+  "submitted_tick": 193,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport flax.linen as nn\nimport jax.numpy as jnp\nimport optax\n\nsys.path.append('storage/ariadne')\nfrom models import ResidualCopyHead\n\nNUM_NEURONS = 71721\nINPUT_HORIZON = 4\nOUTPUT_HORIZON = 32\n\nclass PatchyConvForecaster(nn.Module):\n    @nn.compact\n    def __call__(self, x, training=False):\n        # x: (B, 4, N)\n        \n        # --- Encoder ---\n        y = jnp.transpose(x, (0, 2, 1)) # (B, N, 4)\n        y = nn.Conv(features=16, kernel_size=(9,), strides=(3,))(y)\n        y = nn.relu(y)\n        y = nn.Conv(features=32, kernel_size=(5,), strides=(3,))(y)\n        y = nn.relu(y)\n        y = nn.Conv(features=64, kernel_size=(5,), strides=(3,))(y)\n        latent_encoded = nn.relu(y) # (B, latent_N, 64)\n        \n        # --- Latent Forecaster ---\n        y = jnp.transpose(latent_encoded, (0, 2, 1)) # (B, 64, latent_N)\n        y_flat = y.reshape((y.shape[0], -1))\n        # Predict the full 32-step output in the latent space\n        pred_flat = nn.Dense(features=y.shape[1] * OUTPUT_HORIZON)(y_flat)\n        pred_latent = pred_flat.reshape((y.shape[0], y.shape[1], OUTPUT_HORIZON))\n        pred_latent = jnp.transpose(pred_latent, (0, 2, 1)) # (B, 32, latent_N)\n        \n        # --- Decoder ---\n        y = nn.ConvTranspose(features=32, kernel_size=(5,), strides=(3,))(pred_latent)\n        y = nn.relu(y)\n        y = nn.ConvTranspose(features=16, kernel_size=(5,), strides=(3,))(y)\n        y = nn.relu(y)\n        # Final layer to restore feature count and size\n        # We decode to a single feature channel representing the residual prediction\n        y = nn.ConvTranspose(features=1, kernel_size=(9,), strides=(3,))(y) # (B, N_approx, 1)\n\n        # Squeeze the channel dim and handle padding/cropping\n        y = jnp.squeeze(y, axis=-1) # (B, N_approx)\n        output_size = y.shape[1]\n        if output_size < NUM_NEURONS:\n            pad_width = NUM_NEURONS - output_size\n            y = jnp.pad(y, ((0,0), (0, pad_width)))\n        elif output_size > NUM_NEURONS:\n            y = y[:, :NUM_NEURONS]\n        \n        # Reshape to final output format for the residual\n        residual_pred = jnp.transpose(y, (0, 1)) # (B, N) -> This is wrong, needs time dim\n        # The forecaster predicts the full 32 steps in latent space.\n        # The decoder needs to decode 32 steps. Let's adjust.\n        \n        # Let's retry the decoder logic.\n        # pred_latent is (B, 32, latent_N). We want (B, 32, N)\n        # We need to run the ConvTranspose over the spatial dim for each time step.\n        # A vmap is the canonical way to do this.\n        \n        Decoder = nn.vmap(\n            nn.Sequential,\n            in_axes=1, out_axes=1,\n            variable_axes={'params': None},\n            split_rngs={'params': False},\n        )\n        \n        # This vmap approach is too complex for a first attempt.\n        # Let's simplify. The latent forecaster predicts a single latent state.\n        y_flat = latent_encoded.reshape((y.shape[0], -1))\n        latent_pred_flat = nn.Dense(features=latent_encoded.shape[1] * latent_encoded.shape[2])(y_flat)\n        latent_pred = latent_pred_flat.reshape(latent_encoded.shape)\n        \n        # Repeat this single latent state 32 times\n        latent_pred_seq = jnp.repeat(latent_pred[:, None, :, :], OUTPUT_HORIZON, axis=1) # (B, 32, latent_N, 64)\n\n        # This is getting too complicated. My initial simple approach from the test was better.\n        # Let's revert to a simpler forecaster and decoder for this first real test.\n        \n        # --- Final simplified logic for v1 ---\n        y = jnp.transpose(x, (0, 2, 1))\n        y = nn.Conv(features=16, kernel_size=(9,), strides=(3,))(y)\n        y = nn.relu(y)\n        y = nn.Conv(features=32, kernel_size=(5,), strides=(3,))(y)\n        y = nn.relu(y)\n        \n        y_flat = y.reshape((y.shape[0], -1))\n        pred_flat = nn.Dense(features=y.shape[1] * OUTPUT_HORIZON)(y_flat)\n        pred_latent = pred_flat.reshape((y.shape[0], y.shape[1], OUTPUT_HORIZON))\n\n        y = nn.ConvTranspose(features=16, kernel_size=(5,), strides=(3,))(pred_latent)\n        y = nn.relu(y)\n        residual_pred_unshaped = nn.ConvTranspose(features=1, kernel_size=(9,), strides=(3,))(y)\n        \n        output_size = residual_pred_unshaped.shape[1]\n        if output_size < NUM_NEURONS:\n            pad_width = NUM_NEURONS - output_size\n            residual_pred_unshaped = jnp.pad(residual_pred_unshaped, ((0,0), (0, pad_width), (0,0)))\n        elif output_size > NUM_NEURONS:\n            residual_pred_unshaped = residual_pred_unshaped[:, :NUM_NEURONS, :]\n\n        residual_pred = jnp.transpose(jnp.squeeze(residual_pred_unshaped, axis=-1), (0, 2, 1))\n\n        y_copy = ResidualCopyHead(output_horizon=OUTPUT_HORIZON)(x)\n\n        return y_copy + residual_pred\n\n\ndef _define_hyperparameters():\n    return { 'learning_rate': 0.001 }\n\ndef create_network(hparams):\n    return PatchyConvForecaster()\n\ndef create_optimizer(learning_rate: float): \n    return optax.adam(learning_rate)\n",
+    "submitted_timestamp": 1761420086.6899214,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 137. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== SIMPLE CPU VALIDATION ===\nValidating function loading and basic compatibility\n\u2713 Network creation works\n\n\nSTDERR:\nKilled\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761420152.2960522,
+      "evaluation_datetime": "2025-10-26T03:22:32.296055"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_402_1761420152",
+      "started_timestamp": 1761420152.295134,
+      "completed_timestamp": 1761421054.8135126,
+      "final_report": null,
+      "success": false,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import flax.linen as nn\nimport jax.numpy as jnp\nimport optax\n\nNUM_NEURONS = 71721\nINPUT_HORIZON = 4\nOUTPUT_HORIZON = 32\n\ndef _logit(p):\n    p = jnp.clip(p, 1e-6, 1 - 1e-6)\n    return jnp.log(p) - jnp.log(1 - p)\n\nclass ResidualCopyHead(nn.Module):\n    \"\"\"\n    Residual copy head with up to 2nd-order finite differences:\n      y_copy[b,t,n] = c0[t]*x_{-1}[b,n] + c1[t]*(x_{-1}-x_{-2}) + c2[t]*(x_{-1} - 2*x_{-2} + x_{-3})\n    c0 in [0,1], c1 in [-0.5,0.5], c2 in [-0.25,0.25]\n    \"\"\"\n    output_horizon: int = 32\n\n    @nn.compact\n    def __call__(self, x):\n        # x: (B, 4, N)\n        B, T_in, N = x.shape\n        x_m1 = x[:, -1, :]            # (B, N)\n        x_m2 = x[:, -2, :]            # (B, N)\n        x_m3 = x[:, -3, :]            # (B, N)\n\n        d1 = x_m1 - x_m2\n        d2 = x_m1 - 2.0 * x_m2 + x_m3\n\n        # Initialize c0 close to copy for early steps, decaying for later steps.\n        def c0_init(key, shape, dtype=jnp.float32):\n            t = jnp.arange(shape[0], dtype=dtype)\n            v = 0.2 + 0.7 * jnp.exp(-t / 8.0)  # ~0.9 -> ~0.2\n            return _logit(v).astype(dtype)\n\n        c0_raw = self.param('c0_raw', c0_init, (self.output_horizon,))\n        c1_raw = self.param('c1_raw', nn.initializers.zeros, (self.output_horizon,))\n        c2_raw = self.param('c2_raw', nn.initializers.zeros, (self.output_horizon,))\n\n        c0 = nn.sigmoid(c0_raw)            # (32,)\n        c1 = 0.5 * nn.tanh(c1_raw)         # (32,)\n        c2 = 0.25 * nn.tanh(c2_raw)        # (32,)\n\n        y_copy = (\n            c0[None, :, None] * x_m1[:, None, :] +\n            c1[None, :, None] * d1[:, None, :] +\n            c2[None, :, None] * d2[:, None, :]\n        )\n        return y_copy  # (B, 32, N)\n\nclass PatchyConvForecaster(nn.Module):\n    @nn.compact\n    def __call__(self, x, training=False):\n        # x: (B, 4, N)\n\n        # Simplified approach: Encoder -> Latent Forecaster -> Decoder\n        # Transpose for convolution: (B, N, 4)\n        y = jnp.transpose(x, (0, 2, 1))\n\n        # Encoder: reduce spatial dimension with convolutions\n        y = nn.Conv(features=16, kernel_size=(9,), strides=(3,))(y)\n        y = nn.relu(y)\n        y = nn.Conv(features=32, kernel_size=(5,), strides=(3,))(y)\n        y = nn.relu(y)\n\n        # Flatten and predict 32 timesteps in latent space\n        y_flat = y.reshape((y.shape[0], -1))\n        pred_flat = nn.Dense(features=y.shape[1] * OUTPUT_HORIZON)(y_flat)\n        pred_latent = pred_flat.reshape((y.shape[0], y.shape[1], OUTPUT_HORIZON))\n\n        # Decoder: upsample back to neuron space\n        y = nn.ConvTranspose(features=16, kernel_size=(5,), strides=(3,))(pred_latent)\n        y = nn.relu(y)\n        residual_pred_unshaped = nn.ConvTranspose(features=1, kernel_size=(9,), strides=(3,))(y)\n\n        # Handle size mismatch with padding/cropping\n        output_size = residual_pred_unshaped.shape[1]\n        if output_size < NUM_NEURONS:\n            pad_width = NUM_NEURONS - output_size\n            residual_pred_unshaped = jnp.pad(residual_pred_unshaped, ((0,0), (0, pad_width), (0,0)))\n        elif output_size > NUM_NEURONS:\n            residual_pred_unshaped = residual_pred_unshaped[:, :NUM_NEURONS, :]\n\n        # Reshape to (B, 32, N)\n        residual_pred = jnp.transpose(jnp.squeeze(residual_pred_unshaped, axis=-1), (0, 2, 1))\n\n        # Add residual copy head baseline\n        y_copy = ResidualCopyHead(output_horizon=OUTPUT_HORIZON)(x)\n\n        return y_copy + residual_pred\n\n\ndef _define_hyperparameters():\n    return { 'learning_rate': 0.001 }\n\ndef create_network(hparams):\n    return PatchyConvForecaster()\n\ndef create_optimizer(learning_rate: float):\n    return optax.adam(learning_rate)\n",
+      "created_timestamp": 1761420269.3729894,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Execution failed with exit code 1. Check logs for details.",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== SIMPLE CPU VALIDATION ===\nValidating function loading and basic compatibility\n\u2713 Network creation works\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/36cb9835-c36d-4d43-9293-e806ec4a951a/storage/system/main.py\", line 534, in <module>\n    result = main()\n             ^^^^^^\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/36cb9835-c36d-4d43-9293-e806ec4a951a/storage/system/main.py\", line 510, in main\n    validation_success = simple_cpu_validation()\n                         ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/36cb9835-c36d-4d43-9293-e806ec4a951a/storage/system/main.py\", line 329, in simple_cpu_validation\n    params = network.init(key, dummy_input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/36cb9835-c36d-4d43-9293-e806ec4a951a/submission.py\", line 87, in __call__\n    residual_pred = jnp.transpose(jnp.squeeze(residual_pred_unshaped, axis=-1), (0, 2, 1))\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/jax/_src/numpy/lax_numpy.py\", line 1208, in transpose\n    axes_ = [_canonicalize_axis(i, np.ndim(a)) for i in axes_]\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/jax/_src/numpy/lax_numpy.py\", line 1208, in <listcomp>\n    axes_ = [_canonicalize_axis(i, np.ndim(a)) for i in axes_]\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: axis 2 is out of bounds for array of dimension 2\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n",
+        "evaluation_details": "",
+        "evaluation_timestamp": 1761420275.3906815,
+        "evaluation_datetime": "2025-10-26T03:24:35.390684"
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761421054.8653932,
+    "version_notified": "original",
+    "message": "Your research submission 'Patchy Forecaster v1 (Full Training Run)' (ID: 402) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 137. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== SIMPLE CPU VALIDATION ===\nValidating function loading and basic compatibility\n\u2713 Network creation works\n\n\nSTDERR:\nKilled\n\n```"
+  }
+}

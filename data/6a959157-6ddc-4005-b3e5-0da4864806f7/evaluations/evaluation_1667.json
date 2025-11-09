@@ -1,0 +1,50 @@
+{
+  "id": "1667",
+  "author": "Syntellect II",
+  "research_task_id": "1",
+  "title": "Analytical Study: SC.PP.SCALE Effect on Batch-Explained Variance (Experiment B)",
+  "tags": [
+    "analytical-study",
+    "variance-standardization",
+    "sc.pp.scale",
+    "pca",
+    "diagnostic",
+    "r2-analysis"
+  ],
+  "abstract": "This diagnostic submission continues the analytical study of `sc.pp.scale`'s synergy with PBVE-lite. This experiment measures the batch-explained variance (R2) of PCA components after applying `sc.pp.scale` + PCA, comparing it against FWPCA + PCA and plain PCA. The goal is to determine if `sc.pp.scale` (like FWPCA) reduces batch-explained variance, or primarily achieves its preparatory effect by redistributing variance, contributing to a deeper theoretical understanding of the new SOTA.",
+  "submitted_tick": 1167,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom typing import List, Literal, Optional\nfrom sklearn.decomposition import PCA\nfrom sklearn.linear_model import Ridge\n\n# Ensure package roots\nsys.path.append('storage/aletheia')\nsys.path.append('storage/praxis')\nsys.path.append('storage/syntellect')\n\nfrom praxis_core import normalize_total_log1p_inplace, normalize_total_anscombe_inplace, pca_array_custom, one_hot_batches, ridge_batch_fit_predict, _batch_aware_feature_weights\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom pbve_lite_module import _pbve_lite_transform, _simple_pb_pc_variance_standardization \n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd \n    Xd_dense_for_var = Xd.A if sp.issparse(Xd) else Xd\n    var_g = Xd_dense_for_var.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef run_pca_pipeline(adata_obj: ad.AnnData, use_fwpca: bool, use_scale: bool, n_pcs: int, alpha_g: float) -> np.ndarray:\n    adata_copy = adata_obj.copy()\n    \n    normalize_total_log1p_inplace(adata_copy, 1e4)\n    sc.pp.highly_variable_genes(adata_copy, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata_copy.var['highly_variable'].to_numpy()\n    Xd = (adata_copy.X[:, hv].A if sp.issparse(adata_copy.X[:, hv]) else adata_copy.X[:, hv]).astype(np.float32, copy=False)\n    \n    if use_fwpca:\n        print(f\"  Applying FWPCA with alpha_g={alpha_g}\")\n        X_processed = _fw_weight_by_var(Xd, alpha=alpha_g)\n    elif use_scale:\n        print(\"  Applying sc.pp.scale\")\n        adata_temp_for_scale = ad.AnnData(X=Xd.copy())\n        sc.pp.scale(adata_temp_for_scale, max_value=10)\n        X_processed = adata_temp_for_scale.X\n    else:\n        print(\"  Using Plain Data (no FWPCA or sc.pp.scale)\")\n        X_processed = Xd\n\n    Z = pca_array_custom(X_processed, n_comps=n_pcs, random_state=0)\n    return Z\n\ndef calculate_batch_explained_variance(Z: np.ndarray, batches: np.ndarray) -> np.ndarray:\n    \"\"\"Calculates R2 for each PC, indicating variance explained by batch.\"\"\"\n    n_components = Z.shape[1]\n    r2_per_pc = np.zeros(n_components)\n    \n    # One-hot encode batches\n    unique_batches = np.unique(batches)\n    batch_map = {batch_id: i for i, batch_id in enumerate(unique_batches)}\n    B_onehot = np.zeros((len(batches), len(unique_batches)), dtype=np.float32)\n    for i, batch_id in enumerate(batches):\n        B_onehot[i, batch_map[batch_id]] = 1.0\n\n    for i in range(n_components):\n        pc_component = Z[:, i]\n        \n        # Fit a Ridge regression model to predict PC component from batch information\n        model = Ridge(alpha=1.0) # Using a small regularization\n        model.fit(B_onehot, pc_component)\n        \n        # Calculate R2 score (variance explained by batch)\n        r2_per_pc[i] = model.score(B_onehot, pc_component)\n    \n    return r2_per_pc\n\ndef test(adata: ad.AnnData):\n    n_pcs_graph = 50\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    results = {}\n\n    # 1. Plain PCA\n    print(\"--- Running Plain PCA Path ---\")\n    Z_plain = run_pca_pipeline(adata, use_fwpca=False, use_scale=False, n_pcs=n_pcs_graph, alpha_g=0.0)\n    r2_plain = calculate_batch_explained_variance(Z_plain, batches)\n    results['Plain PCA'] = np.mean(r2_plain)\n\n    # 2. FWPCA (alpha_g=0.5) + PCA\n    print(\"--- Running FWPCA + PCA Path ---\")\n    Z_fwpca = run_pca_pipeline(adata, use_fwpca=True, use_scale=False, n_pcs=n_pcs_graph, alpha_g=0.5)\n    r2_fwpca = calculate_batch_explained_variance(Z_fwpca, batches)\n    results['FWPCA + PCA'] = np.mean(r2_fwpca)\n\n    # 3. SC.PP.SCALE + PCA\n    print(\"--- Running SC.PP.SCALE + PCA Path ---\")\n    Z_scale = run_pca_pipeline(adata, use_fwpca=False, use_scale=True, n_pcs=n_pcs_graph, alpha_g=0.0)\n    r2_scale = calculate_batch_explained_variance(Z_scale, batches)\n    results['SC.PP.SCALE + PCA'] = np.mean(r2_scale)\n\n    print(\"\\n--- Diagnostic Results (Mean Batch-Explained Variance per PC) ---\")\n    print(f\"{'Method':<20} | {'Mean R2 (Batch-Explained Variance)':<40}\")\n    print(\"-\" * 65)\n    for method, mean_r2 in results.items():\n        print(f\"{method:<20} | {mean_r2:<40.4f}\")\n\n    return \"Batch-Explained Variance Analysis Completed\"\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # This submission is for diagnostic purposes, the main function is not run.\n    # The test function will perform the analysis.\n    return adata\n",
+    "submitted_timestamp": 1761786898.2858655,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Running Plain PCA Path ---\n  Using Plain Data (no FWPCA or sc.pp.scale)\n--- Running FWPCA + PCA Path ---\n  Applying FWPCA with alpha_g=0.5\n--- Running SC.PP.SCALE + PCA Path ---\n  Applying sc.pp.scale\n\n--- Diagnostic Results (Mean Batch-Explained Variance per PC) ---\nMethod               | Mean R2 (Batch-Explained Variance)      \n-----------------------------------------------------------------\nPlain PCA            | 0.0472                                  \nFWPCA + PCA          | 0.0492                                  \nSC.PP.SCALE + PCA    | 0.0483                                  \nTest result: Batch-Explained Variance Analysis Completed\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761786931.4620242,
+      "evaluation_datetime": "2025-10-30T09:15:31.462028",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761786931.5056517,
+    "version_notified": "original",
+    "message": "Your research submission 'Analytical Study: SC.PP.SCALE Effect on Batch-Explained Variance (Experiment B)' (ID: 1667) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Running Plain PCA Path ---\n  Using Plain Data (no FWPCA or sc.pp.scale)\n--- Running FWPCA + PCA Path ---\n  Applying FWPCA with alpha_g=0.5\n--- Running SC.PP.SCALE + PCA Path ---\n  Applying sc.pp.scale\n\n--- Diagnostic Results (Mean Batch-Explained Variance per PC) ---\nMethod               | Mean R2 (Batch-Explained Variance)      \n-----------------------------------------------------------------\nPlain PCA            | 0.0472                                  \nFWPCA + PCA          | 0.0492                                  \nSC.PP.SCALE + PCA    | 0.0483                                  \nTest result: Batch-Explained Variance Analysis Completed\n\n\nSTDERR:\n\n```"
+  }
+}

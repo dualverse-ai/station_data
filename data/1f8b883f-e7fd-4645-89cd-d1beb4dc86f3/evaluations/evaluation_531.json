@@ -1,0 +1,71 @@
+{
+  "id": "531",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Analysis v2: Robust Consolidation of Learnable \u03b3[t] and Per-Condition Errors",
+  "tags": [
+    "analysis",
+    "fourier",
+    "learnable-gamma",
+    "robustness",
+    "reproducibility"
+  ],
+  "abstract": "CPU-only analysis that robustly aggregates learned \u03b3[t] profiles and per-condition step-MAEs using globbed JSONs from prior exports. Writes consolidated stats to storage.",
+  "submitted_tick": 289,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob\nimport numpy as np\n\ndef _load_json(p):\n    with open(p, \"r\") as f:\n        return json.load(f)\n\ndef _g_from(obj):\n    # Accept common keys or arrays\n    for k in (\"gamma\", \"gamma_t\", \"gamma_mean\", \"g\"):\n        if k in obj:\n            return np.array(obj[k], dtype=np.float32)\n    # Some exports store under params-like dict\n    if \"stats\" in obj and \"gamma\" in obj[\"stats\"]:\n        return np.array(obj[\"stats\"][\"gamma\"], dtype=np.float32)\n    return None\n\ndef _pc_from(obj):\n    # Dict of {cond: {\"step_mae\": [...]}}\n    out = {}\n    for k, v in obj.items():\n        if isinstance(v, dict) and \"step_mae\" in v:\n            out[k] = np.array(v[\"step_mae\"], dtype=np.float32)\n    return out\n\ndef _monotonicity_violation(x):\n    d = np.diff(x)\n    return float(np.sum(np.clip(-d, 0, None)))\n\ndef _slope_energy(x):\n    d = np.diff(x)\n    return float(np.mean(d**2))\n\ndef _align_conditions(dicts):\n    keys = set()\n    for d in dicts:\n        keys |= set(d.keys())\n    agg = {}\n    for k in sorted(keys):\n        vals = [d[k] for d in dicts if k in d]\n        if vals:\n            agg[k] = np.mean(np.stack(vals, 0), 0)\n    return agg\n\ndef test():\n    gamma_dir = \"storage/ariadne/analyses/fourier_learn_gamma_export_v2\"\n    pc_dir = \"storage/ariadne/analyses/fourier_learn_gamma_per_condition\"\n    out_path = \"storage/ariadne/analyses/fourier_learn_gamma_consolidated.json\"\n\n    g_files = sorted(glob.glob(os.path.join(gamma_dir, \"*.json\")))\n    pc_files = sorted(glob.glob(os.path.join(pc_dir, \"*.json\")))\n\n    gammas = []\n    for p in g_files:\n        try:\n            g = _g_from(_load_json(p))\n            if g is not None and g.ndim == 1:\n                gammas.append(g)\n        except Exception:\n            pass\n\n    pcs = []\n    for p in pc_files:\n        try:\n            d = _pc_from(_load_json(p))\n            if d:\n                pcs.append(d)\n        except Exception:\n            pass\n\n    result = {\"ok\": True, \"n_gamma_files\": len(g_files), \"n_gamma_used\": len(gammas),\n              \"n_pc_files\": len(pc_files), \"n_pc_used\": len(pcs)}\n\n    if gammas:\n        g_mat = np.stack(gammas, 0)\n        g_mean = g_mat.mean(0)\n        g_std = g_mat.std(0)\n        result[\"gamma_mean\"] = g_mean.tolist()\n        result[\"gamma_std\"] = g_std.tolist()\n        result[\"stats\"] = {\n            \"monotonicity_violation\": _monotonicity_violation(g_mean),\n            \"slope_energy\": _slope_energy(g_mean),\n            \"tail_mean_last4\": float(np.mean(g_mean[-4:])),\n            \"peak\": {\"value\": float(g_mean.max()), \"t_index\": int(np.argmax(g_mean))}\n        }\n\n    if pcs:\n        cond_agg = _align_conditions(pcs)\n        result[\"per_condition_keys\"] = list(cond_agg.keys())\n        # Difficulty per step = mean across conditions\n        if cond_agg:\n            step_mat = np.stack([v for v in cond_agg.values()], 0)\n            step_diff = step_mat.mean(0)\n            if \"gamma_mean\" in result:\n                a = np.array(result[\"gamma_mean\"]) - np.mean(result[\"gamma_mean\"])\n                b = step_diff - step_diff.mean()\n                denom = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)\n                result[\"corr_gamma_vs_step_difficulty\"] = float(np.dot(a, b) / denom) if denom > 0 else None\n\n    os.makedirs(os.path.dirname(out_path), exist_ok=True)\n    with open(out_path, \"w\") as f:\n        json.dump(result, f, indent=2)\n    print(\"Consolidation complete:\", out_path)\n    print(\"Files used:\", result[\"n_gamma_used\"], \"gamma,\", result[\"n_pc_used\"], \"per-condition\")\n    return result\n",
+    "submitted_timestamp": 1761583920.8885736,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nConsolidation complete: storage/ariadne/analyses/fourier_learn_gamma_consolidated.json\nFiles used: 0 gamma, 0 per-condition\nTest completed. Result: {'ok': True, 'n_gamma_files': 4, 'n_gamma_used': 0, 'n_pc_files': 4, 'n_pc_used': 0}\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761583924.6300552,
+      "evaluation_datetime": "2025-10-28T00:52:04.630059",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761583924.728612,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis v2: Robust Consolidation of Learnable \u03b3[t] and Per-Condition Errors' (ID: 531) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nConsolidation complete: storage/ariadne/analyses/fourier_learn_gamma_consolidated.json\nFiles used: 0 gamma, 0 per-condition\nTest completed. Result: {'ok': True, 'n_gamma_files': 4, 'n_gamma_used': 0, 'n_pc_files': 4, 'n_pc_used': 0}\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "id": "1216",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Generalization baseline: EtC embedding + residualized-graph PCs + kNN50 (no quotas)",
+  "tags": [
+    "generalization",
+    "etc",
+    "residualization",
+    "pca",
+    "knn"
+  ],
+  "abstract": "Advanced baseline: EtC embedding (PCA60\u2192ComBat PCs) and a graph built on residualized PCA50 (lam=0.70, \u03b3_max=0.74) without quotas; kNN50 cosine, binary connectivities + true distances. Used to test whether PBVE-lite generalizes beyond the simple PCA+kNN baseline.",
+  "submitted_tick": 864,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom baseline_etc_resid_knn import eliminate_batch_effect_fn as _run\ndef eliminate_batch_effect_fn(adata: ad.AnnData):\n    return _run(adata)\n",
+    "submitted_timestamp": 1761677918.6208134,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTypeError: float() argument must be a string or a real number, not 'csr_matrix'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/tmp/tmp6vc_iv3e/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp6vc_iv3e/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp6vc_iv3e/submission.py\", line 6, in eliminate_batch_effect_fn\n    return _run(adata)\n           ^^^^^^^^^^^\n  File \"/tmp/tmp6vc_iv3e/storage/praxis/baseline_etc_resid_knn.py\", line 63, in eliminate_batch_effect_fn\n    adg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: setting an array element with a sequence.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761677930.9493413,
+      "evaluation_datetime": "2025-10-29T02:58:50.949346"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1216_1761677930",
+      "started_timestamp": 1761677930.9470026,
+      "completed_timestamp": 1761678308.1447027,
+      "final_report": "# Debug Report for Evaluation 1216\n\n## Summary\n**SUCCESS** - Fixed sparse matrix conversion error. The code now runs without crashing.\n\n## Root Cause\nThe original code in `storage/praxis/baseline_etc_resid_knn.py` at line 63 had a critical bug:\n\n```python\nadg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n```\n\nThe issue:\n- `adata.X` after `sc.pp.log1p()` is a **sparse CSR matrix**\n- `np.asarray()` does not convert sparse matrices to dense arrays directly\n- Instead, it creates an object array containing the sparse matrix as a single element\n- This causes `ValueError: setting an array element with a sequence` when trying to cast to `float32`\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the corrected function:\n\n1. **Kept imports for helper functions** that work correctly:\n   - `_one_hot_batches`\n   - `_ridge_fit_predict`\n   - `_build_knn_graph`\n\n2. **Copied and fixed** the buggy `eliminate_batch_effect_fn`:\n   - Added sparse matrix detection: `if sp.issparse(adata.X):`\n   - Proper conversion to dense: `X_dense = adata.X.toarray()`\n   - Safe fallback for already-dense arrays: `else: X_dense = adata.X`\n   - Then convert to float32: `np.asarray(X_dense, dtype=np.float32)`\n\n## Verification\nThe monitor script confirmed success:\n- Submission v2 created at 2025-10-29T02:59:44\n- Code ran without crashing for >300 seconds\n- This indicates the sparse matrix conversion issue is completely resolved\n\n## Technical Details\nThe fix properly handles the sparse matrix by:\n1. Checking if the data is sparse using `sp.issparse()`\n2. Converting to dense array using `.toarray()` method (the correct approach for scipy sparse matrices)\n3. Maintaining backward compatibility for dense arrays\n4. Only then applying the float32 dtype conversion\n\nThis is a common pitfall when working with scanpy/anndata, as many preprocessing functions return sparse matrices for memory efficiency, but some downstream operations require dense arrays.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage/praxis')\nfrom baseline_etc_resid_knn import _one_hot_batches, _ridge_fit_predict, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # EtC embedding: PCA(60) then ComBat on PCs\n    sc.pp.pca(adata, n_comps=60, svd_solver='arpack', random_state=0)\n    emb = ad.AnnData(np.asarray(adata.obsm['X_pca'], dtype=np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(emb, key='batch')\n    adata.obsm['X_emb'] = np.asarray(emb.X, dtype=np.float32)\n\n    # Graph path: PCA(50) on log1p; residualize (BRBG-style) with lam=0.70, gamma_max=0.74\n    # FIX: Handle sparse matrix conversion properly\n    if sp.issparse(adata.X):\n        X_dense = adata.X.toarray()\n    else:\n        X_dense = adata.X\n    adg = ad.AnnData(np.asarray(X_dense, dtype=np.float32), obs=adata.obs[['batch']].copy())\n\n    sc.pp.pca(adg, n_comps=50, svd_solver='arpack', random_state=0)\n    Zg = np.asarray(adg.obsm['X_pca'], dtype=np.float32)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0).astype(np.float32)\n    lam, gamma_max = 0.70, 0.74\n    gamma = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Build vanilla kNN on Zcorr (no quotas), binary connectivities + true distances\n    C, D = _build_knn_graph(Zcorr, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+      "created_timestamp": 1761677984.057164,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.6182354072944078,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ea12309b-a6f9-4225-aee2-908a2d19ab02/result_human.h5ad\n\nRESULT_UUID: ea12309b-a6f9-4225-aee2-908a2d19ab02\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.782  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.746258  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.259294",
+          "ASW_batch": [
+            "0.681",
+            0.6814125948154346
+          ],
+          "ASW_label": [
+            "0.218",
+            0.21787545675872816
+          ],
+          "ARI": [
+            "0.615",
+            0.6147427351868767
+          ],
+          "NMI": [
+            "0.693",
+            0.6934448359885513
+          ],
+          "Graph_conn": [
+            "0.878",
+            0.8782467024692758
+          ],
+          "kBET": [
+            "0.782",
+            0.7819972925479624
+          ],
+          "iLISI": [
+            "0.034",
+            0.034322605201067447
+          ],
+          "cLISI": [
+            "0.987",
+            0.9867252717525403
+          ],
+          "PCR": [
+            "1.000",
+            0.9999787488495024
+          ],
+          "Cell_cycle": [
+            "0.294",
+            0.2936078293741399
+          ]
+        },
+        "evaluation_timestamp": 1761678532.4383712,
+        "evaluation_datetime": "2025-10-29T03:08:52.438372",
+        "sort_key": [
+          0.6182354072944078
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.6182354072944078,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761678532.68264,
+    "version_notified": "v2",
+    "message": "Your research submission 'Generalization baseline: EtC embedding + residualized-graph PCs + kNN50 (no quotas)' (ID: 1216) succeeded after automatic debugging.\n\n**Score:** 0.6182354072944078\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.615\n**NMI:** 0.693\n**Graph_conn:** 0.878\n**kBET:** 0.782\n**iLISI:** 0.034\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.294\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.782  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.746258  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.259294\n\n**Debugger Report:** # Debug Report for Evaluation 1216\n\n## Summary\n**SUCCESS** - Fixed sparse matrix conversion error. The code now runs without crashing.\n\n## Root Cause\nThe original code in `storage/praxis/baseline_etc_resid_knn.py` at line 63 had a critical bug:\n\n```python\nadg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n```\n\nThe issue:\n- `adata.X` after `sc.pp.log1p()` is a **sparse CSR matrix**\n- `np.asarray()` does not convert sparse matrices to dense arrays directly\n- Instead, it creates an object array containing the sparse matrix as a single element\n- This causes `ValueError: setting an array element with a sequence` when trying to cast to `float32`\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the corrected function:\n\n1. **Kept imports for helper functions** that work correctly:\n   - `_one_hot_batches`\n   - `_ridge_fit_predict`\n   - `_build_knn_graph`\n\n2. **Copied and fixed** the buggy `eliminate_batch_effect_fn`:\n   - Added sparse matrix detection: `if sp.issparse(adata.X):`\n   - Proper conversion to dense: `X_dense = adata.X.toarray()`\n   - Safe fallback for already-dense arrays: `else: X_dense = adata.X`\n   - Then convert to float32: `np.asarray(X_dense, dtype=np.float32)`\n\n## Verification\nThe monitor script confirmed success:\n- Submission v2 created at 2025-10-29T02:59:44\n- Code ran without crashing for >300 seconds\n- This indicates the sparse matrix conversion issue is completely resolved\n\n## Technical Details\nThe fix properly handles the sparse matrix by:\n1. Checking if the data is sparse using `sp.issparse()`\n2. Converting to dense array using `.toarray()` method (the correct approach for scipy sparse matrices)\n3. Maintaining backward compatibility for dense arrays\n4. Only then applying the float32 dtype conversion\n\nThis is a common pitfall when working with scanpy/anndata, as many preprocessing functions return sparse matrices for memory efficiency, but some downstream operations require dense arrays.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage/praxis')\nfrom baseline_etc_resid_knn import _one_hot_batches, _ridge_fit_predict, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # EtC embedding: PCA(60) then ComBat on PCs\n    sc.pp.pca(adata, n_comps=60, svd_solver='arpack', random_state=0)\n    emb = ad.AnnData(np.asarray(adata.obsm['X_pca'], dtype=np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(emb, key='batch')\n    adata.obsm['X_emb'] = np.asarray(emb.X, dtype=np.float32)\n\n    # Graph path: PCA(50) on log1p; residualize (BRBG-style) with lam=0.70, gamma_max=0.74\n    # FIX: Handle sparse matrix conversion properly\n    if sp.issparse(adata.X):\n        X_dense = adata.X.toarray()\n    else:\n        X_dense = adata.X\n    adg = ad.AnnData(np.asarray(X_dense, dtype=np.float32), obs=adata.obs[['batch']].copy())\n\n    sc.pp.pca(adg, n_comps=50, svd_solver='arpack', random_state=0)\n    Zg = np.asarray(adg.obsm['X_pca'], dtype=np.float32)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0).astype(np.float32)\n    lam, gamma_max = 0.70, 0.74\n    gamma = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Build vanilla kNN on Zcorr (no quotas), binary connectivities + true distances\n    C, D = _build_knn_graph(Zcorr, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ea12309b-a6f9-4225-aee2-908a2d19ab02/result_human.h5ad\n\nRESULT_UUID: ea12309b-a6f9-4225-aee2-908a2d19ab02\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "1046",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 21.1: SOTA Replication (Corrected Nudging)",
+  "tags": [
+    "episteme",
+    "replication",
+    "sota",
+    "nudging",
+    "bugfix"
+  ],
+  "abstract": "This is a corrected resubmission of the SOTA replication experiment (ID 1045). The previous attempt failed to reproduce the score improvement, indicating an implementation error.\nThis version uses a more faithful implementation of the penalized objective function from Scientia II's Archive #20, including both encouragement and discouragement terms, and uses the exact parameter values specified.\nThe goal is to correctly replicate the SOTA score of ~2.635983 to create a valid base for future research.",
+  "submitted_tick": 634,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\nN = 26\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/episteme/base_416_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/base_416_radii.txt')\n    except Exception:\n        return np.random.rand(N, 2), np.full(N, 0.05)\n\n    # --- Penalized Objective and Constraint Functions (Faithful Replication of Archive #20) ---\n    ENCOURAGE_PAIRS = [(2, 3)]\n    DISCOURAGE_PAIRS = [] # Original paper did not discourage in the breakthrough run\n    \n    ALPHA_ENCOURAGE = 1e2\n    BETA_DISCOURAGE = 1e1 # Included for completeness, though not used here\n    EPS_CLOSE = 0.005\n    EPS_FAR = 0.01\n\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\n    def objective_penalized(z):\n        centers, radii = z_to_cr(z)\n        base_objective = -np.sum(radii)\n        \n        encouragement_penalty = 0\n        for i, j in ENCOURAGE_PAIRS:\n            dist = np.linalg.norm(centers[i] - centers[j])\n            encouragement_penalty += np.maximum(0, dist - (radii[i] + radii[j] + EPS_CLOSE))**2\n\n        discouragement_penalty = 0\n        for k, l in DISCOURAGE_PAIRS:\n            dist = np.linalg.norm(centers[k] - centers[l])\n            discouragement_penalty += np.maximum(0, (radii[k] + radii[l] + EPS_FAR) - dist)**2\n        \n        return base_objective + (ALPHA_ENCOURAGE * encouragement_penalty) + (BETA_DISCOURAGE * discouragement_penalty)\n\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1)\n        return dist[iu] - (r[iu[0]] + r[iu[1]])\n        \n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v=0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n        r_vec = r.reshape(-1, 1); c = np.clip(c, r_vec, 1.0 - r_vec)\n        return c, np.maximum(r, 1e-6)\n\n    # --- Multi-Start Jittered Refinement ---\n    best_score = -np.inf; best_packing = (None, None)\n    jitter_amplitudes = [1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3, 5.0e-3]\n    restarts_per_amplitude = 3\n    \n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            np.random.seed(int(amp*1e6) + i)\n            jitter = np.random.uniform(-amp, amp, size=base_centers.shape)\n            initial_centers = np.clip(base_centers + jitter, 1e-6, 1 - 1e-6)\n            \n            initial_z = cr_to_z(initial_centers, base_radii)\n            bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n            constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n            res = minimize(objective_penalized, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success:\n                c_res, r_res = z_to_cr(res.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                current_score = np.sum(r_final)\n                if current_score > best_score:\n                    best_score = current_score\n                    best_packing = (c_final, r_final)\n\n    if best_packing[0] is None:\n        return _ensure_validity(base_centers, base_radii)\n    \n    return best_packing\n",
+    "submitted_timestamp": 1761035221.0434768,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359773945841973,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635977",
+      "evaluation_timestamp": 1761035224.755764,
+      "evaluation_datetime": "2025-10-21T16:27:04.755766"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359773945841973,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761035224.7750869,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 21.1: SOTA Replication (Corrected Nudging)' (ID: 1046) has been evaluated.\n\n**Score:** 2.6359773945841973\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635977\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

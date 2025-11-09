@@ -1,0 +1,92 @@
+{
+  "id": "754",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Auto\u2011CLIP v1: \u03b1=0.5 (Leiden\u2011silhouette \u00d7 batch\u2011entropy) with cap regularizer; BRBG(\u03bb=0.7)",
+  "tags": [
+    "auto-tuning",
+    "daqb",
+    "label-free",
+    "clip",
+    "silhouette",
+    "entropy"
+  ],
+  "abstract": "Label\u2011free DAQB selection using CLIP (\u03b1=0.5) combining unsupervised silhouette and local batch entropy with a cap regularizer. Grid \u03b4\u2208{0.14,0.15,0.16}, k_density\u2208{18,20,22}; BRBG(\u03bb=0.7, \u03b3_max=0.74, PCA50). Graphs are binary + true distances with strict column balancing.",
+  "submitted_tick": 484,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\nsys.path.append('storage/shared/diagnostics')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom clip_auto import auto_clip_select\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    from scipy import sparse as sp\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    import numpy as np\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    import numpy as np\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    alpha_var = 0.5\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    Xh = adata.X[:, hv]\n    from scipy import sparse as sp\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    Zg = _pca_array(Xw, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    best_delta, best_kd, C_best, D_best, info = auto_clip_select(\n        Zcorr, batches, deltas=(0.14, 0.15, 0.16), kd_list=(18, 20, 22),\n        k_total=k_total, metric=metric, alpha=0.5, cap_regularizer=True\n    )\n    print(f\"[Auto-CLIP v1] Selected delta={best_delta}, kd={best_kd}, info={info}\")\n    adata.obsp['connectivities'] = C_best\n    adata.obsp['distances'] = D_best\n    return adata\n",
+    "submitted_timestamp": 1761545611.692692,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4334704157848533,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-CLIP v1] Selected delta=0.14, kd=22, info={'clip': 0.3513315827094226, 'delta': 0.14, 'k_density': 22}\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/bfffec3d-57d6-4b9c-a268-b82440cccf4e/result_human.h5ad\n\nRESULT_UUID: bfffec3d-57d6-4b9c-a268-b82440cccf4e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.743  NMI: 0.708\n  Graph_conn: 0.986  kBET: 0.000  iLISI: 0.933  cLISI: 0.965\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.742762  NMI: 0.708337\n  Graph_conn: 0.986111  kBET: nan  iLISI: 0.933210  cLISI: 0.989679\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.743",
+          0.7427973458369247
+        ],
+        "NMI": [
+          "0.708",
+          0.7082545677819424
+        ],
+        "Graph_conn": [
+          "0.986",
+          0.9858712254710706
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.933",
+          0.9332096474953618
+        ],
+        "cLISI": [
+          "0.965",
+          0.9645713712632332
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761546011.3222175,
+      "evaluation_datetime": "2025-10-27T14:20:11.322220",
+      "sort_key": [
+        0.4334704157848533
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4334704157848533,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761546011.4028113,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011CLIP v1: \u03b1=0.5 (Leiden\u2011silhouette \u00d7 batch\u2011entropy) with cap regularizer; BRBG(\u03bb=0.7)' (ID: 754) has been evaluated.\n\n**Score:** 0.4334704157848533\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.743\n**NMI:** 0.708\n**Graph_conn:** 0.986\n**kBET:** 0.000\n**iLISI:** 0.933\n**cLISI:** 0.965\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.743  NMI: 0.708\n  Graph_conn: 0.986  kBET: 0.000  iLISI: 0.933  cLISI: 0.965\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.742762  NMI: 0.708337\n  Graph_conn: 0.986111  kBET: nan  iLISI: 0.933210  cLISI: 0.989679\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Auto-CLIP v1] Selected delta=0.14, kd=22, info={'clip': 0.3513315827094226, 'delta': 0.14, 'k_density': 22}\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/bfffec3d-57d6-4b9c-a268-b82440cccf4e/result_human.h5ad\n\nRESULT_UUID: bfffec3d-57d6-4b9c-a268-b82440cccf4e\n\n\nSTDERR:\n\n```"
+  }
+}

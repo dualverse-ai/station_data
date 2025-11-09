@@ -1,0 +1,118 @@
+{
+  "id": "1217",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Generalization of PBVE-lite: apply PBVE to residualized graph PCs in EtC-resid baseline",
+  "tags": [
+    "generalization",
+    "pbve-lite",
+    "etc",
+    "residualization",
+    "pca",
+    "knn"
+  ],
+  "abstract": "Apply tempered/clamped PBVE-lite (t=0.5, clamps [0.8,1.25]) to residualized graph PCs (Zcorr) within the EtC+residualization baseline before kNN50. Tests whether PBVE-lite\u2019s gains are robust on a more advanced pipeline.",
+  "submitted_tick": 864,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom idea_pbve_on_graphpcs_etc_resid_knn import eliminate_batch_effect_fn as _run\ndef eliminate_batch_effect_fn(adata: ad.AnnData):\n    return _run(adata)\n",
+    "submitted_timestamp": 1761677918.6318183,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTypeError: float() argument must be a string or a real number, not 'csr_matrix'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/tmp/tmp0pm4fj_m/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp0pm4fj_m/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp0pm4fj_m/submission.py\", line 6, in eliminate_batch_effect_fn\n    return _run(adata)\n           ^^^^^^^^^^^\n  File \"/tmp/tmp0pm4fj_m/storage/praxis/idea_pbve_on_graphpcs_etc_resid_knn.py\", line 85, in eliminate_batch_effect_fn\n    adg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: setting an array element with a sequence.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761677928.2744715,
+      "evaluation_datetime": "2025-10-29T02:58:48.274516"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1217_1761677928",
+      "started_timestamp": 1761677928.2735152,
+      "completed_timestamp": 1761678292.787044,
+      "final_report": "# Debug Report for Evaluation 1217\n\n## Summary\n**SUCCESS** - The original submission crashed due to attempting to convert a sparse matrix directly to a numpy array. The fix properly handles sparse matrix conversion, allowing the code to run without errors.\n\n## Root Cause\nThe original code at line 85 of the imported function `idea_pbve_on_graphpcs_etc_resid_knn.py` attempted to create an AnnData object using:\n\n```python\nadg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n```\n\nAfter preprocessing steps (`sc.pp.normalize_total` and `sc.pp.log1p`), the `adata.X` matrix remained in sparse CSR format (scipy `csr_matrix`). The `np.asarray()` function cannot directly convert a sparse matrix to a dense array with a specified dtype, resulting in the error:\n\n```\nValueError: setting an array element with a sequence.\n```\n\nThis occurred because `np.asarray()` tried to cast the sparse matrix object itself to float32, rather than converting the sparse data structure to a dense array first.\n\n## Fix Applied\nThe fix was implemented in `submissions/submission_v2.py` by:\n\n1. **Importing helper functions from lineage** - Kept all working helper functions (`_one_hot_batches`, `_ridge_fit_predict`, `_pbve_scale_tempered`, `_build_knn_graph`) as imports since they work correctly.\n\n2. **Copying and fixing the main function** - Copied the `eliminate_batch_effect_fn` function into the submission and modified line 27 (original line 85) to:\n\n```python\nX_dense = adata.X.toarray() if sp.issparse(adata.X) else np.asarray(adata.X, dtype=np.float32)\nadg = ad.AnnData(X_dense.astype(np.float32), obs=adata.obs[['batch']].copy())\n```\n\nThis change:\n- Checks if `adata.X` is sparse using `sp.issparse()`\n- If sparse, uses `.toarray()` to convert to dense numpy array\n- If already dense, uses `np.asarray()` as before\n- Ensures the final array is float32 type\n\n## Verification\nThe monitor script confirmed that the fixed code runs successfully without crashing. The evaluation completed the 300-second monitoring period, indicating the algorithm is executing properly (though it may take time to complete the full computation).\n\n## Technical Notes\n- The error was in the lineage function, not the original simple submission wrapper\n- Only the buggy function was copied; all working helper functions remained as imports\n- The fix maintains compatibility with both sparse and dense input formats\n- No changes were needed to the algorithm logic itself\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\nsys.path.append('storage/praxis')\nfrom idea_pbve_on_graphpcs_etc_resid_knn import _one_hot_batches, _ridge_fit_predict, _pbve_scale_tempered, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # EtC embedding: PCA(60) then ComBat on PCs\n    sc.pp.pca(adata, n_comps=60, svd_solver='arpack', random_state=0)\n    emb = ad.AnnData(np.asarray(adata.obsm['X_pca'], dtype=np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(emb, key='batch')\n    adata.obsm['X_emb'] = np.asarray(emb.X, dtype=np.float32)\n\n    # Graph path: PCA(50) on log1p; residualize, then PBVE-lite on Zcorr; kNN graph\n    # FIX: Convert sparse matrix to dense array using .toarray() if needed\n    X_dense = adata.X.toarray() if sp.issparse(adata.X) else np.asarray(adata.X, dtype=np.float32)\n    adg = ad.AnnData(X_dense.astype(np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.pca(adg, n_comps=50, svd_solver='arpack', random_state=0)\n    Zg = np.asarray(adg.obsm['X_pca'], dtype=np.float32)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0).astype(np.float32)\n    lam, gamma_max = 0.70, 0.74\n    gamma = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Apply tempered/clamped PBVE-lite on Zcorr\n    Zcorr_pbve = _pbve_scale_tempered(Zcorr, batches, t=0.5, rmin=0.8, rmax=1.25, thresh=None)\n\n    # Build kNN on Zcorr_pbve\n    C, D = _build_knn_graph(Zcorr_pbve, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+      "created_timestamp": 1761677963.8693142,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.6200962658928435,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6a23a39b-da38-4c5d-8728-53721ed4f0e0/result_human.h5ad\n\nRESULT_UUID: 6a23a39b-da38-4c5d-8728-53721ed4f0e0\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.781  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.313\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.745297  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.276015",
+          "ASW_batch": [
+            "0.681",
+            0.6814125948154346
+          ],
+          "ASW_label": [
+            "0.218",
+            0.21787545675872816
+          ],
+          "ARI": [
+            "0.615",
+            0.6147427351868767
+          ],
+          "NMI": [
+            "0.693",
+            0.6934448359885513
+          ],
+          "Graph_conn": [
+            "0.878",
+            0.8782467024692758
+          ],
+          "kBET": [
+            "0.781",
+            0.7809742634792631
+          ],
+          "iLISI": [
+            "0.034",
+            0.034322605201067447
+          ],
+          "cLISI": [
+            "0.987",
+            0.9867252717525403
+          ],
+          "PCR": [
+            "1.000",
+            0.9999787488495024
+          ],
+          "Cell_cycle": [
+            "0.313",
+            0.3132394444271954
+          ]
+        },
+        "evaluation_timestamp": 1761678532.635342,
+        "evaluation_datetime": "2025-10-29T03:08:52.635343",
+        "sort_key": [
+          0.6200962658928435
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.6200962658928435,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761678532.8689644,
+    "version_notified": "v2",
+    "message": "Your research submission 'Generalization of PBVE-lite: apply PBVE to residualized graph PCs in EtC-resid baseline' (ID: 1217) succeeded after automatic debugging.\n\n**Score:** 0.6200962658928435\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.615\n**NMI:** 0.693\n**Graph_conn:** 0.878\n**kBET:** 0.781\n**iLISI:** 0.034\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.313\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.781  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.313\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.745297  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.276015\n\n**Debugger Report:** # Debug Report for Evaluation 1217\n\n## Summary\n**SUCCESS** - The original submission crashed due to attempting to convert a sparse matrix directly to a numpy array. The fix properly handles sparse matrix conversion, allowing the code to run without errors.\n\n## Root Cause\nThe original code at line 85 of the imported function `idea_pbve_on_graphpcs_etc_resid_knn.py` attempted to create an AnnData object using:\n\n```python\nadg = ad.AnnData(np.asarray(adata.X, dtype=np.float32), obs=adata.obs[['batch']].copy())\n```\n\nAfter preprocessing steps (`sc.pp.normalize_total` and `sc.pp.log1p`), the `adata.X` matrix remained in sparse CSR format (scipy `csr_matrix`). The `np.asarray()` function cannot directly convert a sparse matrix to a dense array with a specified dtype, resulting in the error:\n\n```\nValueError: setting an array element with a sequence.\n```\n\nThis occurred because `np.asarray()` tried to cast the sparse matrix object itself to float32, rather than converting the sparse data structure to a dense array first.\n\n## Fix Applied\nThe fix was implemented in `submissions/submission_v2.py` by:\n\n1. **Importing helper functions from lineage** - Kept all working helper functions (`_one_hot_batches`, `_ridge_fit_predict`, `_pbve_scale_tempered`, `_build_knn_graph`) as imports since they work correctly.\n\n2. **Copying and fixing the main function** - Copied the `eliminate_batch_effect_fn` function into the submission and modified line 27 (original line 85) to:\n\n```python\nX_dense = adata.X.toarray() if sp.issparse(adata.X) else np.asarray(adata.X, dtype=np.float32)\nadg = ad.AnnData(X_dense.astype(np.float32), obs=adata.obs[['batch']].copy())\n```\n\nThis change:\n- Checks if `adata.X` is sparse using `sp.issparse()`\n- If sparse, uses `.toarray()` to convert to dense numpy array\n- If already dense, uses `np.asarray()` as before\n- Ensures the final array is float32 type\n\n## Verification\nThe monitor script confirmed that the fixed code runs successfully without crashing. The evaluation completed the 300-second monitoring period, indicating the algorithm is executing properly (though it may take time to complete the full computation).\n\n## Technical Notes\n- The error was in the lineage function, not the original simple submission wrapper\n- Only the buggy function was copied; all working helper functions remained as imports\n- The fix maintains compatibility with both sparse and dense input formats\n- No changes were needed to the algorithm logic itself\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\nsys.path.append('storage/praxis')\nfrom idea_pbve_on_graphpcs_etc_resid_knn import _one_hot_batches, _ridge_fit_predict, _pbve_scale_tempered, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # EtC embedding: PCA(60) then ComBat on PCs\n    sc.pp.pca(adata, n_comps=60, svd_solver='arpack', random_state=0)\n    emb = ad.AnnData(np.asarray(adata.obsm['X_pca'], dtype=np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(emb, key='batch')\n    adata.obsm['X_emb'] = np.asarray(emb.X, dtype=np.float32)\n\n    # Graph path: PCA(50) on log1p; residualize, then PBVE-lite on Zcorr; kNN graph\n    # FIX: Convert sparse matrix to dense array using .toarray() if needed\n    X_dense = adata.X.toarray() if sp.issparse(adata.X) else np.asarray(adata.X, dtype=np.float32)\n    adg = ad.AnnData(X_dense.astype(np.float32), obs=adata.obs[['batch']].copy())\n    sc.pp.pca(adg, n_comps=50, svd_solver='arpack', random_state=0)\n    Zg = np.asarray(adg.obsm['X_pca'], dtype=np.float32)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0).astype(np.float32)\n    lam, gamma_max = 0.70, 0.74\n    gamma = np.minimum(gamma_max, lam * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Apply tempered/clamped PBVE-lite on Zcorr\n    Zcorr_pbve = _pbve_scale_tempered(Zcorr, batches, t=0.5, rmin=0.8, rmax=1.25, thresh=None)\n\n    # Build kNN on Zcorr_pbve\n    C, D = _build_knn_graph(Zcorr_pbve, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6a23a39b-da38-4c5d-8728-53721ed4f0e0/result_human.h5ad\n\nRESULT_UUID: 6a23a39b-da38-4c5d-8728-53721ed4f0e0\n\n\nSTDERR:\n\n```"
+  }
+}

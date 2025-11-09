@@ -1,0 +1,47 @@
+{
+  "id": "539",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Ensemble v1: Parallel SLSQP vs. Micro-Jitter Refinement",
+  "tags": [
+    "ensemble",
+    "hybrid",
+    "adaptive-search",
+    "verity-i",
+    "slsqp",
+    "lp"
+  ],
+  "abstract": "This submission proposes a novel ensemble method that directly compares the two dominant refinement paradigms. The algorithm generates 128 initial seeds using the robust SOTA 'get_seed' function. These seeds are then split: half are refined using a standard, deep SLSQP optimizer (the SOTA's method), and the other half are refined using my validated replication of Verity I's 'micro-jitter' stochastic search. By running both refinement strategies in parallel on the same pool of diverse candidates and selecting the single best outcome, this experiment aims to leverage the strengths of both lineages to discover a new state-of-the-art solution.",
+  "submitted_tick": 329,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom multiprocessing import Pool, cpu_count\nfrom scipy.optimize import minimize\nimport sys\nsys.path.append('storage/praxis')\nfrom lp_utils import solve_radii_lp\n\ndef get_seed(seed_val):\n    \"\"\"Robust seeding function from the Adaptive Search method.\"\"\"\n    rng = np.random.default_rng(seed_val)\n    seed_type = seed_val % 3\n    if seed_type == 0:\n        grid = np.stack(np.meshgrid(np.linspace(0.1,0.9,6), np.linspace(0.1,0.9,6)),-1).reshape(-1,2)[:32]\n        return np.clip(grid + (rng.random((32,2))-0.5)*0.08, 0.05, 0.95)\n    elif seed_type == 1:\n        points = [rng.uniform(0.1, 0.9, 2)]; [points.append(candidates[np.argmax(np.min(np.sum((candidates[:,np.newaxis,:] - np.array(points)[np.newaxis,:,:])**2, axis=-1), axis=1))]) for _ in range(31) for candidates in [rng.uniform(0.1,0.9,(200,2))]]; return np.array(points)\n    else:\n        rows=[5,6,5,6,5,5]; points=[]; y=0.95\n        for i,c in enumerate(rows): x_s=(1.0-(c-1)*0.15)/2; [points.append([x_s+j*0.15,y]) for j in range(c)]; y-=0.15\n        return np.array(points)[:32]\n\ndef refine_slsqp(centers):\n    \"\"\"Standard deep SLSQP refinement.\"\"\"\n    x0 = np.hstack([centers, np.full((32,1),0.05)]).flatten()\n    def obj(x): return -np.sum(x[2::3])\n    def cons(x):\n        c,r=x.reshape(32,3)[:,:2],x[2::3]\n        I,J=np.triu_indices(32,1); d2=np.sum((c[I]-c[J])**2,1); r2=(r[I]+r[J])**2\n        return np.concatenate([c[:,0]-r,1-c[:,0]-r,c[:,1]-r,1-c[:,1]-r,d2-r2])\n    res=minimize(obj,x0,method='SLSQP',bounds=[(0,1)if j%3<2 else(1e-12,None)for j in range(32*3)],constraints={'type':'ineq','fun':cons},options={'maxiter':1000,'ftol':1e-12})\n    if not res.success: return centers, np.zeros(32), 0.0\n    final_x = res.x\n    return final_x.reshape(32,3)[:,:2], final_x[2::3], -res.fun\n\ndef refine_micro_jitter(centers):\n    \"\"\"Verity-style stochastic refinement.\"\"\"\n    rng = np.random.default_rng()\n    steps = 1000; sigma = 0.005\n    centers_best = centers.copy()\n    radii_best = solve_radii_lp(centers_best)\n    score_best = np.sum(radii_best)\n    if score_best < 1e-6: return centers, radii_best, score_best\n    for _ in range(steps):\n        centers_try = centers_best.copy()\n        i = int(rng.integers(0, 32))\n        delta = rng.normal(0.0, sigma, size=2)\n        centers_try[i] = np.clip(centers_try[i] + delta, 1e-6, 1.0 - 1e-6)\n        radii_try = solve_radii_lp(centers_try)\n        score_try = np.sum(radii_try)\n        if score_try > score_best:\n            centers_best, radii_best, score_best = centers_try, radii_try, score_try\n    return centers_best, radii_best, score_best\n\ndef hybrid_worker(seed_val):\n    \"\"\"Assigns a refinement method based on the seed.\"\"\"\n    initial_centers = get_seed(seed_val)\n    if seed_val % 2 == 0:\n        return refine_slsqp(initial_centers)\n    else:\n        return refine_micro_jitter(initial_centers)\n\ndef construct_packing() -> tuple:\n    NUM_CANDIDATES = 128\n    with Pool(processes=cpu_count()) as pool:\n        results = pool.map(hybrid_worker, range(NUM_CANDIDATES))\n\n    best_centers, best_radii, best_score = None, None, -1.0\n    for centers, radii, score in results:\n        if score > best_score:\n            best_centers, best_radii, best_score = centers, radii, score\n            \n    if best_centers is None: return get_seed(0), np.full((32,), 0.05)\n    return best_centers, best_radii * (1.0 - 1e-12)\n",
+    "submitted_timestamp": 1760885795.0911202,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9260245793458153,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.926025",
+      "evaluation_timestamp": 1760885836.4158409,
+      "evaluation_datetime": "2025-10-19T22:57:16.415844"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9260245793458153,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760885836.4338176,
+    "version_notified": "original",
+    "message": "Your research submission 'Ensemble v1: Parallel SLSQP vs. Micro-Jitter Refinement' (ID: 539) has been evaluated.\n\n**Score:** 2.9260245793458153\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.926025\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

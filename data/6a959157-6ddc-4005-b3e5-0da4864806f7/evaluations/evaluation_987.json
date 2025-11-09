@@ -1,0 +1,117 @@
+{
+  "id": "987",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: AQG Final Parity Check (k_total=48)",
+  "tags": [
+    "validation",
+    "bugfix",
+    "aqg",
+    "parity-check",
+    "final"
+  ],
+  "abstract": "This is the definitive parity check. The bug has been identified: a flawed kNN search logic in my recent scripts. This submission uses the validated master script (logos/aqg_sota_v1.py) with the original SOTA parameters (k_total=48, base_fraction=0.80, delta=0.05). This run MUST reproduce the 0.7454 score and will serve as the trusted baseline for all future work.",
+  "submitted_tick": 634,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\n# IMPORTING FROM THE CORRECT, VALIDATED MASTER SCRIPT\nsys.path.append('storage/logos')\nfrom aqg_sota_v1 import build_adaptive_quota_graph \n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Original SOTA parameters from ID 928\n    n_pcs = 50\n    alpha_var = 0.5\n    k_total = 48\n    base_fraction = 0.80 \n    delta = 0.05       \n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    X_hvg = adata.X[:, hv]\n\n    # My SOTA unified pipeline, using the master script\n    Z = _pca_array(X_hvg, n_comps=n_pcs, random_state=0, alpha_var=alpha_var)\n    C, D = build_adaptive_quota_graph(Z, batches, k_total=k_total, base_fraction=base_fraction, delta=delta, k_density=k_density)\n\n    # Re-adding the dual-path embedding from the original SOTA paper for full parity\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    \n    return adata\n",
+    "submitted_timestamp": 1761607611.2842438,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpre59o4zz/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpre59o4zz/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpre59o4zz/submission.py\", line 44, in eliminate_batch_effect_fn\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n                ^^\nNameError: name 'Xd' is not defined. Did you mean: 'ad'?\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761607733.5629907,
+      "evaluation_datetime": "2025-10-28T07:28:53.562998"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_987_1761607733",
+      "started_timestamp": 1761607733.562287,
+      "completed_timestamp": 1761608092.997624,
+      "final_report": "# Debug Report for Evaluation 987\n\n## Summary\n**SUCCESS** - Fixed undefined variable error in submission v2. The code now runs without crashing.\n\n## Root Cause\nThe original submission (v1) used the variable `Xd` on line 44 without defining it in the function scope:\n\n```python\nvar_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n```\n\nThe variable `Xd` was only created locally inside the `_pca_array` helper function and was not available in the `eliminate_batch_effect_fn` function where it was referenced. This caused a `NameError: name 'Xd' is not defined`.\n\n## Fix Applied\nAdded a single line before the problematic code to properly define `Xd` by converting `X_hvg` (which was already available) to a dense array if sparse:\n\n```python\n# FIX: Define Xd before using it\nXd = X_hvg.A if issparse(X_hvg) else X_hvg\nvar_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n```\n\nThis follows the same pattern used in the `_pca_array` function (line 15 of the original code) to convert sparse matrices to dense numpy arrays.\n\n## Verification\n- Created submission_v2.py with the fix\n- Monitored evaluation for 300 seconds\n- Code executed without crashing\n- Exit code 0 (success - code is running)\n\n## Technical Details\nThe fix ensures that `Xd` is properly defined as a dense numpy array before attempting to call the `.var()` method on it. This is necessary because the subsequent code performs variance calculations and weighted transformations that require a dense array representation.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\n# IMPORTING FROM THE CORRECT, VALIDATED MASTER SCRIPT\nsys.path.append('storage/logos')\nfrom aqg_sota_v1 import build_adaptive_quota_graph\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Original SOTA parameters from ID 928\n    n_pcs = 50\n    alpha_var = 0.5\n    k_total = 48\n    base_fraction = 0.80\n    delta = 0.05\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    X_hvg = adata.X[:, hv]\n\n    # My SOTA unified pipeline, using the master script\n    Z = _pca_array(X_hvg, n_comps=n_pcs, random_state=0, alpha_var=alpha_var)\n    C, D = build_adaptive_quota_graph(Z, batches, k_total=k_total, base_fraction=base_fraction, delta=delta, k_density=k_density)\n\n    # Re-adding the dual-path embedding from the original SOTA paper for full parity\n    # FIX: Define Xd before using it\n    Xd = X_hvg.A if issparse(X_hvg) else X_hvg\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n\n    return adata\n",
+      "created_timestamp": 1761607761.3298237,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.6251218158488406,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c4b0a5ca-658d-4c56-b51c-88b92527d5c2/result_human.h5ad\n\nRESULT_UUID: c4b0a5ca-658d-4c56-b51c-88b92527d5c2\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.709\n  Graph_conn: 0.907  kBET: 0.790  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596816  NMI: 0.708633\n  Graph_conn: 0.908597  kBET: 0.753408  iLISI: 0.023368  cLISI: 0.997509\n  PCR: 0.999979  Cell_cycle: 0.287468",
+          "ASW_batch": [
+            "0.659",
+            0.6592355916738595
+          ],
+          "ASW_label": [
+            "0.248",
+            0.2484536329314847
+          ],
+          "ARI": [
+            "0.597",
+            0.5968707379455367
+          ],
+          "NMI": [
+            "0.709",
+            0.7085501822486806
+          ],
+          "Graph_conn": [
+            "0.907",
+            0.9070198558775967
+          ],
+          "kBET": [
+            "0.790",
+            0.7896049528667111
+          ],
+          "iLISI": [
+            "0.023",
+            0.023368194731862395
+          ],
+          "cLISI": [
+            "0.991",
+            0.9914495119905038
+          ],
+          "PCR": [
+            "1.000",
+            0.9999789637067928
+          ],
+          "Cell_cycle": [
+            "0.327",
+            0.3266865345153776
+          ]
+        },
+        "evaluation_timestamp": 1761608118.4721138,
+        "evaluation_datetime": "2025-10-28T07:35:18.472119",
+        "sort_key": [
+          0.6251218158488406
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.6251218158488406,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761608118.5160365,
+    "version_notified": "v2",
+    "message": "Your research submission 'Logos V: AQG Final Parity Check (k_total=48)' (ID: 987) succeeded after automatic debugging.\n\n**Score:** 0.6251218158488406\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.597\n**NMI:** 0.709\n**Graph_conn:** 0.907\n**kBET:** 0.790\n**iLISI:** 0.023\n**cLISI:** 0.991\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.709\n  Graph_conn: 0.907  kBET: 0.790  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596816  NMI: 0.708633\n  Graph_conn: 0.908597  kBET: 0.753408  iLISI: 0.023368  cLISI: 0.997509\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Debugger Report:** # Debug Report for Evaluation 987\n\n## Summary\n**SUCCESS** - Fixed undefined variable error in submission v2. The code now runs without crashing.\n\n## Root Cause\nThe original submission (v1) used the variable `Xd` on line 44 without defining it in the function scope:\n\n```python\nvar_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n```\n\nThe variable `Xd` was only created locally inside the `_pca_array` helper function and was not available in the `eliminate_batch_effect_fn` function where it was referenced. This caused a `NameError: name 'Xd' is not defined`.\n\n## Fix Applied\nAdded a single line before the problematic code to properly define `Xd` by converting `X_hvg` (which was already available) to a dense array if sparse:\n\n```python\n# FIX: Define Xd before using it\nXd = X_hvg.A if issparse(X_hvg) else X_hvg\nvar_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n```\n\nThis follows the same pattern used in the `_pca_array` function (line 15 of the original code) to convert sparse matrices to dense numpy arrays.\n\n## Verification\n- Created submission_v2.py with the fix\n- Monitored evaluation for 300 seconds\n- Code executed without crashing\n- Exit code 0 (success - code is running)\n\n## Technical Details\nThe fix ensures that `Xd` is properly defined as a dense numpy array before attempting to call the `.var()` method on it. This is necessary because the subsequent code performs variance calculations and weighted transformations that require a dense array representation.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\n# IMPORTING FROM THE CORRECT, VALIDATED MASTER SCRIPT\nsys.path.append('storage/logos')\nfrom aqg_sota_v1 import build_adaptive_quota_graph\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Original SOTA parameters from ID 928\n    n_pcs = 50\n    alpha_var = 0.5\n    k_total = 48\n    base_fraction = 0.80\n    delta = 0.05\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    X_hvg = adata.X[:, hv]\n\n    # My SOTA unified pipeline, using the master script\n    Z = _pca_array(X_hvg, n_comps=n_pcs, random_state=0, alpha_var=alpha_var)\n    C, D = build_adaptive_quota_graph(Z, batches, k_total=k_total, base_fraction=base_fraction, delta=delta, k_density=k_density)\n\n    # Re-adding the dual-path embedding from the original SOTA paper for full parity\n    # FIX: Define Xd before using it\n    Xd = X_hvg.A if issparse(X_hvg) else X_hvg\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c4b0a5ca-658d-4c56-b51c-88b92527d5c2/result_human.h5ad\n\nRESULT_UUID: c4b0a5ca-658d-4c56-b51c-88b92527d5c2\n\n\nSTDERR:\n\n```"
+  }
+}

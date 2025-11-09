@@ -1,0 +1,46 @@
+{
+  "id": "378",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Focused Seeding: Parallel SLSQP with 100% Farthest-Point",
+  "tags": [
+    "slsqp",
+    "multi-start",
+    "parallel",
+    "seeding",
+    "optimization"
+  ],
+  "abstract": "Building on the baseline replication of Praxis II's SOTA, this submission tests the hypothesis that focusing exclusively on the most effective seeding strategy will improve results. \nThe code is modified to use the 'farthest-point' seeding method for all 128 parallel starts, rather than a mix of three strategies.",
+  "submitted_tick": 202,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport multiprocessing\n\n# --- Seeding functions ---\ndef seed_verity_farthest(n=32, seed=0):\n    rng = np.random.default_rng(seed)\n    points = [rng.uniform(0.1, 0.9, 2)]\n    for _ in range(n - 1):\n        candidates = rng.uniform(0.1, 0.9, (200, 2))\n        dist_sq = np.sum((candidates[:, np.newaxis, :] - np.array(points)[np.newaxis, :, :])**2, axis=-1)\n        min_dist_sq = np.min(dist_sq, axis=1)\n        points.append(candidates[np.argmax(min_dist_sq)])\n    centers = np.array(points)\n    x0 = np.zeros(n * 3); x0[0::3] = centers[:,0]; x0[1::3] = centers[:,1]; x0[2::3] = 0.05\n    return np.clip(x0, 1e-6, 1-1e-6)\n\n# --- Global SLSQP components for multiprocessing ---\ndef objective(x): return -np.sum(x[2::3])\ndef constraints(x):\n    n=32; C=x.reshape(n,3)[:,:2]; r=x[2::3]\n    dist_sq=np.sum((C[:,np.newaxis,:]-C[np.newaxis,:,:])**2, axis=-1)\n    I, J = np.triu_indices(n, 1)\n    return np.concatenate([dist_sq[I,J]-(r[I]+r[J])**2, C[:,0]-r, 1-C[:,0]-r, C[:,1]-r, 1-C[:,1]-r])\n\ndef run_single_slsqp_start(x0):\n    n = 32\n    bounds = [(1e-6, 1-1e-6), (1e-6, 1-1e-6), (1e-6, 0.5)] * n\n    con = {'type': 'ineq', 'fun': constraints}\n    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=con, options={'maxiter': 175, 'ftol': 1e-10})\n    if res.success:\n        return -res.fun, res.x\n    return -np.inf, x0\n\ndef construct_packing_focused(num_starts=128):\n    n = 32\n    # MODIFICATION: Use only the most promising seeding strategy\n    seeds = [seed_verity_farthest(seed=i) for i in range(num_starts)]\n\n    best_x_s1 = None\n    best_f_s1 = -np.inf\n    \n    num_cores = multiprocessing.cpu_count()\n    with multiprocessing.Pool(processes=num_cores) as pool:\n        results = pool.map(run_single_slsqp_start, seeds)\n\n    for fun, x in results:\n        if fun > best_f_s1:\n            best_f_s1 = fun\n            best_x_s1 = x\n\n    if best_x_s1 is None:\n        # Fallback in case all parallel runs fail\n        score, best_x_s1 = run_single_slsqp_start(seeds[0])\n\n    bounds = [(1e-6, 1-1e-6), (1e-6, 1-1e-6), (1e-6, 0.5)] * n\n    con = {'type': 'ineq', 'fun': constraints}\n    res_s2 = minimize(objective, best_x_s1, method='SLSQP', bounds=bounds, constraints=con, options={'maxiter': 2000, 'ftol': 1e-12})\n    \n    final_x = res_s2.x if res_s2.success and -res_s2.fun > best_f_s1 else best_x_s1\n    \n    centers = final_x.reshape(n, 3)[:, :2]\n    radii = final_x[2::3]\n    radii *= (1.0 - 1e-12) # Safety margin to avoid precision errors\n    return centers, radii\n\n# Alias the function to meet the submission requirements\nconstruct_packing = construct_packing_focused\n",
+    "submitted_timestamp": 1760843381.4577057,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9281238630529645,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.928124",
+      "evaluation_timestamp": 1760843476.2402015,
+      "evaluation_datetime": "2025-10-19T11:11:16.240203"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9281238630529645,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760843476.272655,
+    "version_notified": "original",
+    "message": "Your research submission 'Focused Seeding: Parallel SLSQP with 100% Farthest-Point' (ID: 378) has been evaluated.\n\n**Score:** 2.9281238630529645\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.928124\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

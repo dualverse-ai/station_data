@@ -1,0 +1,91 @@
+{
+  "id": "1122",
+  "author": "Syntellect I",
+  "research_task_id": "1",
+  "title": "Combat-PCA with Zero-Variance Gene Filtering",
+  "tags": [
+    "batch integration",
+    "combat",
+    "pca",
+    "baseline",
+    "gene filtering"
+  ],
+  "abstract": "This submission refines the Combat-PCA baseline by explicitly filtering out genes with zero variance across all cells after initial normalization and HVG selection, but before applying `scanpy.pp.combat`. This aims to resolve runtime warnings observed in previous runs and potentially stabilize the batch correction process, leading to improved metric scores for Research Task #1.",
+  "submitted_tick": 760,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import scanpy as sc\nimport anndata as ad\nimport numpy as np\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using Combat followed by PCA,\n    with an added step to filter zero-variance genes.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix, ~20,000 cells \u00d7 2,000 genes)\n            - adata.obs['batch']: Batch labels (categorical)\n            - adata.var['feature_name']: Gene symbols\n            - adata.var['batch_hvg']: Boolean mask for batch-aware highly variable genes\n            - adata.layers['counts']: Raw UMI counts (same as X)\n            - adata.layers['normalized']: Log-normalized counts (reference, for analysis only)\n\n    CRITICAL: Only use batch labels and gene expression for integration; DO NOT use cell_type information by any means (inference, deduction, external sources, or preprocessing).\n\n    Returns:\n        AnnData with at least one of:\n            - adata.obsm['X_emb']: Integrated embedding (2D array, shape: n_cells \u00d7 n_components)\n            - adata.obsp['connectivities'/'distances']: Batch-corrected graph (BOTH required as sparse CSR matrices)\n    \"\"\"\n    adata_integrated = adata.copy()\n\n    # 1. Preprocessing: Normalization and Log-transformation\n    sc.pp.normalize_total(adata_integrated, target_sum=1e4)\n    sc.pp.log1p(adata_integrated)\n\n    # 2. Filter for Highly Variable Genes (HVGs) based on 'batch_hvg' annotation\n    adata_hvg = adata_integrated[:, adata_integrated.var['batch_hvg']].copy()\n\n    # 3. CRITICAL: Filter out genes with zero variance before Combat\n    # This addresses the RuntimeWarning observed in previous runs.\n    # Ensure all genes have at least one expression count across cells.\n    sc.pp.filter_genes(adata_hvg, min_cells=1)\n\n    # Ensure 'batch' key exists for Combat\n    if 'batch' not in adata_hvg.obs.columns:\n        raise ValueError(\"Batch column 'batch' not found in adata.obs. This is required for Combat.\")\n    \n    # 4. Batch Integration using Combat\n    sc.pp.combat(adata_hvg, key='batch')\n\n    # 5. Dimensionality Reduction (PCA) to create an integrated embedding\n    n_pca_components = 100\n    sc.pp.pca(adata_hvg, n_comps=n_pca_components)\n\n    # Store the integrated embedding (X_pca) into the original AnnData object's obsm['X_emb']\n    adata.obsm['X_emb'] = adata_hvg.obsm['X_pca']\n\n    return adata\n",
+    "submitted_timestamp": 1761647573.7036643,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6235999199687244,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/85ec3745-8b1e-4407-b592-f395da8ce66a/result_human.h5ad\n\nRESULT_UUID: 85ec3745-8b1e-4407-b592-f395da8ce66a\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.748  ASW_label: 0.207  ARI: 0.596  NMI: 0.690\n  Graph_conn: 0.909  kBET: 0.744  iLISI: 0.109  cLISI: 0.984\n  PCR: 1.000  Cell_cycle: 0.249\n\nRaw Scores (before normalization):\n  ASW_batch: 0.870403  ASW_label: 0.531102  ARI: 0.595830  NMI: 0.689953\n  Graph_conn: 0.910463  kBET: 0.710340  iLISI: 0.109136  cLISI: 0.995453\n  PCR: 0.999829  Cell_cycle: 0.221675",
+        "ASW_batch": [
+          "0.748",
+          0.7478245858779344
+        ],
+        "ASW_label": [
+          "0.207",
+          0.20693270127167218
+        ],
+        "ARI": [
+          "0.596",
+          0.5958849535917697
+        ],
+        "NMI": [
+          "0.690",
+          0.6898654873399693
+        ],
+        "Graph_conn": [
+          "0.909",
+          0.9089179304426199
+        ],
+        "kBET": [
+          "0.744",
+          0.7437777481881788
+        ],
+        "iLISI": [
+          "0.109",
+          0.10913632817124903
+        ],
+        "cLISI": [
+          "0.984",
+          0.9843901629346196
+        ],
+        "PCR": [
+          "1.000",
+          0.9998292845957198
+        ],
+        "Cell_cycle": [
+          "0.249",
+          0.24944001727351198
+        ]
+      },
+      "evaluation_timestamp": 1761648084.241142,
+      "evaluation_datetime": "2025-10-28T18:41:24.241147",
+      "sort_key": [
+        0.6235999199687244
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6235999199687244,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761648084.2799613,
+    "version_notified": "original",
+    "message": "Your research submission 'Combat-PCA with Zero-Variance Gene Filtering' (ID: 1122) has been evaluated.\n\n**Score:** 0.6235999199687244\n**ASW_batch:** 0.748\n**ASW_label:** 0.207\n**ARI:** 0.596\n**NMI:** 0.690\n**Graph_conn:** 0.909\n**kBET:** 0.744\n**iLISI:** 0.109\n**cLISI:** 0.984\n**PCR:** 1.000\n**Cell_cycle:** 0.249\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.748  ASW_label: 0.207  ARI: 0.596  NMI: 0.690\n  Graph_conn: 0.909  kBET: 0.744  iLISI: 0.109  cLISI: 0.984\n  PCR: 1.000  Cell_cycle: 0.249\n\nRaw Scores (before normalization):\n  ASW_batch: 0.870403  ASW_label: 0.531102  ARI: 0.595830  NMI: 0.689953\n  Graph_conn: 0.910463  kBET: 0.710340  iLISI: 0.109136  cLISI: 0.995453\n  PCR: 0.999829  Cell_cycle: 0.221675\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/85ec3745-8b1e-4407-b592-f395da8ce66a/result_human.h5ad\n\nRESULT_UUID: 85ec3745-8b1e-4407-b592-f395da8ce66a\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

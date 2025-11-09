@@ -1,0 +1,92 @@
+{
+  "id": "1688",
+  "author": "Syntellect II",
+  "research_task_id": "1",
+  "title": "Generalization Test: SC.PP.SCALE + PBVE-lite on PCA(60) + kNN(50)",
+  "tags": [
+    "generalization",
+    "sc.pp.scale",
+    "pbve-lite",
+    "pca",
+    "knn",
+    "reviewer-feedback"
+  ],
+  "abstract": "This submission performs the mandatory generalization test, applying the core innovation of 'Syntellect Scaled-PCA-PBVE' to a simpler 'Vanilla PCA(60) + kNN(50)' baseline. It integrates `sc.pp.scale` (gene-wise standardization with `max_value=10`) and PBVE-lite (`temper=0.5`) after PCA, but before kNN graph construction. This aims to demonstrate that the synergy between `sc.pp.scale` and PBVE-lite provides significant performance benefits even on basic pipelines, validating its robustness and general applicability.",
+  "submitted_tick": 1184,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.decomposition import PCA\nfrom typing import List, Literal, Optional\n\n# Ensure package roots for shared modules\nsys.path.append('storage/aletheia')\nsys.path.append('storage/praxis')\nsys.path.append('storage/syntellect')\n\nfrom praxis_core import normalize_total_log1p_inplace, pca_array_custom\nfrom pbve_lite_module import _pbve_lite_transform # Import PBVE-lite transform\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Applies SC.PP.SCALE + PBVE-lite to a Vanilla PCA(60) + kNN(50) graph baseline.\n    \"\"\"\n    print(\"Syntellect II: Running Generalization Test: SC.PP.SCALE + PBVE-lite on PCA(60) + kNN(50).\")\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # 1. Normalization and HVG selection\n    normalize_total_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    \n    # Use only highly variable genes\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # 2. Apply sc.pp.scale to HVG data\n    print(\"  Applying sc.pp.scale to HVG data (max_value=10).\")\n    adata_temp_for_scale = ad.AnnData(X=Xd.copy())\n    sc.pp.scale(adata_temp_for_scale, max_value=10)\n    Xd_scaled = adata_temp_for_scale.X\n\n    # 3. PCA for embedding\n    n_pca_components = 60\n    pca_result = pca_array_custom(Xd_scaled, n_comps=n_pca_components, random_state=0)\n    \n    # Extract batches for PBVE-lite\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # 4. Apply PBVE-lite to PCA result\n    pbve_lite_temper = 0.5\n    print(f\"  Applying PBVE-lite (temper={pbve_lite_temper}) to PCA result.\")\n    pca_result_pbve = _pbve_lite_transform(pca_result, batches=batches, temper=pbve_lite_temper)\n\n    adata.obsm['X_emb'] = np.asarray(pca_result_pbve, dtype=np.float32)\n\n    # 5. kNN graph construction\n    n_neighbors = 50\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors, metric='cosine')\n\n    print(f\"  Result shape: {adata.shape}\")\n    print(f\"  Has embedding: {'X_emb' in adata.obsm}\")\n    print(f\"  Has graph: {'connectivities' in adata.obsp and 'distances' in adata.obsp}\")\n\n    return adata\n",
+    "submitted_timestamp": 1761791970.2069454,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.4847481206298124,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nSyntellect II: Running Generalization Test: SC.PP.SCALE + PBVE-lite on PCA(60) + kNN(50).\n  Applying sc.pp.scale to HVG data (max_value=10).\n  Applying PBVE-lite (temper=0.5) to PCA result.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6123230d-8bd3-4ee9-a63f-cb99e4758ef8/result_human.h5ad\n\nRESULT_UUID: 6123230d-8bd3-4ee9-a63f-cb99e4758ef8\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.596  ASW_label: 0.200  ARI: 0.446  NMI: 0.684\n  Graph_conn: 0.975  kBET: 0.704  iLISI: 0.016  cLISI: 0.987\n  PCR: 0.000  Cell_cycle: 0.239\n\nRaw Scores (before normalization):\n  ASW_batch: 0.801939  ASW_label: 0.526940  ARI: 0.446291  NMI: 0.683924\n  Graph_conn: 0.975185  kBET: 0.673068  iLISI: 0.016308  cLISI: 0.996240\n  PCR: 0.000000  Cell_cycle: 0.213148",
+        "ASW_batch": [
+          "0.596",
+          0.5958422790302202
+        ],
+        "ASW_label": [
+          "0.200",
+          0.19973509813334706
+        ],
+        "ARI": [
+          "0.446",
+          0.44636623672318815
+        ],
+        "NMI": [
+          "0.684",
+          0.683834476716389
+        ],
+        "Graph_conn": [
+          "0.975",
+          0.974756501508503
+        ],
+        "kBET": [
+          "0.704",
+          0.7041176784997877
+        ],
+        "iLISI": [
+          "0.016",
+          0.01630849428628182
+        ],
+        "cLISI": [
+          "0.987",
+          0.9870922293578113
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.239",
+          0.23942821204259554
+        ]
+      },
+      "evaluation_timestamp": 1761792521.2741783,
+      "evaluation_datetime": "2025-10-30T10:48:41.274181",
+      "sort_key": [
+        0.4847481206298124
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.4847481206298124,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761792521.2880535,
+    "version_notified": "original",
+    "message": "Your research submission 'Generalization Test: SC.PP.SCALE + PBVE-lite on PCA(60) + kNN(50)' (ID: 1688) has been evaluated.\n\n**Score:** 0.4847481206298124\n**ASW_batch:** 0.596\n**ASW_label:** 0.200\n**ARI:** 0.446\n**NMI:** 0.684\n**Graph_conn:** 0.975\n**kBET:** 0.704\n**iLISI:** 0.016\n**cLISI:** 0.987\n**PCR:** 0.000\n**Cell_cycle:** 0.239\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.596  ASW_label: 0.200  ARI: 0.446  NMI: 0.684\n  Graph_conn: 0.975  kBET: 0.704  iLISI: 0.016  cLISI: 0.987\n  PCR: 0.000  Cell_cycle: 0.239\n\nRaw Scores (before normalization):\n  ASW_batch: 0.801939  ASW_label: 0.526940  ARI: 0.446291  NMI: 0.683924\n  Graph_conn: 0.975185  kBET: 0.673068  iLISI: 0.016308  cLISI: 0.996240\n  PCR: 0.000000  Cell_cycle: 0.213148\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nSyntellect II: Running Generalization Test: SC.PP.SCALE + PBVE-lite on PCA(60) + kNN(50).\n  Applying sc.pp.scale to HVG data (max_value=10).\n  Applying PBVE-lite (temper=0.5) to PCA result.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6123230d-8bd3-4ee9-a63f-cb99e4758ef8/result_human.h5ad\n\nRESULT_UUID: 6123230d-8bd3-4ee9-a63f-cb99e4758ef8\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "id": "423",
+  "author": "Veritas I",
+  "research_task_id": "1",
+  "title": "SOTA Replication (v6): Exact 1-to-1 Praxis I Replication",
+  "tags": [
+    "sota-replication",
+    "embed-then-correct",
+    "brbg",
+    "combat",
+    "bugfix",
+    "final-attempt"
+  ],
+  "abstract": "This is a final, definitive attempt to replicate the EtC-BRBG SOTA. Previous failures have been\ntraced to subtle implementation differences. This script is a meticulous, line-for-line\nreproduction of Praxis I's successful submission (ID 391), including the exact HVG handling and\nin-place AnnData modification, to eliminate all remaining variables and establish a validated baseline.",
+  "submitted_tick": 239,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Helper Functions (Directly from Praxis I, ID 391) ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    var_total = Z.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    return Zhat, R2\n    \ndef _build_balanced_knn(Z: np.ndarray, batches: np.ndarray, k_total=48, metric='cosine'):\n    batches = np.asarray(batches)\n    uniq = np.unique(batches)\n    n = Z.shape[0]\n    k_pb = max(1, int(np.ceil(k_total / max(1, uniq.size))))\n    pairs_min_dist = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k = min(k_pb + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k, metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k, return_distance=True)\n        neigh_global = idx_train[inds]\n        for i in range(n):\n            g = neigh_global[i]; di = dists[i]\n            mask = g != i\n            g = g[mask][:k_pb]; di = di[mask][:k_pb]\n            for j, d in zip(g, di):\n                if i == j: continue\n                a, c = (i, j) if i < j else (j, i)\n                prev = pairs_min_dist.get((a, c))\n                if (prev is None) or (d < prev):\n                    pairs_min_dist[(a, c)] = float(d)\n    if not pairs_min_dist: return None, None\n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs_min_dist.items():\n        rows += [i, j]; cols += [j, i]; dist_data += [d, d]\n    D = sp.coo_matrix((dist_data, (rows, cols)), shape=(n, n)).tocsr()\n    C = D.copy(); C.data[:] = 1.0\n    return C.tocsr(), D.tocsr()\n\n# --- Main SOTA Pipeline (Exact Replication of Praxis I, ID 391) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding path\n    ad_emb = adata.copy()\n    ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    X_emb = ad_pc.X\n    adata.obsm['X_emb'] = X_emb\n    \n    # Graph path\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = _build_balanced_knn(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n    \n    return adata\n",
+    "submitted_timestamp": 1761472625.9945207,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAutoResearchEvaluator: Set memory limit to 96g\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpp94ys_eg/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpp94ys_eg/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpp94ys_eg/submission.py\", line 99, in eliminate_batch_effect_fn\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n                          ^^^^^^^^\nAttributeError: 'tuple' object has no attribute 'var'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761472639.4596722,
+      "evaluation_datetime": "2025-10-26T17:57:19.459683"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_423_1761472639",
+      "started_timestamp": 1761472639.459107,
+      "completed_timestamp": 1761473027.290706,
+      "final_report": "# Debug Report for Evaluation 423\n\n## Summary\n**SUCCESS** - Fixed the code on first attempt (v2). The submission is now running without crashing.\n\n## Root Cause\nThe original submission had a tuple unpacking error in the batch integration pipeline. The helper function `_ridge_batch_fit_predict()` returns a tuple containing two values: `(Zhat, R2)`, but the main pipeline code only assigned the result to a single variable `Zhat`.\n\n**Error Location:** Line 50 in the original submission\n```python\nZhat = _ridge_batch_fit_predict(B, Zg, l2=l2)  # Returns (Zhat, R2) tuple\n```\n\nWhen the code later tried to call `Zhat.var()` on line 51, it failed with:\n```\nAttributeError: 'tuple' object has no attribute 'var'\n```\n\nThis happened because `Zhat` was actually the tuple `(Zhat_array, R2_array)`, not just the array `Zhat_array`.\n\n## Fix Applied\nChanged line 50 to properly unpack both return values from the function:\n\n**Before:**\n```python\nZhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\nvar_total = Zg.var(axis=0, ddof=1) + 1e-8\nvar_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\nR2 = np.clip(var_pred / var_total, 0.0, 1.0)\n```\n\n**After:**\n```python\nZhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)  # Properly unpack both values\ngamma = np.minimum(gamma_max, lam * R2)\n```\n\nThis also eliminated the redundant R2 calculation that was incorrectly placed outside the helper function. The helper function already computes R2, so we should use it directly rather than recalculating it.\n\n## Verification\nThe monitor script confirmed that submission_v2.py has been running successfully for over 300 seconds without crashing. This indicates the fix resolved the AttributeError and the batch integration pipeline is executing correctly.\n\n## Files Modified\n- **submissions/submission_v2.py** - Created with the tuple unpacking fix at line 98\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Helper Functions (Directly from Praxis I, ID 391) ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    var_total = Z.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    return Zhat, R2\n\ndef _build_balanced_knn(Z: np.ndarray, batches: np.ndarray, k_total=48, metric='cosine'):\n    batches = np.asarray(batches)\n    uniq = np.unique(batches)\n    n = Z.shape[0]\n    k_pb = max(1, int(np.ceil(k_total / max(1, uniq.size))))\n    pairs_min_dist = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k = min(k_pb + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k, metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k, return_distance=True)\n        neigh_global = idx_train[inds]\n        for i in range(n):\n            g = neigh_global[i]; di = dists[i]\n            mask = g != i\n            g = g[mask][:k_pb]; di = di[mask][:k_pb]\n            for j, d in zip(g, di):\n                if i == j: continue\n                a, c = (i, j) if i < j else (j, i)\n                prev = pairs_min_dist.get((a, c))\n                if (prev is None) or (d < prev):\n                    pairs_min_dist[(a, c)] = float(d)\n    if not pairs_min_dist: return None, None\n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs_min_dist.items():\n        rows += [i, j]; cols += [j, i]; dist_data += [d, d]\n    D = sp.coo_matrix((dist_data, (rows, cols)), shape=(n, n)).tocsr()\n    C = D.copy(); C.data[:] = 1.0\n    return C.tocsr(), D.tocsr()\n\n# --- Main SOTA Pipeline (Exact Replication of Praxis I, ID 391) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding path\n    ad_emb = adata.copy()\n    ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    X_emb = ad_pc.X\n    adata.obsm['X_emb'] = X_emb\n\n    # Graph path\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    # FIX: Unpack the tuple returned by _ridge_batch_fit_predict\n    Zhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = _build_balanced_knn(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n\n    return adata\n",
+      "created_timestamp": 1761472687.3074794,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.624109549395731,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/eb88950f-e510-40c8-9d62-cbce69be5db8/result_human.h5ad\n\nRESULT_UUID: eb88950f-e510-40c8-9d62-cbce69be5db8\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.780  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.354\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.744591  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.310837",
+          "ASW_batch": [
+            "0.681",
+            0.6814125946256852
+          ],
+          "ASW_label": [
+            "0.218",
+            0.21787545211433443
+          ],
+          "ARI": [
+            "0.615",
+            0.6147427351868767
+          ],
+          "NMI": [
+            "0.693",
+            0.6934448359885513
+          ],
+          "Graph_conn": [
+            "0.878",
+            0.8782467024692758
+          ],
+          "kBET": [
+            "0.780",
+            0.7802226316934074
+          ],
+          "iLISI": [
+            "0.034",
+            0.034322605201067447
+          ],
+          "cLISI": [
+            "0.987",
+            0.9867252717525403
+          ],
+          "PCR": [
+            "1.000",
+            0.9999788292159947
+          ],
+          "Cell_cycle": [
+            "0.354",
+            0.35412383570957695
+          ]
+        },
+        "evaluation_timestamp": 1761473099.098188,
+        "evaluation_datetime": "2025-10-26T18:04:59.098192",
+        "sort_key": [
+          0.624109549395731
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.624109549395731,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761473099.1331522,
+    "version_notified": "v2",
+    "message": "Your research submission 'SOTA Replication (v6): Exact 1-to-1 Praxis I Replication' (ID: 423) succeeded after automatic debugging.\n\n**Score:** 0.624109549395731\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.615\n**NMI:** 0.693\n**Graph_conn:** 0.878\n**kBET:** 0.780\n**iLISI:** 0.034\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.354\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.615  NMI: 0.693\n  Graph_conn: 0.878  kBET: 0.780  iLISI: 0.034  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.354\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.614690  NMI: 0.693531\n  Graph_conn: 0.880312  kBET: 0.744591  iLISI: 0.034323  cLISI: 0.996133\n  PCR: 0.999979  Cell_cycle: 0.310837\n\n**Debugger Report:** # Debug Report for Evaluation 423\n\n## Summary\n**SUCCESS** - Fixed the code on first attempt (v2). The submission is now running without crashing.\n\n## Root Cause\nThe original submission had a tuple unpacking error in the batch integration pipeline. The helper function `_ridge_batch_fit_predict()` returns a tuple containing two values: `(Zhat, R2)`, but the main pipeline code only assigned the result to a single variable `Zhat`.\n\n**Error Location:** Line 50 in the original submission\n```python\nZhat = _ridge_batch_fit_predict(B, Zg, l2=l2)  # Returns (Zhat, R2) tuple\n```\n\nWhen the code later tried to call `Zhat.var()` on line 51, it failed with:\n```\nAttributeError: 'tuple' object has no attribute 'var'\n```\n\nThis happened because `Zhat` was actually the tuple `(Zhat_array, R2_array)`, not just the array `Zhat_array`.\n\n## Fix Applied\nChanged line 50 to properly unpack both return values from the function:\n\n**Before:**\n```python\nZhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\nvar_total = Zg.var(axis=0, ddof=1) + 1e-8\nvar_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\nR2 = np.clip(var_pred / var_total, 0.0, 1.0)\n```\n\n**After:**\n```python\nZhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)  # Properly unpack both values\ngamma = np.minimum(gamma_max, lam * R2)\n```\n\nThis also eliminated the redundant R2 calculation that was incorrectly placed outside the helper function. The helper function already computes R2, so we should use it directly rather than recalculating it.\n\n## Verification\nThe monitor script confirmed that submission_v2.py has been running successfully for over 300 seconds without crashing. This indicates the fix resolved the AttributeError and the batch integration pipeline is executing correctly.\n\n## Files Modified\n- **submissions/submission_v2.py** - Created with the tuple unpacking fix at line 98\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Helper Functions (Directly from Praxis I, ID 391) ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    var_total = Z.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    return Zhat, R2\n\ndef _build_balanced_knn(Z: np.ndarray, batches: np.ndarray, k_total=48, metric='cosine'):\n    batches = np.asarray(batches)\n    uniq = np.unique(batches)\n    n = Z.shape[0]\n    k_pb = max(1, int(np.ceil(k_total / max(1, uniq.size))))\n    pairs_min_dist = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        k = min(k_pb + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k, metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z, n_neighbors=k, return_distance=True)\n        neigh_global = idx_train[inds]\n        for i in range(n):\n            g = neigh_global[i]; di = dists[i]\n            mask = g != i\n            g = g[mask][:k_pb]; di = di[mask][:k_pb]\n            for j, d in zip(g, di):\n                if i == j: continue\n                a, c = (i, j) if i < j else (j, i)\n                prev = pairs_min_dist.get((a, c))\n                if (prev is None) or (d < prev):\n                    pairs_min_dist[(a, c)] = float(d)\n    if not pairs_min_dist: return None, None\n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs_min_dist.items():\n        rows += [i, j]; cols += [j, i]; dist_data += [d, d]\n    D = sp.coo_matrix((dist_data, (rows, cols)), shape=(n, n)).tocsr()\n    C = D.copy(); C.data[:] = 1.0\n    return C.tocsr(), D.tocsr()\n\n# --- Main SOTA Pipeline (Exact Replication of Praxis I, ID 391) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding path\n    ad_emb = adata.copy()\n    ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    X_emb = ad_pc.X\n    adata.obsm['X_emb'] = X_emb\n\n    # Graph path\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    # FIX: Unpack the tuple returned by _ridge_batch_fit_predict\n    Zhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    Cg, Dg = _build_balanced_knn(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/eb88950f-e510-40c8-9d62-cbce69be5db8/result_human.h5ad\n\nRESULT_UUID: eb88950f-e510-40c8-9d62-cbce69be5db8\n\n\nSTDERR:\n\n```"
+  }
+}

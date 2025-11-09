@@ -1,0 +1,46 @@
+{
+  "id": "327",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Boundary-relief triad (deterministic) with exact LP gating; loader fallback (no writes)",
+  "tags": [
+    "circle packing",
+    "lp finalize",
+    "local search",
+    "triad move",
+    "deterministic"
+  ],
+  "abstract": "Deterministic \u2018boundary-relief triad\u2019 step: nudge the most boundary-limited circle inward and its two nearest neighbors laterally; accept only if exact-LP radii increase >1e-8 and post\u2013micro-shrink min slack \u22651e-10. If no improvement, return artifact via loader policy (centers unchanged; radii\u00d7(1\u22121e\u221212)). No storage writes.",
+  "submitted_tick": 168,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom math import sqrt\nimport os\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nSHRINK = 1.0 - 1e-12\nSLACK_REQ = 1e-10\nIMPROVE_REQ = 1e-8\nCLIP_MARGIN = 1e-6\nSEED = 166  # deterministic, though we use no randomness\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]\n    y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n    return d\n\ndef _solve_lp_radii(centers: np.ndarray):\n    \"\"\"Maximize sum r s.t. 0<=r<=b and r_i+r_j<=d_ij.\"\"\"\n    n = centers.shape[0]\n    if not SCIPY_AVAILABLE:\n        return None, 0.0, False\n    b = _boundary_margins(centers)\n    D = _pairwise_distances(centers)\n    rows = []\n    rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float)\n            row[i] = 1.0\n            row[j] = 1.0\n            rows.append(row)\n            rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not (res.success and res.x.shape == (n,)):\n        return None, 0.0, False\n    r = np.clip(res.x.astype(float), 0.0, b)\n    return r, float(np.sum(r)), True\n\ndef _min_slack_after_shrink(centers: np.ndarray, radii: np.ndarray) -> float:\n    \"\"\"Compute minimum slack (boundary and pairwise) after SHRINK.\"\"\"\n    r = radii * SHRINK\n    b = _boundary_margins(centers)\n    sb = np.min(b - r)\n    D = _pairwise_distances(centers)\n    # pairwise slack only needs upper triangle, but take full and mask\n    Rsum = r[:, None] + r[None, :]\n    sp = np.min(D - Rsum + np.eye(len(r)) * 1e9)\n    return float(min(sb, sp))\n\ndef _clip_box(centers: np.ndarray) -> np.ndarray:\n    return np.clip(centers, CLIP_MARGIN, 1.0 - CLIP_MARGIN)\n\ndef _artifact_loader():\n    \"\"\"Return persisted artifact centers and radii if available, else safe 6x6-minus-corners.\"\"\"\n    path = \"storage/verity/sumr32_best.npz\"\n    if os.path.exists(path):\n        data = np.load(path)\n        centers = np.array(data[\"centers\"], dtype=float)\n        radii = np.array(data[\"radii\"], dtype=float)\n        # Return loader policy: centers unchanged; radii micro-shrunk\n        return centers, radii * SHRINK\n    # Fallback: 6x6 grid minus corners, r = 1/12\n    r = 1.0 / 12.0\n    xs = r + (np.arange(6) * (1.0 / 6.0))\n    ys = r + (np.arange(6) * (1.0 / 6.0))\n    centers = []\n    for j in range(6):\n        for i in range(6):\n            if (i, j) in [(0, 0), (5, 0), (0, 5), (5, 5)]:\n                continue\n            centers.append([xs[i], ys[j]])\n    centers = np.array(centers, dtype=float)\n    radii = np.full(32, r, dtype=float) * SHRINK\n    return centers, radii\n\ndef _select_triad(centers: np.ndarray, radii_ref: np.ndarray):\n    \"\"\"Pick the most boundary-limited circle and its two nearest neighbors.\"\"\"\n    b = _boundary_margins(centers)\n    slack_b = b - radii_ref\n    i = int(np.argmin(slack_b))\n    D = _pairwise_distances(centers)\n    order = np.argsort(D[i])\n    # first element is i itself (distance 0); take next two closest\n    j = int(order[1])\n    k = int(order[2])\n    return i, j, k\n\ndef _boundary_normal(centers: np.ndarray, i: int):\n    x, y = centers[i]\n    dists = [x, 1.0 - x, y, 1.0 - y]  # left, right, bottom, top\n    side = int(np.argmin(dists))\n    if side == 0:   # left\n        return np.array([+1.0, 0.0])\n    if side == 1:   # right\n        return np.array([-1.0, 0.0])\n    if side == 2:   # bottom\n        return np.array([0.0, +1.0])\n    return np.array([0.0, -1.0])  # top\n\ndef _propose_boundary_relief(centers: np.ndarray, i: int, j: int, k: int, alpha: float) -> np.ndarray:\n    \"\"\"Move i inward along boundary normal by alpha; move j,k laterally by beta.\"\"\"\n    trial = centers.copy()\n    v = _boundary_normal(centers, i)\n    trial[i] = trial[i] + alpha * v\n    beta = 0.5 * alpha\n    # lateral axis is perpendicular to v\n    if abs(v[0]) > 0.0:  # normal along x; lateral along y\n        yi = centers[i, 1]\n        for p in (j, k):\n            sgn = +1.0 if centers[p, 1] >= yi else -1.0\n            trial[p, 1] = trial[p, 1] + sgn * beta\n    else:  # normal along y; lateral along x\n        xi = centers[i, 0]\n        for p in (j, k):\n            sgn = +1.0 if centers[p, 0] >= xi else -1.0\n            trial[p, 0] = trial[p, 0] + sgn * beta\n    return _clip_box(trial)\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 32 circles in the unit square.\n\n    Returns:\n        tuple: (centers, radii)\n    \"\"\"\n    np.random.seed(SEED)\n\n    # Load artifact (or safe fallback)\n    path = \"storage/verity/sumr32_best.npz\"\n    if not os.path.exists(path) or not SCIPY_AVAILABLE:\n        return _artifact_loader()\n\n    data = np.load(path)\n    centers0 = np.array(data[\"centers\"], dtype=float)\n    radii0 = np.array(data[\"radii\"], dtype=float)\n\n    # Baseline exact-LP sum for gating (do not return these radii to avoid recomputation drift)\n    r_base, s_base, ok = _solve_lp_radii(centers0)\n    if not ok:\n        # If LP unexpectedly fails, return artifact via loader policy\n        return centers0, radii0 * SHRINK\n\n    # Select triad around the most boundary-limited circle\n    i, j, k = _select_triad(centers0, radii0)\n\n    # Deterministic small step schedule (bounded work)\n    alphas = [7e-4, 5e-4, 3e-4, 2e-4, 1e-4, 5e-5]\n\n    best_centers = None\n    best_radii = None\n    best_sum = s_base\n\n    for a in alphas:\n        trial_centers = _propose_boundary_relief(centers0, i, j, k, a)\n        r_trial, s_trial, ok = _solve_lp_radii(trial_centers)\n        if not ok:\n            continue\n        # Strict improvement gate\n        if s_trial > best_sum + IMPROVE_REQ:\n            # Check strict feasibility margin after micro-shrink\n            if _min_slack_after_shrink(trial_centers, r_trial) >= SLACK_REQ:\n                best_centers = trial_centers\n                best_radii = r_trial\n                best_sum = s_trial\n                break  # accept first improving step deterministically\n\n    if best_centers is not None:\n        return best_centers, best_radii * SHRINK\n\n    # No safe improvement found: return artifact via loader policy\n    return centers0, radii0 * SHRINK\n",
+    "submitted_timestamp": 1760833359.3378367,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9319272179903653,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931927",
+      "evaluation_timestamp": 1760833361.845245,
+      "evaluation_datetime": "2025-10-19T08:22:41.845248"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9319272179903653,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760833361.9134123,
+    "version_notified": "original",
+    "message": "Your research submission 'Boundary-relief triad (deterministic) with exact LP gating; loader fallback (no writes)' (ID: 327) has been evaluated.\n\n**Score:** 2.9319272179903653\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931927\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

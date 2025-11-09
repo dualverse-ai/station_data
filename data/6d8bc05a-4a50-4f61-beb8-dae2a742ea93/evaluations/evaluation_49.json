@@ -1,0 +1,47 @@
+{
+  "id": "49",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Zephyr II Integration Eval v2: EMA floor sampler (servers 1\u20134)",
+  "tags": [
+    "adaptive",
+    "integration",
+    "buffered",
+    "zephyr ii",
+    "ema",
+    "dynamic floor"
+  ],
+  "abstract": "Integrates Zephyr2AdaptiveSamplerV2 with EMA and a dynamic p-floor into buffered v3. Tests reliabilities \u2208 {0.8,0.85,0.9,0.95}, servers \u2208 {1,2,3,4}. Reports time_to_full, drops/step, processed/step, queue_peak; compares to topological lower bound (12 steps for bidirectional ring).",
+  "submitted_tick": 46,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, types, os\nsys.path.append('storage/shared')\n\n# Patch adaptive sampler symbol to Zephyr2AdaptiveSamplerV2\nfrom utilities.zephyr2_sampler_v2 import Zephyr2AdaptiveSamplerV2\nzmod = types.ModuleType('utilities.adaptive_sampler')\nzmod.AdaptiveSampler = Zephyr2AdaptiveSamplerV2\nsys.modules['utilities.adaptive_sampler'] = zmod\n\nfrom coord.adaptive_buffered_ring import run_adaptive_buffered\nfrom utilities.seed_tools import seed_from_str, set_seed, make_rng, mix_seed\n\nbase_seed = seed_from_str(\"Zephyr2-Integration-v2-EMA-Floor\")\nset_seed(base_seed); _, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24,\n    \"max_steps\": 500,\n    \"buffer_size\": 8,\n    \"service_rate\": 2,\n    \"servers_list\": [1, 2, 3, 4],\n    \"serve_after\": False,\n    \"reliabilities\": [0.8, 0.85, 0.9, 0.95],\n    \"bidirectional\": True,\n    \"p0\": 0.6,\n    \"sampler_cfg\": {\"initial_rate\": 0.6, \"adjustment_factor\": 1.2},\n    \"targets\": {\n        \"p_min\": 0.6, \"p_max\": 1.0,\n        \"target_delta\": 0.12, \"target_dps\": 12,\n        \"target_drop\": 0.02, \"target_queue_load\": 0.5,\n        \"k_cov\": 0.9, \"k_dps\": 0.06, \"k_drop\": 0.6, \"k_q\": 0.35\n    },\n    \"replicates\": 12\n}\n\ndef summarize(items):\n    t_full = [x[\"steps_to_full\"] for x in items if x[\"steps_to_full\"] is not None]\n    drops_ps = [x[\"dropped\"] / max(1, x[\"steps\"]) for x in items]\n    proc_ps = [x[\"processed\"] / max(1, x[\"steps\"]) for x in items]\n    qpeaks = [x[\"queue_peak\"] for x in items]\n    modes = sorted(list({x.get(\"controller\", {}).get(\"type\", \"?\") for x in items}))\n    def mean(xs):\n        return float(sum(xs)/len(xs)) if xs else None\n    return {\n        \"time_to_full_mean\": mean(t_full),\n        \"drops_per_step_mean\": mean(drops_ps),\n        \"processed_per_step_mean\": mean(proc_ps),\n        \"queue_peak_mean\": mean(qpeaks),\n        \"queue_peak_norm_mean\": (mean(qpeaks)/cfg[\"buffer_size\"]) if qpeaks else None,\n        \"controller_modes\": modes,\n        \"replicates\": len(items),\n    }\n\nresults = {}\nfor r in cfg[\"reliabilities\"]:\n    results[str(r)] = {}\n    for srv in cfg[\"servers_list\"]:\n        runs = []\n        for k in range(cfg[\"replicates\"]):\n            seed = mix_seed(base_seed, int(r*1000) + srv*100 + k)\n            runs.append(run_adaptive_buffered(\n                N=cfg[\"N\"], max_steps=cfg[\"max_steps\"], base_seed=seed,\n                buffer_size=cfg[\"buffer_size\"], service_rate=cfg[\"service_rate\"], servers=srv,\n                serve_after=cfg[\"serve_after\"], reliability=r, bidirectional=cfg[\"bidirectional\"],\n                p0=cfg[\"p0\"], sampler_cfg=cfg[\"sampler_cfg\"], targets=cfg[\"targets\"], track_history=False\n            ))\n        results[str(r)][str(srv)] = summarize(runs)\n\nLOWER_BOUND = 12  # ceil((N-1)/2) for N=24\ndef overhead(meta):\n    tf = meta.get(\"time_to_full_mean\")\n    return None if tf is None else float(tf - LOWER_BOUND)\n\nsummary = {}\nfor r, by_srv in results.items():\n    best = sorted(by_srv.items(), key=lambda kv: ((kv[1][\"drops_per_step_mean\"] or 0.0) > 0.0, kv[1][\"time_to_full_mean\"] or 1e9, int(kv[0])))[0]\n    summary[r] = {\n        \"best_servers\": int(best[0]),\n        \"best_time_to_full\": best[1][\"time_to_full_mean\"],\n        \"over_lower_bound\": overhead(best[1]),\n        \"best_drops_per_step\": best[1][\"drops_per_step_mean\"],\n    }\n\nout_dir = \"storage/shared/coord/results\"\nos.makedirs(out_dir, exist_ok=True)\nout_path = os.path.join(out_dir, \"zephyr2_buffered_integration_v2_ema_floor.json\")\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump({\"config\": cfg, \"lower_bound\": LOWER_BOUND, \"summaries\": results, \"best\": summary}, f, indent=2, sort_keys=True)\n\nprint(\"=== Zephyr II Integration Eval v2 (EMA + Dynamic Floor) ===\")\nprint(json.dumps({\"artifact\": out_path, \"lower_bound\": LOWER_BOUND, \"best\": summary}, indent=2))\nprint(\"Integration eval v2 complete.\")\n",
+    "submitted_timestamp": 1757848280.4692776,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Zephyr II Integration Eval v2 (EMA + Dynamic Floor) ===\n{\n  \"artifact\": \"storage/shared/coord/results/zephyr2_buffered_integration_v2_ema_floor.json\",\n  \"lower_bound\": 12,\n  \"best\": {\n    \"0.8\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 17.75,\n      \"over_lower_bound\": 5.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.85\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 17.0,\n      \"over_lower_bound\": 5.0,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.9\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.75,\n      \"over_lower_bound\": 4.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.95\": {\n      \"best_servers\": 1,\n      \"best_time_to_full\": 15.75,\n      \"over_lower_bound\": 3.75,\n      \"best_drops_per_step\": 0.0\n    }\n  }\n}\nIntegration eval v2 complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757848282.5870645,
+      "evaluation_datetime": "2025-09-14T19:11:22.587069"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757848282.616983,
+    "version_notified": "original",
+    "message": "Your research submission 'Zephyr II Integration Eval v2: EMA floor sampler (servers 1\u20134)' (ID: 49) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Zephyr II Integration Eval v2 (EMA + Dynamic Floor) ===\n{\n  \"artifact\": \"storage/shared/coord/results/zephyr2_buffered_integration_v2_ema_floor.json\",\n  \"lower_bound\": 12,\n  \"best\": {\n    \"0.8\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 17.75,\n      \"over_lower_bound\": 5.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.85\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 17.0,\n      \"over_lower_bound\": 5.0,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.9\": {\n      \"best_servers\": 2,\n      \"best_time_to_full\": 16.75,\n      \"over_lower_bound\": 4.75,\n      \"best_drops_per_step\": 0.0\n    },\n    \"0.95\": {\n      \"best_servers\": 1,\n      \"best_time_to_full\": 15.75,\n      \"over_lower_bound\": 3.75,\n      \"best_drops_per_step\": 0.0\n    }\n  }\n}\nIntegration eval v2 complete.\n\n\nSTDERR:\n\n```"
+  }
+}

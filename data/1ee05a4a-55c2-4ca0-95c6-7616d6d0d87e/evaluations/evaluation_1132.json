@@ -1,0 +1,47 @@
+{
+  "id": "1132",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN predictive fit v1: hinge-optimized critical tail (no emergence)",
+  "tags": [
+    "ven",
+    "predictive",
+    "piecewise",
+    "hinge",
+    "tail-mass",
+    "regularization"
+  ],
+  "abstract": "Optimize critical tail c via grid search (0.45\u20130.65) for the piecewise model: tail<c: r\u22481\u2212k1*tail; tail\u2265c: r\u22480.2+k3*tail. Enforce k1,k3\u22650; L2 \u03bb=0.01. Report per-dist and overall c*, k1, k3, RMSE, R2, and predicted-vs-observed plots.",
+  "submitted_tick": 572,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, numpy as np\nimport matplotlib.pyplot as plt\n\nCV_CSV = 'storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv'\nOUT_DIR = 'storage/shared/agents/kairos/VEN/predictive'\nos.makedirs(OUT_DIR, exist_ok=True)\n\nL2 = 0.01\n\ndef load_points(dists=None):\n    rows = []\n    with open(CV_CSV, 'r', encoding='utf-8') as f:\n        rd = csv.DictReader(f)\n        for r in rd:\n            d = r['dist']\n            if dists is not None and d not in dists:\n                continue\n            try:\n                rows.append({\n                    'dist': d,\n                    'n': int(r['n']),\n                    'seed': int(r['seed']),\n                    'tail': float(r['tail_mass_r1']),\n                    'r': float(r['best_r']),\n                })\n            except Exception:\n                pass\n    return rows\n\ndef fit_k1(A):\n    # r \u2248 1 \u2212 k1*tail\n    if len(A) == 0: return 0.0\n    t = np.array([p['tail'] for p in A], dtype=float)\n    r = np.array([p['r'] for p in A], dtype=float)\n    num = np.sum(t * (1.0 - r))\n    den = np.sum(t**2) + L2\n    k1 = num / den if den > 0 else 0.0\n    return float(max(0.0, k1))\n\ndef fit_k3(B):\n    # r \u2248 0.2 + k3*tail\n    if len(B) == 0: return 0.0\n    t = np.array([p['tail'] for p in B], dtype=float)\n    r = np.array([p['r'] for p in B], dtype=float)\n    num = np.sum(t * (r - 0.2))\n    den = np.sum(t**2) + L2\n    k3 = num / den if den > 0 else 0.0\n    return float(max(0.0, k3))\n\ndef predict(tail, c, k1, k3):\n    return (1.0 - k1 * tail) if (tail < c) else (0.2 + k3 * tail)\n\ndef evaluate(points, c, k1, k3):\n    y = np.array([p['r'] for p in points], dtype=float)\n    yhat = np.array([predict(p['tail'], c, k1, k3) for p in points], dtype=float)\n    resid = y - yhat\n    mse = float(np.mean(resid**2)) if len(resid) > 0 else None\n    rmse = float(np.sqrt(mse)) if mse is not None else None\n    if len(y) > 1:\n        ss_tot = float(np.sum((y - y.mean())**2))\n        ss_res = float(np.sum((y - yhat)**2))\n        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None\n    else:\n        r2 = None\n    return rmse, r2, y, yhat\n\ndef grid_search(points, c_grid):\n    best = {'rmse': float('inf')}\n    for c in c_grid:\n        A = [p for p in points if p['tail'] < c]\n        B = [p for p in points if p['tail'] >= c]\n        k1 = fit_k1(A)\n        k3 = fit_k3(B)\n        rmse, r2, y, yhat = evaluate(points, c, k1, k3)\n        if rmse is not None and rmse < best['rmse']:\n            best.update({'c': float(c), 'k1': k1, 'k3': k3, 'rmse': rmse, 'r2': r2, 'y': y, 'yhat': yhat})\n    return best\n\ndef scatter_pred(y, yhat, title, out_path):\n    if y is None or yhat is None or len(y) == 0: return\n    import matplotlib.pyplot as plt\n    plt.figure(figsize=(5.0, 4.0))\n    plt.scatter(y, yhat, c='tab:blue', alpha=0.7, edgecolor='k', linewidths=0.3)\n    lims = [min(y.min(), yhat.min()), max(y.max(), yhat.max())]\n    plt.plot(lims, lims, 'k--', alpha=0.7)\n    plt.xlabel('observed optimal_r'); plt.ylabel('predicted optimal_r')\n    plt.title(title)\n    plt.tight_layout(); plt.savefig(out_path, dpi=120, bbox_inches='tight'); plt.close()\n\n# Load data\nall_rows = load_points(dists=None)\ndists = sorted(set([r['dist'] for r in all_rows]))\nc_grid = np.linspace(0.45, 0.65, 21)  # test ~0.55 \u00b10.10\n\n# Fit per dist and overall\nsummary_lines = []\nfor d in dists:\n    rows = [r for r in all_rows if r['dist'] == d]\n    best = grid_search(rows, c_grid)\n    rep = os.path.join(OUT_DIR, f'predictive_fit_v1_{d}.txt')\n    with open(rep, 'w', encoding='utf-8') as f:\n        f.write(f\"Predictive fit v1 (hinge-optimized c, no emergence), dist={d}\\n\")\n        f.write(f\"L2={L2}\\n\")\n        f.write(f\"c*={best.get('c')}, k1={best.get('k1')}, k3={best.get('k3')}\\n\")\n        f.write(f\"RMSE={best.get('rmse')}, R2={best.get('r2')}\\n\")\n    png = os.path.join(OUT_DIR, f'predictive_fit_v1_scatter_{d}.png')\n    scatter_pred(best.get('y'), best.get('yhat'), f'Predictive Fit v1 \u2014 {d}', png)\n    summary_lines.append(f\"- {d}: c*={best.get('c')}, k1={best.get('k1')}, k3={best.get('k3')}, RMSE={best.get('rmse')}, R2={best.get('r2')} | files: {rep}, {png}\")\n\n# overall\nbest_all = grid_search(all_rows, c_grid)\nrep_all = os.path.join(OUT_DIR, f'predictive_fit_v1_all.txt')\nwith open(rep_all, 'w', encoding='utf-8') as f:\n    f.write(f\"Predictive fit v1 (hinge-optimized c, no emergence), dist=all\\n\")\n    f.write(f\"L2={L2}\\n\")\n    f.write(f\"c*={best_all.get('c')}, k1={best_all.get('k1')}, k3={best_all.get('k3')}\\n\")\n    f.write(f\"RMSE={best_all.get('rmse')}, R2={best_all.get('r2')}\\n\")\npng_all = os.path.join(OUT_DIR, f'predictive_fit_v1_scatter_all.png')\nscatter_pred(best_all.get('y'), best_all.get('yhat'), f'Predictive Fit v1 \u2014 all', png_all)\n\n# Write combined summary\nsum_path = os.path.join(OUT_DIR, 'predictive_fit_v1_summary.txt')\nwith open(sum_path, 'w', encoding='utf-8') as f:\n    f.write(\"Predictive fit v1 (hinge-optimized c, no emergence)\\n\")\n    f.write(f\"c_grid=linspace(0.45,0.65,21), L2={L2}\\n\\n\")\n    for line in summary_lines:\n        f.write(line + \"\\n\")\n    f.write(f\"- overall: c*={best_all.get('c')}, k1={best_all.get('k1')}, k3={best_all.get('k3')}, RMSE={best_all.get('rmse')}, R2={best_all.get('r2')} | files: {rep_all}, {png_all}\\n\")\n\nprint(f\"[artifacts] {sum_path} | per-dist/overall reports and scatters under {OUT_DIR}\")\n",
+    "submitted_timestamp": 1761294219.6515028,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/predictive/predictive_fit_v1_summary.txt | per-dist/overall reports and scatters under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761294222.5829945,
+      "evaluation_datetime": "2025-10-24T16:23:42.582999"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761294222.6204772,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN predictive fit v1: hinge-optimized critical tail (no emergence)' (ID: 1132) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] storage/shared/agents/kairos/VEN/predictive/predictive_fit_v1_summary.txt | per-dist/overall reports and scatters under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n\n```"
+  }
+}

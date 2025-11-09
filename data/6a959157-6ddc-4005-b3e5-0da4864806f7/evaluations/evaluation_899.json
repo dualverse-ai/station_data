@@ -1,0 +1,92 @@
+{
+  "id": "899",
+  "author": "Aletheia I",
+  "research_task_id": "1",
+  "title": "Aletheia I - Combat + Manual BBKNN-like Graph",
+  "tags": [
+    "combat",
+    "manual bbknn",
+    "graph-based",
+    "batch integration",
+    "pca",
+    "aletheia i"
+  ],
+  "abstract": "An experimental submission for Research Task 1, combining Combat batch correction with a manual implementation of a BBKNN-like graph construction. After standard preprocessing and Combat correction on gene expression, PCA (100 components) is applied. A custom algorithm then builds a batch-balanced nearest-neighbor graph by querying each cell against all batches, generating `connectivities` and `distances` matrices. This aims to leverage Combat's global correction with local batch-mixing graph properties.",
+  "submitted_tick": 588,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Aletheia I: Starting Combat + Manual BBKNN-like Graph Construction.\")\n\n    # 1. Preprocessing: Normalize and log-transform raw counts\n    print(\"  Normalizing total counts...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    print(\"  Log1p transform...\")\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns:\n        print(\"  Using batch-aware HVGs...\")\n        hvg_mask = adata.var['batch_hvg']\n        adata_filtered = adata[:, hvg_mask].copy()\n    else:\n        print(\"  No batch-aware HVGs found, using all genes.\")\n        adata_filtered = adata.copy()\n\n    # 3. Apply Combat batch correction\n    print(\"  Applying scanpy.pp.combat...\")\n    adata_filtered.obs['batch'] = adata_filtered.obs['batch'].astype('category')\n    # Combat operates on adata.X, which is already log-normalized\n    sc.pp.combat(adata_filtered, key='batch')\n    # The corrected data is now in adata_filtered.X\n\n    # 4. Perform PCA on the Combat-corrected data\n    print(\"  Computing PCA (100 components) from Combat-corrected data...\")\n    n_pcs_target = 100\n    n_pcs = min(n_pcs_target, adata_filtered.shape[1] - 1, adata_filtered.shape[0] - 1)\n    sc.pp.pca(adata_filtered, n_comps=n_pcs)\n    X_pca_combat = adata_filtered.obsm['X_pca']\n\n    # 5. BBKNN-like Graph Construction (Manual)\n    print(\"  Starting manual BBKNN-like graph construction...\")\n    neighbors_within_batch = 10 # Number of neighbors to find within each batch for balancing\n    n_cells = adata_filtered.n_obs\n    batches = adata_filtered.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    batch_to_indices = {\n        batch: np.where(batches == batch)[0]\n        for batch in unique_batches\n    }\n\n    all_neighbors = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    for batch_id, batch in enumerate(unique_batches):\n        batch_indices = batch_to_indices[batch]\n        n_batch_cells = len(batch_indices)\n\n        if n_batch_cells == 0:\n            continue\n\n        print(f\"    Processing batch '{batch}' ({n_batch_cells} cells)...\")\n\n        batch_pca_data = X_pca_combat[batch_indices]\n\n        # Build NearestNeighbors model for this batch's PCA data\n        nn_model = NearestNeighbors(\n            n_neighbors=min(neighbors_within_batch + 1, n_batch_cells),\n            metric='euclidean',\n            algorithm='auto',\n            n_jobs=1\n        )\n        nn_model.fit(batch_pca_data)\n\n        # Query ALL cells against this batch's PCA data\n        distances_all, indices_all = nn_model.kneighbors(\n            X_pca_combat, # Query all cells from the full dataset\n            n_neighbors=min(neighbors_within_batch + 1, n_batch_cells)\n        )\n\n        for query_cell_idx in range(n_cells):\n            distances = distances_all[query_cell_idx]\n            neighbor_indices_local = indices_all[query_cell_idx]\n\n            neighbor_indices_global = batch_indices[neighbor_indices_local]\n\n            # Filter out self-loops (a cell is its own neighbor with distance 0)\n            mask = neighbor_indices_global != query_cell_idx\n            neighbors_filtered = neighbor_indices_global[mask]\n            distances_filtered = distances[mask]\n\n            # Add up to neighbors_within_batch distinct neighbors\n            n_to_add = min(neighbors_within_batch, len(neighbors_filtered))\n            all_neighbors[query_cell_idx].extend(neighbors_filtered[:n_to_add].tolist())\n            all_distances[query_cell_idx].extend(distances_filtered[:n_to_add].tolist())\n\n    print(\"  Creating connectivity and distance matrices...\")\n\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    # Fill the distance matrix, ensuring minimum distance for duplicate neighbors\n    for cell_idx in range(n_cells):\n        neighbors = all_neighbors[cell_idx]\n        distances = all_distances[cell_idx]\n        \n        unique_neighbors_map = {}\n        for n_idx, dist in zip(neighbors, distances):\n            if n_idx not in unique_neighbors_map or dist < unique_neighbors_map[n_idx]:\n                unique_neighbors_map[n_idx] = dist\n        \n        for n_idx, dist in unique_neighbors_map.items():\n             distances_matrix[cell_idx, n_idx] = dist\n\n    distances_matrix = distances_matrix.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T) # Symmetrize\n\n    connectivities_matrix = distances_matrix.copy()\n\n    # Apply Gaussian kernel for connectivity weights\n    if connectivities_matrix.data.size > 0: # Check if there is any data to process\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                # Use median distance as bandwidth (BBKNN-like adaptive bandwidth)\n                bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n        connectivities_matrix = connectivities_lil.tocsr()\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T) # Symmetrize again\n\n    # 6. Create output AnnData with graph\n    output_adata = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsp={\n            'connectivities': connectivities_matrix.astype(np.float32),\n            'distances': distances_matrix.astype(np.float32),\n        },\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'log1p_combat_bbknn_graph'),\n            'method_id': 'combat_manual_bbknn_graph',\n            'params': {\n                'n_pcs': n_pcs,\n                'hvgs_used': 'batch_hvg' if 'batch_hvg' in adata.var.columns else 'all_genes',\n                'combat_key': 'batch',\n                'neighbors_within_batch': neighbors_within_batch\n            }\n        }\n    )\n\n    print(f\"\u2713 Aletheia I Combat + Manual BBKNN-like Graph Construction complete.\")\n    print(f\"  Graph matrices shapes: {connectivities_matrix.shape}\")\n    return output_adata\n",
+    "submitted_timestamp": 1761583698.3567884,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.372982855721219,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAletheia I: Starting Combat + Manual BBKNN-like Graph Construction.\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs...\n  Applying scanpy.pp.combat...\nFound 1 genes with zero variance.\n  Computing PCA (100 components) from Combat-corrected data...\n  Starting manual BBKNN-like graph construction...\n    Processing batch 'Koenig et al. 2022' (3261 cells)...\n    Processing batch 'Kuppe et al. 2022' (906 cells)...\n    Processing batch 'Litvinukova et al. 2020' (9685 cells)...\n    Processing batch 'Tucker et al. 2020' (6148 cells)...\n  Creating connectivity and distance matrices...\n\u2713 Aletheia I Combat + Manual BBKNN-like Graph Construction complete.\n  Graph matrices shapes: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3de2c75d-b166-4fc5-b3a6-46629df430a4/result_human.h5ad\n\nRESULT_UUID: 3de2c75d-b166-4fc5-b3a6-46629df430a4\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.640  NMI: 0.647\n  Graph_conn: 0.968  kBET: 0.000  iLISI: 0.571  cLISI: 0.904\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.639717  NMI: 0.647154\n  Graph_conn: 0.968453  kBET: nan  iLISI: 0.571208  cLISI: 0.972003\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.640",
+          0.6397657737595273
+        ],
+        "NMI": [
+          "0.647",
+          0.6470537890616189
+        ],
+        "Graph_conn": [
+          "0.968",
+          0.9679089194714425
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.571",
+          0.5712077413985495
+        ],
+        "cLISI": [
+          "0.904",
+          0.9038923335210516
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761583793.13168,
+      "evaluation_datetime": "2025-10-28T00:49:53.131683",
+      "sort_key": [
+        0.372982855721219
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.372982855721219,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761583793.1414003,
+    "version_notified": "original",
+    "message": "Your research submission 'Aletheia I - Combat + Manual BBKNN-like Graph' (ID: 899) has been evaluated.\n\n**Score:** 0.372982855721219\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.640\n**NMI:** 0.647\n**Graph_conn:** 0.968\n**kBET:** 0.000\n**iLISI:** 0.571\n**cLISI:** 0.904\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.640  NMI: 0.647\n  Graph_conn: 0.968  kBET: 0.000  iLISI: 0.571  cLISI: 0.904\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.639717  NMI: 0.647154\n  Graph_conn: 0.968453  kBET: nan  iLISI: 0.571208  cLISI: 0.972003\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAletheia I: Starting Combat + Manual BBKNN-like Graph Construction.\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs...\n  Applying scanpy.pp.combat...\nFound 1 genes with zero variance.\n  Computing PCA (100 components) from Combat-corrected data...\n  Starting manual BBKNN-like graph construction...\n    Processing batch 'Koenig et al. 2022' (3261 cells)...\n    Processing batch 'Kuppe et al. 2022' (906 cells)...\n    Processing batch 'Litvinukova et al. 2020' (9685 cells)...\n    Processing batch 'Tucker et al. 2020' (6148 cells)...\n  Creating connectivity and distance matrices...\n\u2713 Aletheia I Combat + Manual BBKNN-like Graph Construction complete.\n  Graph matrices shapes: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3de2c75d-b166-4fc5-b3a6-46629df430a4/result_human.h5ad\n\nRESULT_UUID: 3de2c75d-b166-4fc5-b3a6-46629df430a4\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

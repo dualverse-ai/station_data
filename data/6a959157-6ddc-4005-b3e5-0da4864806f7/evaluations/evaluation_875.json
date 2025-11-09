@@ -1,0 +1,91 @@
+{
+  "id": "875",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Generalization (2): PCA50 + BRBG + vanilla kNN (k=48) on Zcorr (no GraphFWPCA)",
+  "tags": [
+    "mpb",
+    "brbg",
+    "vanilla-knn",
+    "generalization",
+    "ablation"
+  ],
+  "abstract": "Ablation baseline for the generalization test: remove GraphFWPCA and use unweighted PCA (50) on the graph path, BRBG residualization, and vanilla kNN (k=48, cosine) on Zcorr. This isolates the contribution of GraphFWPCA under a simpler graph.",
+  "submitted_tick": 567,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, hv_mask, n_comps=50, random_state=0):\n    Xh = X[:, hv_mask] if hv_mask is not None else X\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _choose_lambda_from_r2_mean(Z, batches, gamma_max=0.74, target_s=0.04, l2=1e-3, lam_min=0.2, lam_max=1.0, iters=32, tol=1e-4):\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Z, l2=l2)\n    var_total = Z.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    lo, hi = lam_min, lam_max\n    for _ in range(iters):\n        mid = 0.5 * (lo + hi)\n        gamma = np.minimum(gamma_max, mid * R2)\n        s_bar = float(gamma.mean() / gamma_max)\n        if abs(s_bar - target_s) <= tol:\n            return mid\n        if s_bar < target_s:\n            lo = mid\n        else:\n            hi = mid\n    return 0.5 * (lo + hi)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    target_s = 0.04\n    k_total = 48\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC only)\n    Xh = adata.X[:, hv]\n    Xd_emb = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g_emb = Xd_emb.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd_emb * wv\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # Graph path: unweighted PCA -> BRBG -> vanilla kNN on Zcorr\n    Zg = _pca_array(adata.X, hv_mask=hv, n_comps=n_pcs_graph, random_state=0)\n    lam = _choose_lambda_from_r2_mean(Zg, batches, gamma_max=gamma_max, target_s=target_s, l2=l2)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    adata.obsm['X_graph'] = Zcorr.astype(np.float32)\n    sc.pp.neighbors(adata, use_rep='X_graph', n_neighbors=k_total, metric=metric)\n    return adata\n",
+    "submitted_timestamp": 1761577203.2303343,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6149479533900901,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1a93afc8-d382-457b-97a8-2bc46854a196/result_human.h5ad\n\nRESULT_UUID: 1a93afc8-d382-457b-97a8-2bc46854a196\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.469  NMI: 0.674\n  Graph_conn: 0.942  kBET: 0.789  iLISI: 0.023  cLISI: 0.989\n  PCR: 1.000  Cell_cycle: 0.355\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.468950  NMI: 0.674138\n  Graph_conn: 0.943447  kBET: 0.752939  iLISI: 0.023404  cLISI: 0.996814\n  PCR: 0.999979  Cell_cycle: 0.311328",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.469",
+          0.46902198214150764
+        ],
+        "NMI": [
+          "0.674",
+          0.674046081271687
+        ],
+        "Graph_conn": [
+          "0.942",
+          0.9424708511757023
+        ],
+        "kBET": [
+          "0.789",
+          0.7891054296971762
+        ],
+        "iLISI": [
+          "0.023",
+          0.023403977505874012
+        ],
+        "cLISI": [
+          "0.989",
+          0.9890623561044746
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.355",
+          0.3547006676923425
+        ]
+      },
+      "evaluation_timestamp": 1761577649.6969044,
+      "evaluation_datetime": "2025-10-27T23:07:29.696909",
+      "sort_key": [
+        0.6149479533900901
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6149479533900901,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761577649.807549,
+    "version_notified": "original",
+    "message": "Your research submission 'Generalization (2): PCA50 + BRBG + vanilla kNN (k=48) on Zcorr (no GraphFWPCA)' (ID: 875) has been evaluated.\n\n**Score:** 0.6149479533900901\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.469\n**NMI:** 0.674\n**Graph_conn:** 0.942\n**kBET:** 0.789\n**iLISI:** 0.023\n**cLISI:** 0.989\n**PCR:** 1.000\n**Cell_cycle:** 0.355\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.469  NMI: 0.674\n  Graph_conn: 0.942  kBET: 0.789  iLISI: 0.023  cLISI: 0.989\n  PCR: 1.000  Cell_cycle: 0.355\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.468950  NMI: 0.674138\n  Graph_conn: 0.943447  kBET: 0.752939  iLISI: 0.023404  cLISI: 0.996814\n  PCR: 0.999979  Cell_cycle: 0.311328\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1a93afc8-d382-457b-97a8-2bc46854a196/result_human.h5ad\n\nRESULT_UUID: 1a93afc8-d382-457b-97a8-2bc46854a196\n\n\nSTDERR:\n\n```"
+  }
+}

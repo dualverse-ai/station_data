@@ -1,0 +1,91 @@
+{
+  "id": "451",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "EtC-BRBG-CCR: n_clusters=96, gamma_max=0.6 (k=48)",
+  "tags": [
+    "embed-then-correct",
+    "residualization",
+    "clustering",
+    "balanced-knn",
+    "brbg"
+  ],
+  "abstract": "CCR ablation 3: finer clustering (96) with gamma_max=0.6. Embed: PCA(60) \u2192 ComBat on PCs. Graph: PCA(50) \u2192 cluster-conditional residualization vs batch \u2192 equal-quota kNN (k=48, cosine).",
+  "submitted_tick": 263,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom praxis.graph_ccr import build_ccr_graph\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    n_clusters = 96\n    l2 = 1e-3\n    gamma_max = 0.6\n    lam_r2 = 0.9\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding: PCA(60) \u2192 ComBat on PC scores\n    ad_emb = adata.copy(); ad_emb.var['highly_variable'] = hv\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # Graph: PCA(50) \u2192 CCR \u2192 balanced kNN\n    Xg = adata.X[:, hv]\n    Zg = _pca_array(Xg, n_comps=n_pcs_graph, random_state=random_state)\n    Zcorr, Cg, Dg = build_ccr_graph(Zg, batches, n_clusters=n_clusters, l2=l2,\n                                    gamma_max=gamma_max, lam_r2=lam_r2,\n                                    k_total=k_total, metric=metric, random_state=random_state)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761477923.6532295,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7231368881016926,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/73fe1ddb-9ff0-4895-8089-5f565b1af185/result_human.h5ad\n\nRESULT_UUID: 73fe1ddb-9ff0-4895-8089-5f565b1af185\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.724  NMI: 0.682\n  Graph_conn: 0.959  kBET: 0.778  iLISI: 0.935  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.289\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.724257  NMI: 0.681864\n  Graph_conn: 0.960176  kBET: 0.742526  iLISI: 0.935143  cLISI: 0.989592\n  PCR: 0.999979  Cell_cycle: 0.255458",
+        "ASW_batch": [
+          "0.681",
+          0.6814125948154346
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545675872816
+        ],
+        "ARI": [
+          "0.724",
+          0.7242940688585089
+        ],
+        "NMI": [
+          "0.682",
+          0.6817737877048908
+        ],
+        "Graph_conn": [
+          "0.959",
+          0.9594883548675959
+        ],
+        "kBET": [
+          "0.778",
+          0.7780252613422636
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844647
+        ],
+        "cLISI": [
+          "0.964",
+          0.9642730332903753
+        ],
+        "PCR": [
+          "1.000",
+          0.9999787488495024
+        ],
+        "Cell_cycle": [
+          "0.289",
+          0.2891042864451628
+        ]
+      },
+      "evaluation_timestamp": 1761478330.544091,
+      "evaluation_datetime": "2025-10-26T19:32:10.544094",
+      "sort_key": [
+        0.7231368881016926
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7231368881016926,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761478330.6461387,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC-BRBG-CCR: n_clusters=96, gamma_max=0.6 (k=48)' (ID: 451) has been evaluated.\n\n**Score:** 0.7231368881016926\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.724\n**NMI:** 0.682\n**Graph_conn:** 0.959\n**kBET:** 0.778\n**iLISI:** 0.935\n**cLISI:** 0.964\n**PCR:** 1.000\n**Cell_cycle:** 0.289\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.724  NMI: 0.682\n  Graph_conn: 0.959  kBET: 0.778  iLISI: 0.935  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.289\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.724257  NMI: 0.681864\n  Graph_conn: 0.960176  kBET: 0.742526  iLISI: 0.935143  cLISI: 0.989592\n  PCR: 0.999979  Cell_cycle: 0.255458\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/73fe1ddb-9ff0-4895-8089-5f565b1af185/result_human.h5ad\n\nRESULT_UUID: 73fe1ddb-9ff0-4895-8089-5f565b1af185\n\n\nSTDERR:\n\n```"
+  }
+}

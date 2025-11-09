@@ -1,0 +1,47 @@
+{
+  "id": "1037",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Physics-Informed Sim with Jittered Start and Stronger Forces",
+  "tags": [
+    "simulation",
+    "physics-based",
+    "hybrid-model",
+    "scipy",
+    "bugfix",
+    "initialization"
+  ],
+  "abstract": "This submission corrects a critical flaw in the first physics-informed model (ID 1035). The previous version failed because starting all circles at a single point created a singularity. This version introduces a small random \"jitter\" to the initial circle positions, breaking the symmetry and allowing the simulation's repulsion forces to work correctly. The simulation time and repulsion strength have also been increased to produce a more stable and dense initial configuration for the final SLSQP refinement stage.",
+  "submitted_tick": 628,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds\nimport time\n\nN_CIRCLES = 26\n\ndef physics_simulation(timesteps=1000, growth_rate=0.0005, k_repulsion=0.5, k_boundary=0.5, dt=0.1):\n    \"\"\"Stage 1: 'Grow and Push' physics simulation with a jittered start.\"\"\"\n    n = N_CIRCLES\n    # Jittered start to break symmetry and prevent singularity\n    centers = np.full((n, 2), 0.5) + np.random.normal(0, 1e-4, size=(n, 2))\n    radii = np.zeros(n)\n\n    for t in range(timesteps):\n        radii += growth_rate\n        forces = np.zeros((n, 2))\n        for i in range(n):\n            for j in range(i + 1, n):\n                vec = centers[i] - centers[j]\n                dist = np.linalg.norm(vec)\n                overlap = radii[i] + radii[j] - dist\n                if overlap > 0:\n                    force_magnitude = k_repulsion * overlap\n                    force_direction = vec / (dist + 1e-9)\n                    forces[i] += force_magnitude * force_direction\n                    forces[j] -= force_magnitude * force_direction\n        \n        for i in range(n):\n            if centers[i, 0] + radii[i] > 1: forces[i, 0] -= k_boundary * (centers[i, 0] + radii[i] - 1)\n            if centers[i, 0] - radii[i] < 0: forces[i, 0] += k_boundary * (-(centers[i, 0] - radii[i]))\n            if centers[i, 1] + radii[i] > 1: forces[i, 1] -= k_boundary * (centers[i, 1] + radii[i] - 1)\n            if centers[i, 1] - radii[i] < 0: forces[i, 1] += k_boundary * (-(centers[i, 1] - radii[i]))\n\n        centers += forces * dt\n    \n    return centers, radii\n\ndef sanitize_packing(centers, radii):\n    \"\"\"Stage 2: Resolve minor violations to create a valid starting point.\"\"\"\n    n = centers.shape[0]\n    centers[:, 0] = np.clip(centers[:, 0], radii, 1 - radii)\n    centers[:, 1] = np.clip(centers[:, 1], radii, 1 - radii)\n\n    for _ in range(20):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                overlap = radii[i] + radii[j] - dist\n                if overlap > 1e-9:\n                    total_r = radii[i] + radii[j]\n                    if total_r > 0:\n                        radii[i] -= overlap * (radii[i] / total_r)\n                        radii[j] -= overlap * (radii[j] / total_r)\n    return centers, radii\n\ndef make_slsqp_constraints(n, epsilon):\n    \"\"\"Helper for Stage 3 SLSQP constraints.\"\"\"\n    constraints = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            def non_overlap(x, i=i, j=j):\n                dist_sq = np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2)\n                return dist_sq - (x[2*n+i] + x[2*n+j])**2 - epsilon\n            constraints.append({'type': 'ineq', 'fun': non_overlap})\n    for i in range(n):\n        def inside(x, i=i, dim=0, sign=-1, wall=0): return wall - (x[2*i+dim] + sign * x[2*n+i]) - epsilon\n        constraints.extend([\n            {'type': 'ineq', 'fun': inside, 'args': (i, 0, -1, 0)}, {'type': 'ineq', 'fun': inside, 'args': (i, 0, 1, 1)},\n            {'type': 'ineq', 'fun': inside, 'args': (i, 1, -1, 0)}, {'type': 'ineq', 'fun': inside, 'args': (i, 1, 1, 1)}\n        ])\n    return constraints\n\ndef construct_packing() -> tuple:\n    n = N_CIRCLES\n    \n    print(\"--- Stage 1: Physics Simulation ---\")\n    sim_centers, sim_radii = physics_simulation()\n    \n    print(\"--- Stage 2: Sanitizing packing ---\")\n    valid_centers, valid_radii = sanitize_packing(sim_centers, sim_radii)\n    x0 = np.concatenate([valid_centers.flatten(), valid_radii])\n    \n    print(\"--- Stage 3: SLSQP Refinement ---\")\n    constraints = make_slsqp_constraints(n, epsilon=1e-7)\n    bounds_list = [(0, 1)] * (2*n) + [(0.001, 0.5)] * n\n    bounds = Bounds([b[0] for b in bounds_list], [b[1] for b in bounds_list])\n    \n    def objective(x):\n        return -np.sum(x[2*n:])\n\n    result = minimize(objective, x0, method='SLSQP', bounds=bounds,\n                      constraints=constraints, options={'maxiter': 300, 'disp': True})\n\n    best_params = result.x\n    centers = best_params[:2*n].reshape(n, 2)\n    radii = best_params[2*n:]\n    \n    print(f\"\\nPhysics-Informed Optimization complete. Final Score: {-result.fun}\")\n    return centers, radii\n",
+    "submitted_timestamp": 1761032920.53868,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.0, r1+r2=0.002",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: Physics Simulation ---\n--- Stage 2: Sanitizing packing ---\n--- Stage 3: SLSQP Refinement ---\nPositive directional derivative for linesearch    (Exit mode 8)\n            Current function value: -0.026000000000000002\n            Iterations: 5\n            Function evaluations: 79\n            Gradient evaluations: 1\n\nPhysics-Informed Optimization complete. Final Score: 0.026000000000000002\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 0 and 1 overlap: dist=0.0, r1+r2=0.002",
+      "evaluation_timestamp": 1761032926.030729,
+      "evaluation_datetime": "2025-10-21T15:48:46.030731"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761032926.06101,
+    "version_notified": "original",
+    "message": "Your research submission 'Physics-Informed Sim with Jittered Start and Stronger Forces' (ID: 1037) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.0, r1+r2=0.002\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: Physics Simulation ---\n--- Stage 2: Sanitizing packing ---\n--- Stage 3: SLSQP Refinement ---\nPositive directional derivative for linesearch    (Exit mode 8)\n            Current function value: -0.026000000000000002\n            Iterations: 5\n            Function evaluations: 79\n            Gradient evaluations: 1\n\nPhysics-Informed Optimization complete. Final Score: 0.026000000000000002\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

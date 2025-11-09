@@ -1,0 +1,45 @@
+{
+  "id": "821",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Paradigm Shift #2: Greedy Heuristic Evolution (GHE) v1",
+  "tags": [
+    "strategic-pivot",
+    "genetic-algorithm",
+    "heuristic-search",
+    "generative-model"
+  ],
+  "abstract": "This submission introduces a new paradigm, Greedy Heuristic Evolution (GHE), following the conclusive failure of all previous evolutionary attempts. The GHE shifts the search from the raw coordinate space to a more abstract 'strategy space'. It evolves the weights of a heuristic function used by a greedy agent to place circles one by one. This constructive approach avoids the massive local optimum that trapped prior population-based methods. This experiment serves as a proof-of-concept to validate the viability of this new generative representation.",
+  "submitted_tick": 523,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nfrom scipy.stats import qmc\nfrom multiprocessing import Pool, cpu_count\nimport random\nimport time\n\nN_CIRCLES = 32\n\n# --- Canonical LP Solver ---\ndef solve_radii_lp_with_duals(centers):\n    if centers is None: return {\"radii\": None, \"score\": -1.0}\n    n = centers.shape[0]; c = -np.ones(n)\n    num_b = 4*n; A_b = np.zeros((num_b, n)); b_b = np.zeros(num_b); eps = 1e-7\n    for i in range(n):\n        A_b[4*i,i]=1; b_b[4*i]=centers[i,0] - eps; A_b[4*i+1,i]=1; b_b[4*i+1]=1-centers[i,0] - eps\n        A_b[4*i+2,i]=1; b_b[4*i+2]=centers[i,1] - eps; A_b[4*i+3,i]=1; b_b[4*i+3]=1-centers[i,1] - eps\n    I, J = np.triu_indices(n, k=1); num_p = len(I); A_p = np.zeros((num_p, n))\n    A_p[np.arange(num_p), I]=1; A_p[np.arange(num_p), J]=1\n    b_p = np.linalg.norm(centers[I] - centers[J], axis=1) - eps\n    res = linprog(c, A_ub=np.vstack([A_b, A_p]), b_ub=np.concatenate([b_b, b_p]), bounds=(0,None), method='highs')\n    return {\"radii\": res.x, \"score\": np.sum(res.x)} if res.success else {\"radii\": None, \"score\": -1.0}\n\n# --- GHE Core Logic ---\ndef get_features_and_max_r(point, placed_centers):\n    px, py = point\n    # Feature 2: Min dist to wall\n    f2 = min(px, 1-px, py, 1-py)\n    \n    if not placed_centers:\n        # Feature 1: Max radius (is just min dist to wall)\n        f1 = f2\n        # Other features are neutral\n        f3 = 1.0; f4 = 1.0\n        return f1, [f1, f2, f3, f4]\n\n    placed_centers_np = np.array(placed_centers)\n    dists = np.linalg.norm(placed_centers_np - point, axis=1)\n    \n    # Feature 1: Max radius\n    f1 = min(f2, np.min(dists))\n    # Feature 3: Min dist to another center\n    f3 = np.min(dists)\n    # Feature 4: Avg dist to 2 nearest neighbors\n    dists.sort()\n    f4 = np.mean(dists[:2]) if len(dists) >= 2 else f3\n    \n    return f1, [f1, f2, f3, f4]\n\ndef greedy_placement(weights, num_candidates=2048):\n    placed_centers = []\n    sampler = qmc.Sobol(d=2, scramble=True)\n    \n    for _ in range(N_CIRCLES):\n        candidate_points = sampler.random(n=num_candidates)\n        best_score = -np.inf\n        best_point = None\n        \n        for p in candidate_points:\n            _, features = get_features_and_max_r(p, placed_centers)\n            score = np.dot(weights, features)\n            if score > best_score:\n                best_score = score\n                best_point = p\n        \n        placed_centers.append(best_point)\n    return np.array(placed_centers)\n\n# --- Worker for GA Evaluation ---\ndef evaluate_genotype(weights):\n    centers = greedy_placement(weights)\n    score = solve_radii_lp_with_duals(centers)['score']\n    return score, weights\n\n# --- Main GA Function ---\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    # --- GA Parameters ---\n    POP_SIZE = 64\n    NUM_FEATURES = 4\n    MUTATION_STRENGTH = 0.1\n    N_PARENTS = 20\n    \n    # --- Initialization ---\n    rng = np.random.default_rng()\n    population = [(0.0, rng.uniform(-1, 1, NUM_FEATURES)) for _ in range(POP_SIZE)]\n\n    with Pool(cpu_count()) as pool:\n        while time.time() - start_time < 1180:\n            # --- Evaluation ---\n            population = pool.map(evaluate_genotype, [w for s, w in population])\n            population.sort(key=lambda x: x[0], reverse=True)\n            \n            # --- Selection ---\n            parents = population[:N_PARENTS]\n            \n            # --- Crossover and Mutation ---\n            offspring_weights = []\n            for _ in range(POP_SIZE - N_PARENTS):\n                p1_w, p2_w = random.sample(parents, 2)[0][1], random.sample(parents, 2)[1][1]\n                # Blend crossover\n                alpha = rng.random()\n                child_w = alpha * p1_w + (1-alpha) * p2_w\n                # Mutation\n                child_w += rng.normal(0, MUTATION_STRENGTH, NUM_FEATURES)\n                offspring_weights.append(child_w)\n\n            # Create new population for next generation\n            population = parents + [(0.0, w) for w in offspring_weights]\n\n    best_score, best_weights = population[0]\n    final_centers = greedy_placement(best_weights)\n    final_radii = solve_radii_lp_with_duals(final_centers)['radii']\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760967724.9207118,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.3226268299040624,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.322627",
+      "evaluation_timestamp": 1760968930.592588,
+      "evaluation_datetime": "2025-10-20T22:02:10.592591"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.3226268299040624,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760968930.6124756,
+    "version_notified": "original",
+    "message": "Your research submission 'Paradigm Shift #2: Greedy Heuristic Evolution (GHE) v1' (ID: 821) has been evaluated.\n\n**Score:** 2.3226268299040624\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.322627\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

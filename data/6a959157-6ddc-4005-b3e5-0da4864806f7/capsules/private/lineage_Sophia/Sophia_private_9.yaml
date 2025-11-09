@@ -1,0 +1,219 @@
+capsule_id: Sophia_private_9
+capsule_type: private_memory
+author_name: Sophia I
+author_lineage: Sophia
+author_generation: 1
+created_at_tick: 48
+last_updated_at_tick: 48
+title: Combat + BBKNN-Graph + Diffusion Maps Integration - Submission 103 (Unsuccessful)
+tags:
+- combat
+- bbknn
+- diffmap
+- hybrid
+- failed-experiment
+- graph-embedding-issue
+abstract: Archived code for Submission ID 103, which achieved a score of 0.5366. This
+  experiment replaced UMAP with Diffusion Maps for embedding after Combat correction
+  and batch-balanced graph construction. It resulted in a further degradation of both
+  batch mixing (ASW_batch, PCR) and biological preservation (ASW_label, ARI, NMI)
+  metrics compared to previous attempts and the Combat+PCA baseline. This confirms
+  that this complex hybrid graph-embedding approach, in its current form, is not suitable
+  for this task's evaluation criteria.
+word_count_total: 1402
+messages:
+- message_id: Sophia_private_9-1
+  author_name: Sophia I
+  author_lineage: Sophia
+  author_generation: 1
+  posted_at_tick: 48
+  title: Combat + BBKNN-Graph + Diffusion Maps Integration - Submission 103 (Unsuccessful)
+  content: "#!/usr/bin/env python3\n\"\"\"\nHybrid Combat + BBKNN-Graph + Diffusion\
+    \ Maps integration for single-cell RNA-seq batch effect correction.\n\nThis method\
+    \ first applies the Combat algorithm for robust linear batch effect removal.\n\
+    Subsequently, an intermediate PCA is performed for denoising, followed by a manually\n\
+    implemented batch-balanced k-Nearest Neighbors (BBKNN-like) graph construction.\n\
+    Finally, a Diffusion Maps embedding is computed from this precomputed, batch-balanced\
+    \ graph\nto better preserve non-linear biological signals.\n\"\"\"\n\nimport anndata\
+    \ as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy import stats\nfrom\
+    \ scipy.sparse import csr_matrix, issparse, lil_matrix\nfrom sklearn.neighbors\
+    \ import NearestNeighbors\n\n\n# --- Combat Helper Functions (from original Combat\
+    \ Manual Baseline) ---\n\ndef _aprior(delta_hat):\n    \"\"\"Calculate a prior\
+    \ for inverse gamma distribution.\"\"\"\n    m = np.mean(delta_hat)\n    s2 =\
+    \ np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8  # Avoid division by zero\n\
+    \    return (2 * s2 + m**2) / s2\n\n\ndef _bprior(delta_hat):\n    \"\"\"Calculate\
+    \ b prior for inverse gamma distribution.\"\"\"\n    m = np.mean(delta_hat)\n\
+    \    s2 = np.var(delta_hat)\n    if s2 == 0:\n        s2 = 1e-8  # Avoid division\
+    \ by zero\n    return (m * s2 + m**3) / s2\n\n\ndef _it_sol(s_data, g_hat, d_hat,\
+    \ g_bar, t2, a, b, conv=0.0001):\n    \"\"\"\n    Iteratively compute the conditional\
+    \ posterior means for gamma and delta.\n    (Combat empirical Bayes core)\n  \
+    \  \"\"\"\n    n = (~np.isnan(s_data)).sum(axis=1)\n    g_old = g_hat.copy()\n\
+    \    d_old = d_hat.copy()\n\n    change = 1\n    count = 0\n    max_iter = 200\n\
+    \n    while change > conv and count < max_iter:\n        epsilon = 1e-8 # Added\
+    \ for numerical stability\n        denominator = (t2 * n + d_old)\n        g_new\
+    \ = (t2 * n * g_hat + d_old * g_bar) / (denominator + epsilon)\n\n        sum2\
+    \ = s_data - g_new.reshape((g_new.shape[0], 1)) @ np.ones((1, s_data.shape[1]))\n\
+    \        sum2 = sum2**2\n        sum2 = sum2.sum(axis=1)\n        d_new = (0.5\
+    \ * sum2 + b) / (n / 2.0 + a - 1.0)\n\n        change = max(\n            (np.abs(g_new\
+    \ - g_old) / (g_old + epsilon)).max(),\n            (np.abs(d_new - d_old) / (d_old\
+    \ + epsilon)).max()\n        )\n\n        g_old = g_new\n        d_old = d_new\n\
+    \        count += 1\n\n    return g_new, d_new\n\n\n# --- Main Batch Integration\
+    \ Function ---\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n\
+    \    \"\"\"\n    Hybrid Combat + BBKNN-Graph + Diffusion Maps integration.\n\n\
+    \    Args:\n        adata: AnnData object with raw counts and batch labels.\n\n\
+    \    Returns:\n        AnnData with:\n            - adata.obsm['X_emb']: Diffusion\
+    \ Maps embedding from batch-corrected, BBKNN-graph-based data.\n    \"\"\"\n\n\
+    \    print(\"Hybrid Combat + BBKNN-Graph + Diffusion Maps: Starting with raw counts,\
+    \ doing own normalization...\")\n\n    # 1. Initial Preprocessing (Normalization\
+    \ & HVG Selection)\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\
+    \n    if 'batch_hvg' in adata.var.columns:\n        print(\"  Using batch-aware\
+    \ HVGs for Combat...\")\n        hvg_mask = adata.var['batch_hvg']\n        adata_hvg\
+    \ = adata[:, hvg_mask].copy()\n    else:\n        print(\"  Batch-aware HVGs not\
+    \ found. Using all genes for Combat (less ideal).\")\n        adata_hvg = adata.copy()\n\
+    \n    # Combat requires dense data and operates on genes x samples\n    if issparse(adata_hvg.X):\n\
+    \        data = adata_hvg.X.toarray().T\n    else:\n        data = adata_hvg.X.T.copy()\
+    \ # Ensure C-contiguous for some operations if it was F-contiguous\n\n    # Get\
+    \ batch information for Combat\n    batch_labels = adata_hvg.obs['batch'].values\n\
+    \    unique_batches = np.unique(batch_labels)\n    n_batches_total = len(unique_batches)\n\
+    \    n_genes_hvg, n_samples = data.shape\n\n    print(f\"  Combat processing {n_samples}\
+    \ samples across {n_batches_total} batches using {n_genes_hvg} HVGs...\")\n\n\
+    \    # Create batch design matrix (one-hot encoding)\n    batch_design = np.zeros((n_samples,\
+    \ n_batches_total))\n    batch_info = [] # Store indices for each batch\n    for\
+    \ i, batch in enumerate(unique_batches):\n        batch_mask = batch_labels ==\
+    \ batch\n        batch_indices = np.where(batch_mask)[0]\n        batch_design[batch_indices,\
+    \ i] = 1\n        batch_info.append(batch_indices)\n    n_batches_in_data = np.array([len(indices)\
+    \ for indices in batch_info])\n\n    # Standardize data across genes\n    B_hat\
+    \ = np.linalg.inv(batch_design.T @ batch_design) @ batch_design.T # Generalized\
+    \ inverse for design matrix\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n\
+    \    batch_means = (B_hat @ data.T).T\n\n    var_pooled = np.zeros(n_genes_hvg)\n\
+    \    for i, batch_indices in enumerate(batch_info):\n        batch_data = data[:,\
+    \ batch_indices]\n        batch_mean = batch_means[:, i:i+1]\n        diff = batch_data\
+    \ - batch_mean\n        var_pooled += np.sum(diff**2, axis=1)\n    var_pooled\
+    \ = var_pooled / (n_samples - n_batches_total)\n\n    stand_mean = grand_mean\
+    \ @ np.ones((1, n_samples))\n    s_data = np.zeros_like(data)\n    for i, batch_indices\
+    \ in enumerate(batch_info):\n        batch_data = data[:, batch_indices]\n   \
+    \     batch_mean = batch_means[:, i:i+1]\n        s_data[:, batch_indices] = (batch_data\
+    \ - batch_mean) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n\n    # Fit L/S model\
+    \ and find priors\n    gamma_hat = (np.linalg.inv(batch_design.T @ batch_design)\
+    \ @ batch_design.T @ s_data.T).T\n    delta_hat = [np.var(s_data[:, b_indices],\
+    \ axis=1, ddof=1) for b_indices in batch_info]\n\n    gamma_bar = np.mean(gamma_hat,\
+    \ axis=1)\n    t2 = np.var(gamma_hat, axis=1)\n    a_prior = [_aprior(d) for d\
+    \ in delta_hat]\n    b_prior = [_bprior(d) for d in delta_hat]\n\n    # Find parametric\
+    \ adjustments using iterative solution\n    gamma_star = []\n    delta_star =\
+    \ []\n    epsilon_stab = 1e-8 # Numeric stability epsilon for Combat itself\n\
+    \    for i, batch_indices in enumerate(batch_info):\n        gamma, delta = _it_sol(\n\
+    \            s_data[:, batch_indices], gamma_hat[:, i], delta_hat[i],\n      \
+    \      gamma_bar, t2, a_prior[i], b_prior[i], conv=1e-4\n        )\n        gamma_star.append(gamma)\n\
+    \        delta_star.append(delta)\n    gamma_star = np.array(gamma_star).T\n \
+    \   delta_star = np.array(delta_star).T\n\n    # Adjust data (Combat correction\
+    \ applied)\n    bayesdata = s_data.copy()\n    for j, batch_indices in enumerate(batch_info):\n\
+    \        dsq = np.sqrt(delta_star[:, j])\n        denom = dsq.reshape((len(dsq),\
+    \ 1)) @ np.ones((1, n_batches_in_data[j]))\n        batch_gamma = gamma_star[:,\
+    \ j].reshape(-1, 1)\n        numer = bayesdata[:, batch_indices] - batch_gamma\
+    \ @ np.ones((1, n_batches_in_data[j]))\n        bayesdata[:, batch_indices] =\
+    \ numer / (denom + epsilon_stab) # Add epsilon to denominator\n    bayesdata =\
+    \ bayesdata * (np.sqrt(var_pooled).reshape((-1, 1)) @ np.ones((1, n_samples)))\
+    \ + stand_mean\n\n    X_corrected_combat = bayesdata.T # Samples x HVGs\n    X_corrected_combat\
+    \ = np.nan_to_num(X_corrected_combat, nan=0.0, posinf=0.0, neginf=0.0)\n\n   \
+    \ print(\"✓ Combat correction complete.\")\n\n    # 2. Intermediate PCA for Denoising\
+    \ (on Combat-corrected data)\n    print(\"  Applying intermediate PCA for denoising...\"\
+    )\n    temp_adata = ad.AnnData(X=X_corrected_combat)\n    temp_adata.obs = adata_hvg.obs.copy()\
+    \ # Carry over obs info, incl. batch labels\n    temp_adata.var_names = adata_hvg.var_names.copy()\
+    \ # Carry over var_names\n\n    intermediate_pca_components = 50\n    n_pcs_actual\
+    \ = min(intermediate_pca_components, temp_adata.n_vars - 1, temp_adata.n_obs -\
+    \ 1)\n    sc.pp.pca(temp_adata, n_comps=n_pcs_actual)\n    X_pca_for_graph = temp_adata.obsm['X_pca']\n\
+    \    print(f\"  Intermediate PCA completed with {n_pcs_actual} components. Shape:\
+    \ {X_pca_for_graph.shape}\")\n\n    # 3. Manual BBKNN-like Graph Construction\n\
+    \    print(\"  Building BBKNN-like batch-balanced graph...\")\n    neighbors_within_batch\
+    \ = 3\n    n_cells = temp_adata.n_obs\n    n_batches_graph = len(unique_batches)\n\
+    \n    # Prepare for graph construction\n    all_neighbors_list = [[] for _ in\
+    \ range(n_cells)]\n    all_distances_list = [[] for _ in range(n_cells)]\n   \
+    \ batch_to_indices = {batch: np.where(temp_adata.obs['batch'] == batch)[0] for\
+    \ batch in unique_batches}\n\n    for batch_id, current_batch_name in enumerate(unique_batches):\n\
+    \        batch_indices = batch_to_indices[current_batch_name]\n        n_batch_cells\
+    \ = len(batch_indices)\n\n        if n_batch_cells == 0:\n            continue\n\
+    \n        # Get PCA data for this batch\n        batch_pca_data = X_pca_for_graph[batch_indices]\n\
+    \n        # Build NearestNeighbors model for this batch's own cells\n        nn_model_within_batch\
+    \ = NearestNeighbors(\n            n_neighbors=min(neighbors_within_batch + 1,\
+    \ n_batch_cells), # +1 to include self\n            metric='euclidean', algorithm='auto',\
+    \ n_jobs=1\n        )\n        nn_model_within_batch.fit(batch_pca_data)\n\n \
+    \       # For cells *within this batch*, find neighbors *within this batch*\n\
+    \        distances_within, indices_within = nn_model_within_batch.kneighbors(batch_pca_data)\n\
+    \n        for local_query_idx in range(n_batch_cells):\n            global_query_idx\
+    \ = batch_indices[local_query_idx]\n            dists = distances_within[local_query_idx]\n\
+    \            local_n_indices = indices_within[local_query_idx]\n            global_n_indices\
+    \ = batch_indices[local_n_indices]\n\n            # Filter self-neighbor\n   \
+    \         mask = global_n_indices != global_query_idx\n            all_neighbors_list[global_query_idx].extend(global_n_indices[mask][:neighbors_within_batch].tolist())\n\
+    \            all_distances_list[global_query_idx].extend(dists[mask][:neighbors_within_batch].tolist())\n\
+    \n        # For ALL cells, find neighbors from *this* (current_batch_name) batch\n\
+    \        # This is the 'cross-batch' querying for BBKNN\n        distances_all,\
+    \ indices_all = nn_model_within_batch.kneighbors(\n            X_pca_for_graph,\
+    \ # Query ALL cells against this batch's PCA data\n            n_neighbors=neighbors_within_batch\
+    \ # No +1 here, we want k cross-batch neighbors\n        )\n        for query_cell_idx\
+    \ in range(n_cells):\n            dists = distances_all[query_cell_idx]\n    \
+    \        local_n_indices = indices_all[query_cell_idx]\n            global_n_indices\
+    \ = batch_indices[local_n_indices]\n\n            all_neighbors_list[query_cell_idx].extend(global_n_indices.tolist())\n\
+    \            all_distances_list[query_cell_idx].extend(dists.tolist())\n\n   \
+    \ # Build sparse distance matrix\n    distances_matrix_lil = lil_matrix((n_cells,\
+    \ n_cells), dtype=np.float32)\n    for cell_idx in range(n_cells):\n        for\
+    \ neighbor_idx, dist in zip(all_neighbors_list[cell_idx], all_distances_list[cell_idx]):\n\
+    \            distances_matrix_lil[cell_idx, neighbor_idx] = dist\n    distances_matrix\
+    \ = distances_matrix_lil.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T)\
+    \ # Symmetrize\n\n    # Build connectivity matrix using Gaussian kernel (BBKNN-like\
+    \ weighting)\n    connectivities_matrix_lil = distances_matrix.tolil()\n    for\
+    \ i in range(n_cells):\n        row_data = connectivities_matrix_lil.data[i]\n\
+    \        if len(row_data) > 0:\n            bandwidth = np.median(row_data) if\
+    \ len(row_data) > 1 else np.mean(row_data)\n            if bandwidth > 0:\n  \
+    \              connectivities_matrix_lil.data[i] = list(np.exp(-(np.array(row_data)\
+    \ ** 2) / (2 * bandwidth ** 2)))\n    connectivities_matrix = connectivities_matrix_lil.tocsr()\n\
+    \    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\
+    \ # Symmetrize\n\n    # BBKNN trimming (keep top N connections per cell)\n   \
+    \ trim_value = 10 * neighbors_within_batch * n_batches_graph\n    if trim_value\
+    \ > 0 and len(connectivities_matrix.data) > 0:\n        connectivities_matrix_lil\
+    \ = connectivities_matrix.tolil()\n        for i in range(n_cells):\n        \
+    \    row_data = connectivities_matrix_lil.data[i]\n            if len(row_data)\
+    \ > trim_value:\n                row_array = np.array(row_data)\n            \
+    \    top_indices = np.argpartition(-row_array, trim_value)[:trim_value]\n    \
+    \            new_data = [row_data[idx] for idx in sorted(top_indices)]\n     \
+    \           new_rows = [connectivities_matrix_lil.rows[i][idx] for idx in sorted(top_indices)]\n\
+    \                connectivities_matrix_lil.data[i] = new_data\n              \
+    \  connectivities_matrix_lil.rows[i] = new_rows\n        connectivities_matrix\
+    \ = connectivities_matrix_lil.tocsr()\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\
+    \ # Symmetrize again\n\n    # Store graph in temp_adata\n    temp_adata.obsp['connectivities']\
+    \ = connectivities_matrix.astype(np.float32)\n    temp_adata.obsp['distances']\
+    \ = distances_matrix.astype(np.float32)\n    temp_adata.uns['neighbors'] = {\n\
+    \        'params': {\n            'n_neighbors': neighbors_within_batch * n_batches_graph,\
+    \ # Approximate total neighbors\n            'method': 'manual_bbknn_graph',\n\
+    \            'metric': 'euclidean',\n            'n_pcs': n_pcs_actual,\n    \
+    \        'bbknn': {\n                'trim': trim_value,\n                'computation':\
+    \ 'sklearn',\n                'batch_key': 'batch',\n                'neighbors_within_batch':\
+    \ neighbors_within_batch\n            },\n            'use_rep': 'X_pca' # From\
+    \ intermediate PCA\n        },\n        'connectivities_key': 'connectivities',\n\
+    \        'distances_key': 'distances',\n    }\n    print(f\"✓ BBKNN-like graph\
+    \ construction complete. Graph shape: {connectivities_matrix.shape}\")\n\n\n \
+    \   # 4. Diffusion Maps Embedding from Precomputed Graph (Replaced UMAP)\n   \
+    \ diffmap_components = 10\n    print(f\"  Computing Diffusion Maps embedding with\
+    \ {diffmap_components} components...\")\n    # sc.tl.diffmap will use adata.obsp['connectivities']\
+    \ if present\n    sc.tl.diffmap(temp_adata, n_comps=diffmap_components)\n    print(f\"\
+    ✓ Diffusion Maps embedding complete. Shape: {temp_adata.obsm['X_diffmap'].shape}\"\
+    )\n\n    # 5. Create final output AnnData object\n    output = ad.AnnData(\n \
+    \       obs=adata.obs[[]], # Original adata obs\n        var=adata.var[[]], #\
+    \ Original adata var\n        uns={\n            'dataset_id': adata.uns.get('dataset_id',\
+    \ 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id',\
+    \ 'unknown'),\n            'method_id': 'combat_bbknn_diffmap_integration', #\
+    \ Updated method ID for clarity\n            'combat_params': {\n            \
+    \    'n_batches': n_batches_total,\n                'batch_sizes': n_batches_in_data.tolist(),\n\
+    \                'empirical_bayes': True,\n                'parametric': True,\n\
+    \                'iterative_solver': True,\n                'stability_epsilon':\
+    \ epsilon_stab\n            },\n            'embedding_method': 'diffmap_from_bbknn_graph',\n\
+    \            'embedding_params': {\n                'intermediate_pca_components':\
+    \ n_pcs_actual,\n                'bbknn_neighbors_within_batch': neighbors_within_batch,\n\
+    \                'bbknn_graph_trim_value': trim_value,\n                'diffmap_components':\
+    \ diffmap_components\n            }\n        },\n        obsm={\n            'X_emb':\
+    \ temp_adata.obsm['X_diffmap'] # Output Diffusion Map embedding\n        }\n \
+    \   )\n\n    print(f\"✓ Hybrid Combat + BBKNN-Graph + Diffusion Maps integration\
+    \ complete.\")\n    return output\n"
+  word_count: 1402
+  is_deleted: false
+is_deleted: false
+lineage_association: Sophia

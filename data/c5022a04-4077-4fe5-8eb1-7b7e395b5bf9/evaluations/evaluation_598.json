@@ -1,0 +1,46 @@
+{
+  "id": "598",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "Non-Local Search v2: Parameterized Pair Rotation",
+  "tags": [
+    "non-local-search",
+    "motif",
+    "relocation",
+    "parameter-sweep",
+    "optimization"
+  ],
+  "abstract": "The previous non-local search (ID 595) failed, showing a single 90-degree rotation is too disruptive. This submission tests a more systematic and subtle approach. It again identifies the 'tightest pair' in the SOTA configuration but then creates 8 different candidate solutions by rotating this pair by a range of angles (5, 15, 30, 45, 60, 75, 90 degrees, plus the original). Each of these 8 configurations is then refined in parallel using a deep MM-LP optimizer. By exploring a spectrum of transformations from subtle to aggressive, this experiment aims to find a 'sweet spot' that breaks local rigidity without catastrophically",
+  "submitted_tick": 359,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport sys\nfrom multiprocessing import Pool, cpu_count\nsys.path.append('storage/praxis')\nfrom asn_utils import get_active_set_data # Reusing just the LP solver part\nfrom lp_utils import solve_radii_lp\n\ndef mm_lp_optimize(C_start: np.ndarray, iters: int, delta0: float = 0.015):\n    from scipy.optimize import linprog\n    best_C = C_start.copy()\n    score_best = np.sum(solve_radii_lp(best_C))\n    delta, C_anchor = delta0, C_start.copy()\n    # ... [Full MM-LP optimizer code from previous submission] ...\n    for _ in range(iters):\n        n = C_anchor.shape[0]; I, J = np.triu_indices(n, k=1)\n        V0, d0 = C_anchor[I]-C_anchor[J], np.linalg.norm(C_anchor[I]-C_anchor[J], axis=1)\n        d0 = np.maximum(d0, 1e-9); U = (V0.T / d0).T; ux, uy = U[:,0], U[:,1]; x0, y0 = C_anchor[:,0], C_anchor[:,1]\n        rows, cols = 4*n+len(I), 3*n; A_ub, b_ub = np.zeros((rows,cols)), np.zeros(rows)\n        r_idx, x_idx, y_idx = range(n), range(n,2*n), range(2*n,3*n)\n        row=0\n        for i in range(n):\n            A_ub[row,r_idx[i]]=1; A_ub[row,x_idx[i]]=-1; row+=1; A_ub[row,r_idx[i]]=1; A_ub[row,x_idx[i]]=1; b_ub[row]=1.0; row+=1\n            A_ub[row,r_idx[i]]=1; A_ub[row,y_idx[i]]=-1; row+=1; A_ub[row,r_idx[i]]=1; A_ub[row,y_idx[i]]=1; b_ub[row]=1.0; row+=1\n        for k in range(len(I)):\n            i,j=I[k],J[k]; A_ub[row,r_idx[i]]=1; A_ub[row,r_idx[j]]=1\n            A_ub[row,x_idx[i]]=-ux[k]; A_ub[row,y_idx[i]]=-uy[k]; A_ub[row,x_idx[j]]=ux[k]; A_ub[row,y_idx[j]]=uy[k]\n            b_ub[row]=d0[k]-ux[k]*x0[i]-uy[k]*y0[i]+ux[k]*x0[j]+uy[k]*y0[j]; row+=1\n        c=np.zeros(cols); c[:n]=-1.0\n        bounds=[(0,0.5)]*n+[(max(1e-6,x0[i]-delta),min(1-1e-6,x0[i]+delta)) for i in range(n)]+[(max(1e-6,y0[i]-delta),min(1-1e-6,y0[i]+delta)) for i in range(n)]\n        res = linprog(c,A_ub=A_ub,b_ub=b_ub,bounds=bounds,method=\"highs\")\n        if not res.success: delta*=0.6; continue\n        C_lin = np.stack([res.x[n:2*n], res.x[2*n:3*n]], axis=1)\n        score_exact = np.sum(solve_radii_lp(C_lin))\n        if score_exact > score_best: best_C, score_best = C_lin.copy(), score_exact; C_anchor=C_lin.copy(); delta=min(0.05, 1.2*delta)\n        else: delta*=0.8\n    final_radii = solve_radii_lp(best_C)\n    return best_C, final_radii, score_best\n\ndef get_tightest_pair(centers):\n    lp_data = get_active_set_data(centers)\n    if lp_data is None: return None\n    min_slack = float('inf'); tightest_pair = None\n    I, J = lp_data['pairwise_indices']\n    for k, slack in enumerate(lp_data['slack_pairwise']):\n        if slack < min_slack: min_slack = slack; tightest_pair = (I[k], J[k])\n    return tightest_pair\n\ndef rotate_pair(centers, pair_indices, angle_rad):\n    idx1, idx2 = pair_indices\n    c1, c2 = centers[idx1], centers[idx2]\n    midpoint = (c1 + c2) / 2.0\n    v1 = c1 - midpoint\n    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)\n    rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])\n    v1_rotated = rot_matrix @ v1\n    new_centers = centers.copy()\n    new_centers[idx1] = midpoint + v1_rotated\n    new_centers[idx2] = midpoint - v1_rotated\n    return np.clip(new_centers, 1e-6, 1.0 - 1e-6)\n\ndef refine_worker(centers):\n    # Using a deep MM-LP refinement for this experiment\n    return mm_lp_optimize(centers, iters=30)\n\ndef construct_packing() -> tuple:\n    try:\n        sota_artifact = np.load('storage/praxis/sota_artifact_564.npz')\n        centers_initial = sota_artifact['centers']\n    except FileNotFoundError:\n        return np.zeros((32, 2)), np.zeros((32,))\n\n    tightest_pair = get_tightest_pair(centers_initial)\n    if tightest_pair is None: return centers_initial, np.zeros(32)\n\n    angles_deg = [0, 5, 15, 30, 45, 60, 75, 90]\n    candidate_centers = [rotate_pair(centers_initial, tightest_pair, np.deg2rad(a)) for a in angles_deg]\n    \n    with Pool(processes=cpu_count()) as pool:\n        results = pool.map(refine_worker, candidate_centers)\n\n    best_centers, best_radii, best_score = None, None, -1.0\n    for c, r, s in results:\n        if s > best_score: best_centers, best_radii, best_score = c, r, s\n            \n    if best_centers is None: return centers_initial, np.zeros(32)\n    return best_centers, best_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760896474.8198364,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9395727682715322,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.939573",
+      "evaluation_timestamp": 1760896477.9066472,
+      "evaluation_datetime": "2025-10-20T01:54:37.906650"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9395727682715322,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760896477.9303052,
+    "version_notified": "original",
+    "message": "Your research submission 'Non-Local Search v2: Parameterized Pair Rotation' (ID: 598) has been evaluated.\n\n**Score:** 2.9395727682715322\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.939573\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

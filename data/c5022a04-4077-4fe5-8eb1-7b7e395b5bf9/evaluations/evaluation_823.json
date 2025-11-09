@@ -1,0 +1,45 @@
+{
+  "id": "823",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "GHE Tuning #1: Negative Radius Weight (Foresight)",
+  "tags": [
+    "heuristic-search",
+    "tuning",
+    "generative-model",
+    "ghe"
+  ],
+  "abstract": "The GHE v1 paradigm successfully avoided the known suboptimal trap but produced a poor score. This is likely due to the myopic nature of the greedy placement, where maximizing the radius of the current circle harms the global solution. This experiment tests this hypothesis by inverting the initial weight for the 'max radius' feature, starting the search with a bias towards leaving space for future circles. The goal is to see if this simple form of 'foresight' can significantly improve the quality of the generated packings.",
+  "submitted_tick": 524,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nfrom scipy.stats import qmc\nfrom multiprocessing import Pool, cpu_count\nimport random\nimport time\n\nN_CIRCLES = 32\n\n# --- Canonical LP Solver ---\ndef solve_radii_lp_with_duals(centers):\n    if centers is None: return {\"radii\": None, \"score\": -1.0}\n    n = centers.shape[0]; c = -np.ones(n)\n    num_b = 4*n; A_b = np.zeros((num_b, n)); b_b = np.zeros(num_b); eps = 1e-7\n    for i in range(n):\n        A_b[4*i,i]=1; b_b[4*i]=centers[i,0] - eps; A_b[4*i+1,i]=1; b_b[4*i+1]=1-centers[i,0] - eps\n        A_b[4*i+2,i]=1; b_b[4*i+2]=centers[i,1] - eps; A_b[4*i+3,i]=1; b_b[4*i+3]=1-centers[i,1] - eps\n    I, J = np.triu_indices(n, k=1); num_p = len(I); A_p = np.zeros((num_p, n))\n    A_p[np.arange(num_p), I]=1; A_p[np.arange(num_p), J]=1\n    b_p = np.linalg.norm(centers[I] - centers[J], axis=1) - eps\n    res = linprog(c, A_ub=np.vstack([A_b, A_p]), b_ub=np.concatenate([b_b, b_p]), bounds=(0,None), method='highs')\n    return {\"radii\": res.x, \"score\": np.sum(res.x)} if res.success else {\"radii\": None, \"score\": -1.0}\n\n# --- GHE Core Logic ---\ndef get_features_and_max_r(point, placed_centers):\n    px, py = point\n    f2 = min(px, 1-px, py, 1-py)\n    \n    if not placed_centers:\n        f1 = f2; f3 = 1.0; f4 = 1.0\n        return f1, [f1, f2, f3, f4]\n\n    placed_centers_np = np.array(placed_centers)\n    dists = np.linalg.norm(placed_centers_np - point, axis=1)\n    \n    f1 = min(f2, np.min(dists)) if dists.size > 0 else f2\n    f3 = np.min(dists) if dists.size > 0 else 1.0\n    dists.sort()\n    f4 = np.mean(dists[:2]) if len(dists) >= 2 else f3\n    \n    return f1, [f1, f2, f3, f4]\n\ndef greedy_placement(weights, num_candidates=2048):\n    placed_centers = []\n    sampler = qmc.Sobol(d=2, scramble=True, seed=random.randint(0, 100000))\n    \n    for _ in range(N_CIRCLES):\n        candidate_points = sampler.random(n=num_candidates)\n        best_score = -np.inf\n        best_point = None\n        \n        for p in candidate_points:\n            _, features = get_features_and_max_r(p, placed_centers)\n            score = np.dot(weights, features)\n            if score > best_score:\n                best_score = score\n                best_point = p\n        \n        placed_centers.append(best_point)\n    return np.array(placed_centers)\n\n# --- Worker for GA Evaluation ---\ndef evaluate_genotype(weights):\n    centers = greedy_placement(weights)\n    score = solve_radii_lp_with_duals(centers)['score']\n    return score, weights\n\n# --- Main GA Function ---\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    # --- GA Parameters ---\n    POP_SIZE = 64\n    NUM_FEATURES = 4\n    MUTATION_STRENGTH = 0.1\n    N_PARENTS = 20\n    \n    # --- Initialization with Negative Radius Weight Bias ---\n    rng = np.random.default_rng()\n    population_weights = []\n    for _ in range(POP_SIZE):\n        weights = rng.uniform(-1, 1, NUM_FEATURES)\n        weights[0] = rng.uniform(-1, 0) # Bias w1 to be negative\n        population_weights.append(weights)\n    population = [(0.0, w) for w in population_weights]\n\n    # Use a single pool for the entire run\n    pool = Pool(cpu_count())\n    try:\n        while time.time() - start_time < 1180:\n            gen_weights = [w for s, w in population]\n            results = pool.map(evaluate_genotype, gen_weights)\n            population = list(results)\n            population.sort(key=lambda x: x[0], reverse=True)\n            \n            parents = population[:N_PARENTS]\n            \n            offspring_weights = []\n            for _ in range(POP_SIZE - N_PARENTS):\n                p1_w, p2_w = random.sample(parents, 2)[0][1], random.sample(parents, 2)[1][1]\n                alpha = rng.random()\n                child_w = alpha * p1_w + (1-alpha) * p2_w\n                child_w += rng.normal(0, MUTATION_STRENGTH, NUM_FEATURES)\n                offspring_weights.append(child_w)\n            \n            population = parents + [(0.0, w) for w in offspring_weights]\n    finally:\n        pool.close()\n        pool.join()\n\n    best_score, best_weights = population[0]\n    final_centers = greedy_placement(best_weights)\n    final_radii = solve_radii_lp_with_duals(final_centers)['radii']\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760971730.6761072,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.331042209639228,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.331042",
+      "evaluation_timestamp": 1760972916.2953234,
+      "evaluation_datetime": "2025-10-20T23:08:36.295325"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.331042209639228,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760972916.3056812,
+    "version_notified": "original",
+    "message": "Your research submission 'GHE Tuning #1: Negative Radius Weight (Foresight)' (ID: 823) has been evaluated.\n\n**Score:** 2.331042209639228\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.331042\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

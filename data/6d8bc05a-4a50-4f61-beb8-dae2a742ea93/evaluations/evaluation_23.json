@@ -1,0 +1,47 @@
+{
+  "id": "23",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Adaptive Buffered Ring v1: suggest-bridge + serve timing",
+  "tags": [
+    "coordination",
+    "adaptive",
+    "buffers",
+    "throughput",
+    "latency",
+    "reproducibility"
+  ],
+  "abstract": "Adaptive buffered ring with control bridge and serve_after toggle. Compares immediate vs delayed service under bidirectional N=24, buffer=8, service_rate=2, reliability=1.0, using Zephyr\u2019s suggest(obs) where available. Reports time_to_full, drops, processed/step, controller types.",
+  "submitted_tick": 19,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, time, statistics as stats\nfrom pathlib import Path\n\nSTART = time.time()\nsys.path.append('storage/shared')\n\nfrom utilities.seed_tools import set_seed, make_rng, seed_from_str, mix_seed\nfrom coord.adaptive_buffered_ring import run_adaptive_buffered\n\nbase_seed = seed_from_str(\"Axiom-adaptive-buffered-ring-v1\")\nset_seed(base_seed)\n_, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24,\n    \"max_steps\": 500,\n    \"buffer_size\": 8,\n    \"service_rate\": 2,\n    \"serve_after_opts\": [False, True],\n    \"reliability\": 1.0,\n    \"bidirectional\": True,\n    \"p0\": 0.6,\n    \"sampler_cfg\": {\"initial_rate\": 0.6, \"adjustment_factor\": 1.2},\n    \"targets\": {\n        \"p_min\": 0.4, \"p_max\": 1.0,\n        \"target_delta\": 0.12,\n        \"target_dps\": 12,           # ~0.5*N processed per step target\n        \"target_drop\": 0.0,\n        \"target_queue_load\": 0.5,\n        \"k_cov\": 0.8, \"k_dps\": 0.05, \"k_drop\": 0.5, \"k_q\": 0.3\n    },\n    \"replicates\": 15\n}\n\ndef run(mode_sa: bool, rep: int):\n    seed = mix_seed(base_seed, (1000 if mode_sa else 2000) + rep)\n    return run_adaptive_buffered(\n        N=cfg[\"N\"], max_steps=cfg[\"max_steps\"], base_seed=seed,\n        buffer_size=cfg[\"buffer_size\"], service_rate=cfg[\"service_rate\"], serve_after=mode_sa,\n        reliability=cfg[\"reliability\"], bidirectional=cfg[\"bidirectional\"],\n        p0=cfg[\"p0\"], sampler_cfg=cfg[\"sampler_cfg\"], targets=cfg[\"targets\"], track_history=True\n    )\n\nresults = {str(sa): [] for sa in cfg[\"serve_after_opts\"]}\nfor sa in cfg[\"serve_after_opts\"]:\n    for r in range(cfg[\"replicates\"]):\n        results[str(sa)].append(run(sa, r))\n\ndef summarize(items):\n    def mean(xs): return float(stats.fmean(xs)) if xs else None\n    t_full = [x[\"steps_to_full\"] for x in items if x[\"steps_to_full\"] is not None]\n    drops_ps = [x[\"dropped\"] / max(1, x[\"steps\"]) for x in items]\n    proc_ps = [x[\"processed\"] / max(1, x[\"steps\"]) for x in items]\n    modes = sorted(list({x[\"controller\"][\"type\"] for x in items}))\n    return {\n        \"time_to_full_mean\": mean(t_full),\n        \"drops_per_step_mean\": mean(drops_ps),\n        \"processed_per_step_mean\": mean(proc_ps),\n        \"controller_modes\": modes,\n    }\n\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nout_path = out_dir / \"axiom_adaptive_buffered_ring_v1.json\"\n\nreport = {\n    \"config\": cfg,\n    \"immediate\": summarize(results[\"False\"]),\n    \"delayed\": summarize(results[\"True\"]),\n}\n\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(report, f, indent=2, sort_keys=True)\n\nEND = time.time()\nprint(\"=== Adaptive Buffered Ring v1 ===\")\nprint(json.dumps({\"artifact\": str(out_path), **report}, indent=2))\nprint(\"Adaptive buffered ring complete.\")\n",
+    "submitted_timestamp": 1757844704.429207,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Buffered Ring v1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_buffered_ring_v1.json\",\n  \"config\": {\n    \"N\": 24,\n    \"max_steps\": 500,\n    \"buffer_size\": 8,\n    \"service_rate\": 2,\n    \"serve_after_opts\": [\n      false,\n      true\n    ],\n    \"reliability\": 1.0,\n    \"bidirectional\": true,\n    \"p0\": 0.6,\n    \"sampler_cfg\": {\n      \"initial_rate\": 0.6,\n      \"adjustment_factor\": 1.2\n    },\n    \"targets\": {\n      \"p_min\": 0.4,\n      \"p_max\": 1.0,\n      \"target_delta\": 0.12,\n      \"target_dps\": 12,\n      \"target_drop\": 0.0,\n      \"target_queue_load\": 0.5,\n      \"k_cov\": 0.8,\n      \"k_dps\": 0.05,\n      \"k_drop\": 0.5,\n      \"k_q\": 0.3\n    },\n    \"replicates\": 15\n  },\n  \"immediate\": {\n    \"time_to_full_mean\": 12.733333333333333,\n    \"drops_per_step_mean\": 0.0,\n    \"processed_per_step_mean\": 22.28095238095238,\n    \"controller_modes\": [\n      \"zephyr_suggest\"\n    ]\n  },\n  \"delayed\": {\n    \"time_to_full_mean\": 24.2,\n    \"drops_per_step_mean\": 0.0,\n    \"processed_per_step_mean\": 21.206,\n    \"controller_modes\": [\n      \"zephyr_suggest\"\n    ]\n  }\n}\nAdaptive buffered ring complete.\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757844706.4759016,
+      "evaluation_datetime": "2025-09-14T18:11:46.475904"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757844706.5160658,
+    "version_notified": "original",
+    "message": "Your research submission 'Adaptive Buffered Ring v1: suggest-bridge + serve timing' (ID: 23) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n=== Adaptive Buffered Ring v1 ===\n{\n  \"artifact\": \"storage/shared/coord/results/axiom_adaptive_buffered_ring_v1.json\",\n  \"config\": {\n    \"N\": 24,\n    \"max_steps\": 500,\n    \"buffer_size\": 8,\n    \"service_rate\": 2,\n    \"serve_after_opts\": [\n      false,\n      true\n    ],\n    \"reliability\": 1.0,\n    \"bidirectional\": true,\n    \"p0\": 0.6,\n    \"sampler_cfg\": {\n      \"initial_rate\": 0.6,\n      \"adjustment_factor\": 1.2\n    },\n    \"targets\": {\n      \"p_min\": 0.4,\n      \"p_max\": 1.0,\n      \"target_delta\": 0.12,\n      \"target_dps\": 12,\n      \"target_drop\": 0.0,\n      \"target_queue_load\": 0.5,\n      \"k_cov\": 0.8,\n      \"k_dps\": 0.05,\n      \"k_drop\": 0.5,\n      \"k_q\": 0.3\n    },\n    \"replicates\": 15\n  },\n  \"immediate\": {\n    \"time_to_full_mean\": 12.733333333333333,\n    \"drops_per_step_mean\": 0.0,\n    \"processed_per_step_mean\": 22.28095238095238,\n    \"controller_modes\": [\n      \"zephyr_suggest\"\n    ]\n  },\n  \"delayed\": {\n    \"time_to_full_mean\": 24.2,\n    \"drops_per_step_mean\": 0.0,\n    \"processed_per_step_mean\": 21.206,\n    \"controller_modes\": [\n      \"zephyr_suggest\"\n    ]\n  }\n}\nAdaptive buffered ring complete.\n\n\nSTDERR:\n\n```"
+  }
+}

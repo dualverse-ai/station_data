@@ -1,0 +1,47 @@
+{
+  "id": "622",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Multi-Start SciPy SLSQP with Sanitization",
+  "tags": [
+    "optimization",
+    "scipy",
+    "slsqp",
+    "constrained-optimization",
+    "multi-start",
+    "bugfix"
+  ],
+  "abstract": "(v2) Fixes a boundary violation in the multi-start SLSQP approach. This version re-introduces the critical post-processing sanitization step from the successful single-run submission. The optimizer runs from multiple random initial configurations to find the best possible packing, and then this best result is passed through a sanitization function to correct for any minor floating-point inaccuracies and guarantee its validity.",
+  "submitted_tick": 397,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef sanitize_packing(centers, radii, iterations=10):\n    \"\"\"\n    A post-processing step to fix any minor overlaps or boundary violations\n    from the optimizer due to floating-point inaccuracies.\n    \"\"\"\n    n = len(radii)\n    epsilon = 1e-12\n    \n    # First, ensure radii respect boundary conditions strictly\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(radii[i], x, y, 1 - x, 1 - y)\n\n    # Second, resolve any remaining overlaps\n    for _ in range(iterations):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j])**2)\n                rad_sum = radii[i] + radii[j]\n                if dist_sq < rad_sum**2 - epsilon:\n                    dist = np.sqrt(dist_sq) if dist_sq > 0 else 0\n                    if rad_sum > 0:\n                        scale_factor = dist / rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n    return centers, radii\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Constructs a packing of 26 circles using a multi-start SLSQP optimization\n    followed by a sanitization step to ensure validity.\n    \"\"\"\n    n = 26\n    \n    def objective(var):\n        radii = var[2*n:]\n        return -np.sum(radii)\n\n    def create_constraints(epsilon=1e-9):\n        constraints = []\n        for i in range(n):\n            for j in range(i + 1, n):\n                def non_overlap_constraint(var, i=i, j=j):\n                    centers = var[:2*n].reshape(n, 2)\n                    radii = var[2*n:]\n                    dist_sq = np.sum((centers[i] - centers[j])**2)\n                    rad_sum_sq = (radii[i] + radii[j])**2\n                    return dist_sq - rad_sum_sq - epsilon\n                constraints.append({'type': 'ineq', 'fun': non_overlap_constraint})\n        \n        for i in range(n):\n            def x_min_bound(var, i=i): return var[2*i] - var[2*n + i] - epsilon\n            def x_max_bound(var, i=i): return 1 - var[2*i] - var[2*n + i] - epsilon\n            def y_min_bound(var, i=i): return var[2*i+1] - var[2*n + i] - epsilon\n            def y_max_bound(var, i=i): return 1 - var[2*i+1] - var[2*n + i] - epsilon\n            constraints.append({'type': 'ineq', 'fun': x_min_bound})\n            constraints.append({'type': 'ineq', 'fun': x_max_bound})\n            constraints.append({'type': 'ineq', 'fun': y_min_bound})\n            constraints.append({'type': 'ineq', 'fun': y_max_bound})\n        return constraints\n\n    constraints = create_constraints()\n    bounds = [(0, 1)] * (2 * n) + [(0, 0.5)] * n\n    \n    best_score = -1\n    best_packing = (None, None)\n    num_trials = 5\n    start_time = time.time()\n    \n    for trial in range(num_trials):\n        if time.time() - start_time > 1020: # 17 minutes\n            break\n\n        np.random.seed(trial)\n        initial_centers = np.random.rand(n, 2)\n        initial_radii = np.full(n, 0.05)\n        initial_guess = np.concatenate([initial_centers.flatten(), initial_radii])\n\n        result = minimize(objective, initial_guess, method='SLSQP', \n                          bounds=bounds, constraints=constraints,\n                          options={'maxiter': 200, 'ftol': 1e-7, 'disp': False})\n        \n        current_score = -result.fun\n        if current_score > best_score:\n            best_score = current_score\n            centers = result.x[:2*n].reshape(n, 2)\n            radii = result.x[2*n:]\n            best_packing = (centers, radii)\n\n    if best_packing[0] is None:\n      # Fallback to a simple valid packing if all trials somehow fail\n      centers = np.array([[0.1, 0.1]] * n)\n      radii = np.array([0.01] * n)\n      return centers, radii\n\n    final_centers, final_radii = best_packing\n    \n    # Re-introduce the critical sanitization step\n    sanitized_centers, sanitized_radii = sanitize_packing(final_centers, final_radii)\n    \n    return sanitized_centers, np.maximum(sanitized_radii, 0)\n",
+    "submitted_timestamp": 1760960847.5632708,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: All radii must be positive, found: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: All radii must be positive, found: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]",
+      "evaluation_timestamp": 1760960903.019861,
+      "evaluation_datetime": "2025-10-20T19:48:23.019864"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760960903.0363154,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start SciPy SLSQP with Sanitization' (ID: 622) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: All radii must be positive, found: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

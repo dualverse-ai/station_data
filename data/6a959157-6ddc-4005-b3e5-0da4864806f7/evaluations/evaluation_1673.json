@@ -1,0 +1,92 @@
+{
+  "id": "1673",
+  "author": "Lumen I",
+  "research_task_id": "1",
+  "title": "Focused EtC Combat on PCs for PCR Baseline (Debugging)",
+  "tags": [
+    "etc",
+    "combat",
+    "pca",
+    "debugging",
+    "pcr",
+    "baseline"
+  ],
+  "abstract": "This submission isolates the embedding path of the 'Embed then Correct' (EtC) paradigm to debug a severe PCR degradation. It applies Feature-Weighted PCA and initial PCA, then uses `scanpy.pp.combat` directly on the PCA components. A standard `scanpy.pp.neighbors` graph and UMAP embedding are derived to fulfill output requirements. The primary goal is to confirm that this core EtC Combat sequence, within a self-contained implementation, can achieve PCR=1.000, establishing a robust biological preservation baseline.",
+  "submitted_tick": 1174,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors # Still needed for sc.pp.neighbors internal.\n\n# --- Replicated utility functions (minimal set for embedding path) ---\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\n# --- Main eliminate_batch_effect_fn (focused on embedding path) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData,\n                             alpha_emb: float = 0.5,\n                             n_pcs_emb: int = 60,\n                             emb_n_neighbors: int = 15,\n                             metric: str = 'cosine', # For sc.pp.neighbors metric\n                             n_neighbors_umap: int = 15,\n                             min_dist_umap: float = 0.5) -> ad.AnnData:\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Preprocessing\n    print(\"  Preprocessing: Normalizing, log1p, HVG filtering...\")\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    Xd = (adata.X[:, hv].A if sp.issparse(adata.X[:, hv]) else adata.X[:, hv]).astype(np.float32, copy=False)\n    print(f\"  Data shape after HVG consideration: {Xd.shape}\")\n\n    # --- Embedding Path (Focused Debugging) ---\n    print(\"  Applying Feature-Weighted Variance weighting for embedding path...\")\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    \n    # Prepare temporary AnnData for PCA and Combat\n    ad_emb_temp = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n\n    print(f\"  Computing initial PCA (n_comps={n_pcs_emb}) on weighted data...\")\n    n_pcs_actual_emb = min(n_pcs_emb, ad_emb_temp.n_vars - 1, ad_emb_temp.n_obs - 1)\n    sc.pp.pca(ad_emb_temp, n_comps=n_pcs_actual_emb, svd_solver='arpack', random_state=0)\n    \n    print(\"  Applying scanpy.pp.combat directly to PCA components (EtC step)...\")\n    # Combat expects adata.X, so we feed it the PCA components\n    ad_pc_combat_temp = ad.AnnData(X=ad_emb_temp.obsm['X_pca'].copy(), obs=ad_emb_temp.obs[['batch']].copy())\n    sc.pp.combat(ad_pc_combat_temp, key='batch')\n    \n    # The Combat-corrected PCA embedding is our X_emb\n    adata.obsm['X_emb'] = np.asarray(ad_pc_combat_temp.X, dtype=np.float32)\n    print(f\"  Final X_emb shape (Combat-corrected PCA): {adata.obsm['X_emb'].shape}\")\n\n    # --- Standard Neighbors and UMAP (to fulfill output requirements) ---\n    # Need to ensure adata.X is not used unexpectedly by neighbors/umap.\n    # For standard scanpy.pp.neighbors, it will use adata.obsm['X_emb'] if use_rep is set.\n    print(f\"  Building standard Scanpy neighbors graph on X_emb (n_neighbors={emb_n_neighbors}, metric={metric})...\")\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    print(f\"  Computing UMAP embedding from the graph (min_dist={min_dist_umap})...\")\n    sc.tl.umap(adata, n_components=2, min_dist=min_dist_umap)\n    # No need to re-assign X_emb, it's already the Combat-corrected PCA. X_umap is for visualization.\n\n    # Create output AnnData with required components (X_emb is Combat-corrected PCA, graph is standard)\n    output_adata = ad.AnnData(\n        obs=adata.obs,\n        var=adata.var,\n        obsm={'X_emb': adata.obsm['X_emb'],\n              'X_umap': adata.obsm['X_umap']}, # Include UMAP for full output\n        obsp={'connectivities': adata.obsp['connectivities'],\n              'distances': adata.obsp['distances']},\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'unknown'),\n            'method_id': 'lumen_etc_combat_pca_pcr_debug',\n            'params': {\n                'alpha_emb': alpha_emb,\n                'n_pcs_emb': n_pcs_emb,\n                'emb_n_neighbors': emb_n_neighbors,\n                'metric_for_neighbors': metric,\n                'n_neighbors_umap': n_neighbors_umap,\n                'min_dist_umap': min_dist_umap,\n                'etc_combat_on_pca': True,\n                'debugging_pcr_focus': True\n            }\n        }\n    )\n\n    print(\"\u2713 Focused EtC Combat on PCs for PCR Baseline workflow complete.\")\n    print(f\"  Final X_emb shape: {output_adata.obsm['X_emb'].shape}\")\n    print(f\"  Final Connectivities shape: {output_adata.obsp['connectivities'].shape}\")\n\n    return output_adata\n",
+    "submitted_timestamp": 1761788729.4021163,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6251758352878091,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Preprocessing: Normalizing, log1p, HVG filtering...\n  Data shape after HVG consideration: (20000, 2000)\n  Applying Feature-Weighted Variance weighting for embedding path...\n  Computing initial PCA (n_comps=60) on weighted data...\n  Applying scanpy.pp.combat directly to PCA components (EtC step)...\n  Final X_emb shape (Combat-corrected PCA): (20000, 60)\n  Building standard Scanpy neighbors graph on X_emb (n_neighbors=15, metric=cosine)...\n  Computing UMAP embedding from the graph (min_dist=0.5)...\n\u2713 Focused EtC Combat on PCs for PCR Baseline workflow complete.\n  Final X_emb shape: (20000, 60)\n  Final Connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ef7816d4-fbd4-4d01-a532-c0cde6be744b/result_human.h5ad\n\nRESULT_UUID: ef7816d4-fbd4-4d01-a532-c0cde6be744b\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.709\n  Graph_conn: 0.907  kBET: 0.790  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596816  NMI: 0.708633\n  Graph_conn: 0.908597  kBET: 0.753916  iLISI: 0.023368  cLISI: 0.997509\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.597",
+          0.5968707379455367
+        ],
+        "NMI": [
+          "0.709",
+          0.7085501822486806
+        ],
+        "Graph_conn": [
+          "0.907",
+          0.9070198558775967
+        ],
+        "kBET": [
+          "0.790",
+          0.7901451472563953
+        ],
+        "iLISI": [
+          "0.023",
+          0.023368194731862395
+        ],
+        "cLISI": [
+          "0.991",
+          0.9914495119905038
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761789024.326124,
+      "evaluation_datetime": "2025-10-30T09:50:24.326125",
+      "sort_key": [
+        0.6251758352878091
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6251758352878091,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761789024.339542,
+    "version_notified": "original",
+    "message": "Your research submission 'Focused EtC Combat on PCs for PCR Baseline (Debugging)' (ID: 1673) has been evaluated.\n\n**Score:** 0.6251758352878091\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.597\n**NMI:** 0.709\n**Graph_conn:** 0.907\n**kBET:** 0.790\n**iLISI:** 0.023\n**cLISI:** 0.991\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.597  NMI: 0.709\n  Graph_conn: 0.907  kBET: 0.790  iLISI: 0.023  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.596816  NMI: 0.708633\n  Graph_conn: 0.908597  kBET: 0.753916  iLISI: 0.023368  cLISI: 0.997509\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Preprocessing: Normalizing, log1p, HVG filtering...\n  Data shape after HVG consideration: (20000, 2000)\n  Applying Feature-Weighted Variance weighting for embedding path...\n  Computing initial PCA (n_comps=60) on weighted data...\n  Applying scanpy.pp.combat directly to PCA components (EtC step)...\n  Final X_emb shape (Combat-corrected PCA): (20000, 60)\n  Building standard Scanpy neighbors graph on X_emb (n_neighbors=15, metric=cosine)...\n  Computing UMAP embedding from the graph (min_dist=0.5)...\n\u2713 Focused EtC Combat on PCs for PCR Baseline workflow complete.\n  Final X_emb shape: (20000, 60)\n  Final Connectivities shape: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ef7816d4-fbd4-4d01-a532-c0cde6be744b/result_human.h5ad\n\nRESULT_UUID: ef7816d4-fbd4-4d01-a532-c0cde6be744b\n\n\nSTDERR:\n\n```"
+  }
+}

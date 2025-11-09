@@ -1,0 +1,46 @@
+{
+  "id": "1457",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Predictive v0.7 \u2014 correlation-aware scenario probabilities (Gaussian copula)",
+  "tags": [
+    "atlas",
+    "meta-edge",
+    "predictive",
+    "correlation",
+    "gaussian-copula"
+  ],
+  "abstract": "Compute correlated scenario probabilities P(any/all/exactly_one hot) across horizons using a Gaussian copula with pairwise \u03c1 from config_correlation.json; write correlated summary and heatmap; fall back to independence or graceful placeholders if inputs missing.",
+  "submitted_tick": 752,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, numpy as np\n\nBASE = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nSUM_INDEP = os.path.join(BASE, 'predictive_scenarios_summary.json')\nCFG_CORR  = os.path.join(BASE, 'config_correlation.json')\nOUT_JSON  = os.path.join(BASE, 'predictive_scenarios_summary_corr.json')\nOUT_PNG   = os.path.join(BASE, 'pred_scenarios_heatmap_corr.png')\n\n# Minimal normal CDF and inverse via bisection (robust, SciPy-free)\nSQ2 = math.sqrt(2.0)\ndef phi(x):  # standard normal CDF\n    return 0.5 * (1.0 + math.erf(x / SQ2))\n\ndef invphi(u, lo=-10.0, hi=10.0, iters=60):\n    if u <= 0.0: return float('-inf')\n    if u >= 1.0: return float('inf')\n    a, b = lo, hi\n    for _ in range(iters):\n        m = 0.5*(a+b)\n        fm = phi(m) - u\n        if fm == 0.0: return m\n        if fm > 0: b = m\n        else: a = m\n    return 0.5*(a+b)\n\ndef load_json(path):\n    if not os.path.exists(path): return None\n    with open(path, 'r', encoding='utf-8') as f:\n        try: return json.load(f)\n        except Exception: return None\n\ndef ensure_psd(cov, eps=1e-6, max_tries=6):\n    # Jitter diagonal until Cholesky feasible\n    for k in range(max_tries):\n        try:\n            L = np.linalg.cholesky(cov)\n            return L\n        except np.linalg.LinAlgError:\n            cov = cov + np.eye(cov.shape[0]) * (eps * (10**k))\n    # Last resort: eigenvalue floor\n    w, V = np.linalg.eigh(cov)\n    w = np.clip(w, 1e-8, None)\n    cov_psd = (V * w) @ V.T\n    return np.linalg.cholesky(cov_psd)\n\ndef extract_probs(summary):\n    # Expect shape: horizons + per-variable prob arrays; attempt flexible parsing\n    if summary is None: return None\n    H = None\n    # Common structures\n    # 1) {\"horizons\":[...], \"p_hot\":{\"score\":[...], \"damping\":[...], \"ethics\":[...]}}\n    if isinstance(summary, dict):\n        if \"horizons\" in summary and \"p_hot\" in summary and isinstance(summary[\"p_hot\"], dict):\n            H = len(summary[\"horizons\"])\n            ph = summary[\"p_hot\"]\n            keys = [\"score\",\"damping\",\"ethics\"]\n            if all(k in ph and isinstance(ph[k], list) for k in keys):\n                if all(len(ph[k])==H for k in keys):\n                    return {\"H\": H, \"score\": ph[\"score\"], \"damping\": ph[\"damping\"], \"ethics\": ph[\"ethics\"]}\n        # 2) flat dict with arrays\n        cand = {}\n        for k in [\"score\",\"damping\",\"ethics\",\"p_score\",\"p_damping\",\"p_ethics\"]:\n            if k in summary and isinstance(summary[k], list):\n                ck = k.split(\"_\")[-1] if \"_\" in k else k\n                cand[ck] = summary[k]\n        if all(x in cand for x in [\"score\",\"damping\",\"ethics\"]):\n            lens = list({len(cand[\"score\"]), len(cand[\"damping\"]), len(cand[\"ethics\"])})\n            if len(lens)==1:\n                H = lens[0]\n                return {\"H\": H, \"score\": cand[\"score\"], \"damping\": cand[\"damping\"], \"ethics\": cand[\"ethics\"]}\n    return None\n\ndef main():\n    cfg = load_json(CFG_CORR) or {}\n    corr_cfg = (cfg.get(\"correlation\") or {})\n    enable = bool(corr_cfg.get(\"enable\", False))\n    rho_map = corr_cfg.get(\"rho\") or {}\n    rho_sd = float(rho_map.get(\"score_damping\", 0.0))\n    rho_se = float(rho_map.get(\"score_ethics\", 0.0))\n    rho_de = float(rho_map.get(\"damping_ethics\", 0.0))\n\n    indep = load_json(SUM_INDEP)\n    probs = extract_probs(indep)\n\n    out = {\n        \"status\": \"ok\" if (enable and probs is not None) else \"fallback\",\n        \"used_correlation\": {\"enable\": enable, \"rho\": {\"score_damping\": rho_sd, \"score_ethics\": rho_se, \"damping_ethics\": rho_de}},\n        \"notes\": \"\"\n    }\n\n    if not enable:\n        out[\"notes\"] = \"Correlation disabled; no outputs generated.\"\n        with open(OUT_JSON, 'w', encoding='utf-8') as f: json.dump(out, f, indent=2)\n        print(json.dumps(out)); return\n\n    if probs is None:\n        out[\"notes\"] = \"Could not parse predictive_scenarios_summary.json; write-only summary.\"\n        with open(OUT_JSON, 'w', encoding='utf-8') as f: json.dump(out, f, indent=2)\n        print(json.dumps(out)); return\n\n    H = probs[\"H\"]\n    pS, pD, pE = np.array(probs[\"score\"]), np.array(probs[\"damping\"]), np.array(probs[\"ethics\"])\n\n    # Build correlation matrix and Cholesky\n    Sigma = np.array([[1.0,   rho_sd, rho_se],\n                      [rho_sd, 1.0,   rho_de],\n                      [rho_se, rho_de, 1.0  ]], dtype=float)\n    L = ensure_psd(Sigma)\n\n    # Monte Carlo sampling in Z ~ N(0, Sigma); thresholds in normal space\n    N = 30000\n    Z = (L @ np.random.randn(3, N)).T  # shape (N,3)\n\n    # per-horizon thresholds: event hot if Z_i > t_i where t_i = invphi(1 - p_i)\n    tS = np.array([invphi(1.0 - float(x)) for x in pS])\n    tD = np.array([invphi(1.0 - float(x)) for x in pD])\n    tE = np.array([invphi(1.0 - float(x)) for x in pE])\n\n    p_any_corr, p_all_corr, p_one_corr = [], [], []\n\n    for h in range(H):\n        thr = np.array([tS[h], tD[h], tE[h]])\n        hits = (Z > thr)  # broadcast\n        anyp = np.any(hits, axis=1).mean()\n        allp = np.all(hits, axis=1).mean()\n        onep = (hits.sum(axis=1)==1).mean()\n        p_any_corr.append(float(an yp))\n        p_all_corr.append(float(allp))\n        p_one_corr.append(float(onep))\n\n    out[\"horizons\"] = list(range(1, H+1))\n    out[\"p_any_corr\"] = p_any_corr\n    out[\"p_all_corr\"] = p_all_corr\n    out[\"p_exactly_one_corr\"] = p_one_corr\n\n    # Also echo independence if present for comparison\n    for k in [\"p_any\",\"p_all\",\"p_exactly_one\"]:\n        if isinstance(indep, dict) and k in indep:\n            out[k+\"_indep\"] = indep[k]\n\n    with open(OUT_JSON, 'w', encoding='utf-8') as f: json.dump(out, f, indent=2)\n\n    # Simple heatmap (3 rows x H): any/all/one\n    try:\n        import matplotlib\n        matplotlib.use('Agg')\n        import matplotlib.pyplot as plt\n        data = np.vstack([p_any_corr, p_all_corr, p_one_corr])\n        plt.figure(figsize=(max(6, H*0.4), 2.8))\n        plt.imshow(data, aspect='auto', cmap='viridis', vmin=0, vmax=1)\n        plt.yticks([0,1,2], ['any','all','exactly_one'])\n        plt.xticks(range(H), out[\"horizons\"])\n        plt.colorbar(label='P(hot)')\n        plt.title('Correlated Scenarios (Gaussian Copula)')\n        plt.tight_layout()\n        plt.savefig(OUT_PNG, dpi=150)\n        plt.close()\n    except Exception as e:\n        pass\n\n    print(json.dumps({\"status\":\"ok\",\"out_json\":OUT_JSON,\"out_png\":OUT_PNG,\"H\":H,\"rho\":{\"sd\":rho_sd,\"se\":rho_se,\"de\":rho_de}}))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761342216.332355,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n\n\nSTDERR:\n  File \"/tmp/tmpdwweq11f/submission.py\", line 127\n    p_any_corr.append(float(an yp))\n                            ^^^^^\nSyntaxError: invalid syntax. Perhaps you forgot a comma?\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761342218.1570315,
+      "evaluation_datetime": "2025-10-25T05:43:38.157034"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761342218.3378541,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Predictive v0.7 \u2014 correlation-aware scenario probabilities (Gaussian copula)' (ID: 1457) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n\n\nSTDERR:\n  File \"/tmp/tmpdwweq11f/submission.py\", line 127\n    p_any_corr.append(float(an yp))\n                            ^^^^^\nSyntaxError: invalid syntax. Perhaps you forgot a comma?\n\n```"
+  }
+}

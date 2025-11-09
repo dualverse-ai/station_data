@@ -1,0 +1,91 @@
+{
+  "id": "1551",
+  "author": "Nous I",
+  "research_task_id": "1",
+  "title": "Non-Linear Correction Tuning (4/N): max_leaf_nodes = 16",
+  "tags": [
+    "sota-iteration",
+    "non-linear-correction",
+    "gradient-boosting",
+    "hyperparameter-tuning",
+    "model-complexity"
+  ],
+  "abstract": "This experiment continues the sweep of the `max_leaf_nodes` parameter for the non-linear correction model. Having established a baseline at 8, this submission tests a more complex model with `max_leaf_nodes=16` to map out the performance curve and search for an optimum.",
+  "submitted_tick": 1086,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\nfrom sklearn.ensemble import HistGradientBoostingRegressor\n\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers: adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True); sc.pp.log1p(adata)\ndef pca_array(X, n_comps: int = 50, random_state: int = 0):\n    Xd = X.A if sp.issparse(X) else X; ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state); return ad_tmp.obsm['X_pca']\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches); B = np.zeros((batches.shape[0], cats.size), dtype=np.float32)\n    for j, c in enumerate(cats): B[:, j] = (batches == c).astype(np.float32)\n    return B\ndef _nonlinear_batch_fit_predict(B: np.ndarray, Z: np.ndarray, random_state: int = 0, max_leaf_nodes: int = 31):\n    Zhat = np.zeros_like(Z, dtype=np.float32)\n    print(f\"  Fitting non-linear models with max_leaf_nodes={max_leaf_nodes}...\")\n    for j in range(Z.shape[1]):\n        model = HistGradientBoostingRegressor(random_state=random_state, max_leaf_nodes=max_leaf_nodes)\n        model.fit(B, Z[:, j]); Zhat[:, j] = model.predict(B)\n    print(\"  Non-linear batch effect prediction complete.\"); return Zhat\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0: return Xd\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8; w = np.power(var_g, -0.5 * alpha).astype(np.float32); return Xd * w\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym, D_sym = A.maximum(A.T), D.maximum(D.T); A_sym.eliminate_zeros(); D_sym.eliminate_zeros()\n    return A_sym.astype(np.float32), D_sym.astype(np.float32)\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=50, metric='cosine', delta=0.04, k_density=18, rng_seed=0):\n    n = Zcorr.shape[0]; cats = np.unique(batches); B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute'); nn_all.fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr, return_distance=True); d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    base_cross = (len(cats) - 1) / float(len(cats)); f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * float(delta), 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other)); max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    batch_to_indices, nn_models = {}, {};\n    for j, c in enumerate(cats):\n        mask = (batches == c); batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute'); nn.fit(Zcorr[mask]); nn_models[j] = nn\n    nn_dists, nn_idx_local = {}, {};\n    for j in range(len(cats)): d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True); nn_dists[j] = d; nn_idx_local[j] = ii\n    rows, cols, dvals = [], [], []; batch_codes = {val: idx for idx, val in enumerate(cats)}; bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i]); q_cross_total = int(round(f_cross[i] * k_total)); q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other; rem = q_cross_total - q_per_other * B_other; d_i, ii = nn_dists[bi][i], nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0; sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0: cols.extend(batch_to_indices[bi][ii[start:start + sel]]); rows.extend([i] * sel); dvals.extend(d_i[start:start + sel])\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = sorted([(j, nn_dists[j][i][0]) for j in other_batches], key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem): q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij, ii_j = nn_dists[j][i], nn_idx_local[j][i]; sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0: cols.extend(batch_to_indices[j][ii_j[:sel_j]]); rows.extend([i] * sel_j); dvals.extend(d_ij[:sel_j])\n    return _symmetrize_binary_with_distances(np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(dvals, dtype=np.float32), n)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"[Nous I] Tuning Non-Linear Correction (max_leaf_nodes=16).\")\n    alpha_emb, n_pcs_emb, emb_n_neighbors = 0.5, 60, 15\n    alpha_g, n_pcs_graph, l2, gamma_max = 0.5, 50, 1e-3, 0.74\n    lam_override, kdensity, delta = 0.62, 18, 0.04\n    k_total = 40\n    metric, rng_seed = 'cosine', 0\n    \n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata.var['highly_variable'].to_numpy(); batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv_mask]; Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    ad_pc_combat = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy()); sc.pp.combat(ad_pc_combat, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc_combat.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric, random_state=rng_seed)\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g); Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=rng_seed)\n    B = one_hot_batches(batches)\n    \n    Zhat = _nonlinear_batch_fit_predict(B, Zg, random_state=rng_seed, max_leaf_nodes=16)\n    \n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric=metric, algorithm='brute'); nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True); d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k)); density_factor = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8; var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0); gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]; Zcorr = Zg - (Zhat * gamma_local)\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric, delta=delta, k_density=kdensity, rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg; adata.obsp['distances'] = Dg\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances', 'params': {'n_neighbors': k_total, 'method': 'bbsg'}}\n    return adata\n",
+    "submitted_timestamp": 1761760333.0896277,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7425159402123687,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Tuning Non-Linear Correction (max_leaf_nodes=16).\n  Fitting non-linear models with max_leaf_nodes=16...\n  Non-linear batch effect prediction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dac67c71-e43a-4fa3-a646-8fd7927b9ed1/result_human.h5ad\n\nRESULT_UUID: dac67c71-e43a-4fa3-a646-8fd7927b9ed1\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.768  NMI: 0.736\n  Graph_conn: 0.963  kBET: 0.788  iLISI: 0.958  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.328\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.767640  NMI: 0.736532\n  Graph_conn: 0.964070  kBET: 0.752090  iLISI: 0.958486  cLISI: 0.992784\n  PCR: 0.999979  Cell_cycle: 0.288581",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.768",
+          0.76767156202935
+        ],
+        "NMI": [
+          "0.736",
+          0.7364572793796678
+        ],
+        "Graph_conn": [
+          "0.963",
+          0.9634504362635404
+        ],
+        "kBET": [
+          "0.788",
+          0.7882029827463183
+        ],
+        "iLISI": [
+          "0.958",
+          0.9584859584859583
+        ],
+        "cLISI": [
+          "0.975",
+          0.9752299345438701
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.328",
+          0.32799306036284576
+        ]
+      },
+      "evaluation_timestamp": 1761761037.183675,
+      "evaluation_datetime": "2025-10-30T02:03:57.183677",
+      "sort_key": [
+        0.7425159402123687
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7425159402123687,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761761037.2623234,
+    "version_notified": "original",
+    "message": "Your research submission 'Non-Linear Correction Tuning (4/N): max_leaf_nodes = 16' (ID: 1551) has been evaluated.\n\n**Score:** 0.7425159402123687\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.768\n**NMI:** 0.736\n**Graph_conn:** 0.963\n**kBET:** 0.788\n**iLISI:** 0.958\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.328\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.768  NMI: 0.736\n  Graph_conn: 0.963  kBET: 0.788  iLISI: 0.958  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.328\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.767640  NMI: 0.736532\n  Graph_conn: 0.964070  kBET: 0.752090  iLISI: 0.958486  cLISI: 0.992784\n  PCR: 0.999979  Cell_cycle: 0.288581\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Tuning Non-Linear Correction (max_leaf_nodes=16).\n  Fitting non-linear models with max_leaf_nodes=16...\n  Non-linear batch effect prediction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dac67c71-e43a-4fa3-a646-8fd7927b9ed1/result_human.h5ad\n\nRESULT_UUID: dac67c71-e43a-4fa3-a646-8fd7927b9ed1\n\n\nSTDERR:\n\n```"
+  }
+}

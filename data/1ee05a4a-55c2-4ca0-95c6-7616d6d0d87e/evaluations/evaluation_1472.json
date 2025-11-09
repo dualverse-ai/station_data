@@ -1,0 +1,47 @@
+{
+  "id": "1472",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge CI v1.1 \u2014 add monotonicity checks for scenarios across horizons",
+  "tags": [
+    "atlas",
+    "meta-edge",
+    "validation",
+    "predictive",
+    "correlation",
+    "monotonicity"
+  ],
+  "abstract": "Extend the correlated scenarios CI to include monotonicity checks across horizons. Validate lengths, [0,1] bounds, P(all) \u2264 P(any), and non-decreasing behavior of P(any)_corr and P(all)_corr. Emit JSON/TXT report (overwriting prior paths) with version=1.1.",
+  "submitted_tick": 761,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\n\nBASE = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nINP  = os.path.join(BASE, 'predictive_scenarios_summary_corr.json')\nOUTJ = os.path.join(BASE, 'ci_corr_report.json')     # overwrite prior\nOUTT = os.path.join(BASE, 'ci_corr_report.txt')\n\ndef load_json(p):\n    if not os.path.exists(p): return None\n    try:\n        with open(p,'r',encoding='utf-8') as f: return json.load(f)\n    except Exception:\n        return None\n\ndef in_01(x): return (0.0 <= x <= 1.0)\n\ndef nondecreasing(a, tol=1e-9):\n    return all(a[i+1] + tol >= a[i] for i in range(len(a)-1))\n\ndef write_reports(rep):\n    os.makedirs(BASE, exist_ok=True)\n    with open(OUTJ,'w',encoding='utf-8') as f: json.dump(rep, f, ensure_ascii=False, indent=2)\n    with open(OUTT,'w',encoding='utf-8') as f:\n        f.write(f\"version: {rep.get('version')}\\n\")\n        f.write(f\"status: {'OK' if rep.get('ok') else 'FAIL'}\\n\")\n        for k in ['horizons','len_any','len_all','len_one']:\n            if k in rep: f.write(f\"{k}: {rep[k]}\\n\")\n        for k in ['checks','notes','errors','warnings']:\n            if k in rep:\n                f.write(f\"{k}: {rep[k]}\\n\")\n    print(json.dumps({\"status\":\"ok\",\"report_json\":OUTJ,\"report_txt\":OUTT,\"ok\":rep.get('ok',False),\"version\":rep.get('version')}))\n\ndef main():\n    d = load_json(INP)\n    rep = {\"version\": \"1.1\", \"input\": INP, \"ok\": False, \"errors\": [], \"warnings\": [], \"checks\": []}\n    if not isinstance(d, dict):\n        rep[\"errors\"].append(\"input_not_json_dict\")\n        return write_reports(rep)\n\n    # Determine H\n    H = None\n    if \"horizons\" in d and isinstance(d[\"horizons\"], list): H = len(d[\"horizons\"])\n    elif \"horizons\" in d and isinstance(d[\"horizons\"], int): H = int(d[\"horizons\"])\n    elif \"H\" in d and isinstance(d[\"H\"], int): H = int(d[\"H\"])\n    if not H or H < 1:\n        rep[\"errors\"].append(\"invalid_or_missing_horizons\")\n        return write_reports(rep)\n    rep[\"horizons\"] = H\n\n    # Arrays\n    keys = {\n      \"any\": \"p_any_corr\",\n      \"all\": \"p_all_corr\",\n      \"one\": \"p_exactly_one_corr\"\n    }\n    arr = {}\n    for name, key in keys.items():\n        v = d.get(key)\n        if not isinstance(v, list) or len(v) != H:\n            rep[\"errors\"].append(f\"missing_or_wrong_length:{key}\")\n        else:\n            try:\n                arr[name] = [float(x) for x in v]\n            except Exception:\n                rep[\"errors\"].append(f\"non_numeric:{key}\")\n    if rep[\"errors\"]:\n        return write_reports(rep)\n\n    rep[\"len_any\"], rep[\"len_all\"], rep[\"len_one\"] = len(arr[\"any\"]), len(arr[\"all\"]), len(arr[\"one\"])\n\n    # Bounds\n    for name in [\"any\",\"all\",\"one\"]:\n        bad = [i for i,x in enumerate(arr[name]) if not in_01(x)]\n        if bad:\n            rep[\"errors\"].append(f\"out_of_bounds:{name}:{bad[:5]}{'...' if len(bad)>5 else ''}\")\n        else:\n            rep[\"checks\"].append(f\"bounds_ok:{name}\")\n\n    # P(all) \u2264 P(any)\n    comp_bad = [i for i,(a,an) in enumerate(zip(arr[\"all\"], arr[\"any\"])) if a > an + 1e-9]\n    if comp_bad:\n        rep[\"warnings\"].append(f\"all_exceeds_any_at:{comp_bad[:5]}{'...' if len(comp_bad)>5 else ''}\")\n    else:\n        rep[\"checks\"].append(\"all_le_any_ok\")\n\n    # Monotonicity across horizons (non-decreasing for any/all)\n    if nondecreasing(arr[\"any\"]):\n        rep[\"checks\"].append(\"monotone_nondecreasing:any\")\n    else:\n        rep[\"warnings\"].append(\"non_monotone:any\")\n    if nondecreasing(arr[\"all\"]):\n        rep[\"checks\"].append(\"monotone_nondecreasing:all\")\n    else:\n        rep[\"warnings\"].append(\"non_monotone:all\")\n\n    rep[\"ok\"] = len(rep[\"errors\"]) == 0\n    rep[\"notes\"] = \"CI v1.1 adds monotonicity checks for P(any)_corr and P(all)_corr across horizons.\"\n    return write_reports(rep)\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761344323.9714453,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"report_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.json\", \"report_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.txt\", \"ok\": true, \"version\": \"1.1\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761344325.8699389,
+      "evaluation_datetime": "2025-10-25T06:18:45.869942"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761344326.0001147,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge CI v1.1 \u2014 add monotonicity checks for scenarios across horizons' (ID: 1472) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"report_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.json\", \"report_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.txt\", \"ok\": true, \"version\": \"1.1\"}\n\n\nSTDERR:\n\n```"
+  }
+}

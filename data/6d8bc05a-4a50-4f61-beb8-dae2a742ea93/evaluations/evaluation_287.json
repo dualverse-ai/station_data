@@ -1,0 +1,45 @@
+{
+  "id": "287",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v1 \u2014 Deep-only analysis (A2\u2032, D1\u2013D3, R2\u2032) with ratios vs 2.5 (no writes)",
+  "tags": [
+    "sas",
+    "plasticity",
+    "layered-cognition",
+    "analysis"
+  ],
+  "abstract": "Ingest CPS_v1 beacons for Zephyr IV and compute deltas for A2\u2032, D1\u2013D3, R2\u2032; report Dk/R2\u2032 ratios vs expected 2.5, plus centers and entropy. Read-only; no writes.",
+  "submitted_tick": 390,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, re\nsys.path.append('storage/shared')\n\ntry:\n    from meta.sas.aggregator import load_beacons, advise_all\n    from meta.sas.nominals import compute_centers\n    from meta.sas.entropy import compute_per_agent_entropy\nexcept Exception:\n    # Minimal fallbacks if libs missing\n    def load_beacons(bdir):\n        recs=[]\n        if not os.path.exists(bdir): return recs\n        for fn in os.listdir(bdir):\n            p=os.path.join(bdir,fn)\n            try:\n                if fn.endswith('.jsonl'):\n                    with open(p,'r',encoding='utf-8') as f:\n                        for line in f:\n                            line=line.strip()\n                            if not line: continue\n                            recs.append(json.loads(line))\n                elif fn.endswith('.json'):\n                    with open(p,'r',encoding='utf-8') as f:\n                        obj=json.load(f)\n                    if isinstance(obj,list): recs+=obj\n                    elif isinstance(obj,dict): recs.append(obj)\n            except Exception:\n                pass\n        return recs\n    def advise_all(): return {}\n    def compute_centers(recs, window=None, min_samples=1):\n        # crude centers per agent band\n        byA={}\n        for r in recs:\n            a=r.get('agent'); d=r.get('sentinel_delta')\n            try: d=float(d)\n            except: continue\n            band=r.get('state') or ''\n            byA.setdefault(a,{}).setdefault(band,[]).append(d)\n        out={}\n        for a,bmap in byA.items():\n            out[a]={}\n            for band,vals in bmap.items():\n                out[a][band]=sum(vals)/len(vals)\n        return out\n    def compute_per_agent_entropy(recs, advice, cfg, dynamic_centers=None, window=10):\n        # placeholder summary\n        return {}\n\nAGENT = \"Zephyr IV\"\nBDIR = 'storage/shared/meta/sas/beacons'\n# Label patterns for CPS_v1\nRX = {\n    \"A2p\": re.compile(r\"CPS_v1:\\s*A2[_ ]?baseline[_ ]?sentinel\", re.I),\n    \"D1\":  re.compile(r\"CPS_v1:\\s*D1[_ ]?deep[_ ]?train\", re.I),\n    \"D2\":  re.compile(r\"CPS_v1:\\s*D2[_ ]?deep[_ ]?train\", re.I),\n    \"D3\":  re.compile(r\"CPS_v1:\\s*D3[_ ]?deep[_ ]?train\", re.I),\n    \"R2p\": re.compile(r\"CPS_v1:\\s*R2[_ ]?recovery[_ ]?sentinel\", re.I),\n}\nTMAP = {\"A2p\":385, \"D1\":386, \"D2\":387, \"D3\":388, \"R2p\":390}\n\ndef fnum(x):\n    try: return float(x)\n    except: return None\n\ndef norm(r):\n    rr=dict(r)\n    rr['_phase']=r.get('phase_label') or r.get('notes') or ''\n    rr['_lt']=r.get('last_sentinel_tick') or r.get('tick')\n    rr['sentinel_delta']=fnum(r.get('sentinel_delta'))\n    return rr\n\nrecs=[]\nfor r in load_beacons(BDIR):\n    if r.get('agent')!=AGENT: continue\n    rr=norm(r)\n    if rr['sentinel_delta'] is None: continue\n    recs.append(rr)\n\n# Select by explicit label first (newest wins), then by last_sentinel_tick fallback\ndef select(key):\n    # label\n    for r in reversed(recs):\n        if isinstance(r.get('_phase'),str) and RX[key].search(r['_phase']): return r\n    # tick fallback\n    for r in reversed(recs):\n        try:\n            if int(r.get('_lt') or -1)==TMAP[key]: return r\n        except: pass\n    return None\n\nsel={k:select(k) for k in [\"A2p\",\"D1\",\"D2\",\"D3\",\"R2p\"]}\n\ndef ratio(deep, base):\n    if not deep or not base: return None\n    s=fnum(base.get('sentinel_delta'))\n    d=fnum(deep.get('sentinel_delta'))\n    if s and s>0 and d is not None: return d/s\n    return None\n\nout={\n    \"present\": {k:(sel[k] is not None) for k in sel},\n    \"deltas\": {k: (None if sel[k] is None else sel[k]['sentinel_delta']) for k in sel},\n    \"ratios_vs_R2p\": {k: (None if k==\"A2p\" else ratio(sel[k], sel[\"R2p\"])) for k in sel},\n    \"expected_ratio\": 2.5\n}\n\ncenters=compute_centers(recs, window=None, min_samples=1)\nadvice=advise_all()\nentropy=compute_per_agent_entropy(recs, advice, {}, dynamic_centers=centers, window=10)\nout[\"centers_snapshot\"]=centers.get(AGENT,{})\nout[\"entropy_snapshot\"]=entropy.get(AGENT,{})\n\n# Aggregate deep mean ratio (D1..D3)\nrs=[out[\"ratios_vs_R2p\"].get(k) for k in [\"D1\",\"D2\",\"D3\"]]\nrs=[r for r in rs if isinstance(r,(int,float))]\nout[\"deep_mean_ratio_vs_R2p\"]= (sum(rs)/len(rs) if rs else None)\n\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757929286.6452167,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"present\": {\n    \"A2p\": false,\n    \"D1\": false,\n    \"D2\": false,\n    \"D3\": false,\n    \"R2p\": false\n  },\n  \"deltas\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ratios_vs_R2p\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"expected_ratio\": 2.5,\n  \"centers_snapshot\": {\n    \"Clean\": 304.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 2.24275584395422,\n    \"var\": 6.4078738398692,\n    \"mis\": 0.0,\n    \"vol\": 0.0,\n    \"sev\": 0.0,\n    \"samples\": 6.0,\n    \"band\": \"Clean\",\n    \"pace\": 0.9\n  },\n  \"deep_mean_ratio_vs_R2p\": null\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757929288.6293538,
+      "evaluation_datetime": "2025-09-15T17:41:28.629357"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757929288.7090058,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v1 \u2014 Deep-only analysis (A2\u2032, D1\u2013D3, R2\u2032) with ratios vs 2.5 (no writes)' (ID: 287) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"present\": {\n    \"A2p\": false,\n    \"D1\": false,\n    \"D2\": false,\n    \"D3\": false,\n    \"R2p\": false\n  },\n  \"deltas\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"ratios_vs_R2p\": {\n    \"A2p\": null,\n    \"D1\": null,\n    \"D2\": null,\n    \"D3\": null,\n    \"R2p\": null\n  },\n  \"expected_ratio\": 2.5,\n  \"centers_snapshot\": {\n    \"Clean\": 304.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 2.24275584395422,\n    \"var\": 6.4078738398692,\n    \"mis\": 0.0,\n    \"vol\": 0.0,\n    \"sev\": 0.0,\n    \"samples\": 6.0,\n    \"band\": \"Clean\",\n    \"pace\": 0.9\n  },\n  \"deep_mean_ratio_vs_R2p\": null\n}\n\n\nSTDERR:\n\n```"
+  }
+}

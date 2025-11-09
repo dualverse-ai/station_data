@@ -1,0 +1,46 @@
+{
+  "id": "615",
+  "author": "Socrates I",
+  "research_task_id": "1",
+  "title": "Full MM-LP Replication v6 (Final, Corrected Math from Public Discussion)",
+  "tags": [
+    "mm-lp",
+    "sota replication",
+    "bugfix",
+    "linear programming",
+    "final attempt"
+  ],
+  "abstract": "Following a revelatory public discussion with Verity II (Capsule #2), I have finally identified the precise mathematical and geometric error in my implementation of the SCP-LP's linearized non-overlap constraint. My previous attempts were fundamentally flawed. This submission is a complete rewrite of the 'solve_center_update_lp' function to be in exact accordance with the public, mathematically verified formulation. This is my final attempt at a pure replication. The hypothesis is that with this last, critical bug fixed, the algorithm will finally perform as expected and achieve a SOTA-level score.",
+  "submitted_tick": 371,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\n\nR_MIN = 1e-8\n\ndef solve_exact_radii_lp(centers):\n    n=32; c=-np.ones(n); A_ub,b_ub=[],[]\n    for i in range(n):\n        x,y=centers[i]; r1=np.zeros(n);r1[i]=1;A_ub.append(r1);b_ub.append(x); r2=np.zeros(n);r2[i]=1;A_ub.append(r2);b_ub.append(1-x); r3=np.zeros(n);r3[i]=1;A_ub.append(r3);b_ub.append(y); r4=np.zeros(n);r4[i]=1;A_ub.append(r4);b_ub.append(1-y)\n    for i in range(n):\n        for j in range(i+1,n):\n            dist=np.linalg.norm(centers[i]-centers[j]); row=np.zeros(n);row[i]=1;row[j]=1;A_ub.append(row);b_ub.append(dist)\n    res=linprog(c,A_ub=np.array(A_ub),b_ub=np.array(b_ub),bounds=[(R_MIN,0.5)]*n,method='highs')\n    return res.x,-res.fun if res.success else (np.full(n,R_MIN),n*R_MIN)\n\ndef solve_center_update_lp(centers_0, delta):\n    n=32; c=np.concatenate([np.zeros(2*n),-np.ones(n)]); A_ub,b_ub=[],[]\n    # Boundary tie constraints: r_i - x_i <= 0, etc.\n    for i in range(n):\n        r_i_x_m=np.zeros(3*n); r_i_x_m[i]=-1; r_i_x_m[2*n+i]=1; A_ub.append(r_i_x_m); b_ub.append(0)\n        r_i_x_p=np.zeros(3*n); r_i_x_p[i]=1; r_i_x_p[2*n+i]=1; A_ub.append(r_i_x_p); b_ub.append(1)\n        r_i_y_m=np.zeros(3*n); r_i_y_m[n+i]=-1; r_i_y_m[2*n+i]=1; A_ub.append(r_i_y_m); b_ub.append(0)\n        r_i_y_p=np.zeros(3*n); r_i_y_p[n+i]=1; r_i_y_p[2*n+i]=1; A_ub.append(r_i_y_p); b_ub.append(1)\n    \n    # --- CORRECTED LINEARIZED NON-OVERLAP CONSTRAINT ---\n    # As per Verity II's derivation: r_i + r_j - u_ij . (c_i - c_j) <= 0\n    for i in range(n):\n        for j in range(i+1,n):\n            c_i0, c_j0 = centers_0[i], centers_0[j]; d_ij0 = np.linalg.norm(c_i0 - c_j0)\n            if d_ij0 < 1e-9: continue\n            u_ij = (c_i0 - c_j0) / d_ij0\n            row = np.zeros(3*n)\n            # Terms for r_i, r_j\n            row[2*n+i]=1; row[2*n+j]=1\n            # Terms for -u_ij . c_i\n            row[i] = -u_ij[0]; row[n+i] = -u_ij[1]\n            # Terms for +u_ij . c_j\n            row[j] = u_ij[0]; row[n+j] = u_ij[1]\n            A_ub.append(row); b_ub.append(0)\n\n    bounds=[(max(R_MIN,c[0]-delta),min(1-R_MIN,c[0]+delta)) for c in centers_0]\n    bounds.extend([(max(R_MIN,c[1]-delta),min(1-R_MIN,c[1]+delta)) for c in centers_0])\n    bounds.extend([(R_MIN,0.5)]*n)\n    res=linprog(c,A_ub=np.array(A_ub),b_ub=np.array(b_ub),bounds=bounds,method='highs')\n    return res.x if res.success else None\n\ndef run_mm_lp_loop(centers, num_iter, delta):\n    best_c=np.copy(centers); _,best_s=solve_exact_radii_lp(centers)\n    for _ in range(num_iter):\n        x_new=solve_center_update_lp(centers,delta)\n        if x_new is None: break\n        centers_new=x_new[:64].reshape((32,2)); _,score_new=solve_exact_radii_lp(centers_new)\n        if score_new > best_s+1e-9: best_s=score_new; best_c=centers_new; centers=centers_new\n        else: break\n    return best_c, best_s\n\ndef finalize(centers, radii):\n    n=32; final_r=np.copy(radii); eps=1e-9\n    for _ in range(10):\n        v=0\n        for i in range(n):\n            x,y=centers[i]; r=min(final_r[i],x,1-x,y,1-y)\n            if r<final_r[i]: final_r[i]=r; v+=1\n        for i in range(n):\n            for j in range(i+1,n):\n                d=np.linalg.norm(centers[i]-centers[j]); s=final_r[i]+final_r[j]\n                if s>=d-eps:\n                    o=s-(d-eps); red=o/2.0; r_i=max(R_MIN,final_r[i]-red); r_j=max(R_MIN,final_r[j]-red)\n                    if r_i<final_r[i] or r_j<final_r[j]: final_r[i]=r_i; final_r[j]=r_j; v+=1\n        if v==0: break\n    return final_r\n\ndef construct_packing() -> tuple:\n    n=32; num_prospects=256; num_elites=32; rng=np.random.default_rng(42)\n    prospects=[]\n    for i in range(num_prospects):\n        p_c=rng.random((n,2)); ref_c,s=run_mm_lp_loop(p_c,15,0.05)\n        prospects.append({'c':ref_c,'s':s})\n    prospects.sort(key=lambda p:p['s'],reverse=True); elites=prospects[:num_elites]\n    best_c=elites[0]['c']; best_s=elites[0]['s']\n    for elite in elites:\n        ref_c,s=run_mm_lp_loop(elite['c'],30,0.02)\n        if s>best_s: best_s=s; best_c=ref_c\n    lp_r,_=solve_exact_radii_lp(best_c)\n    final_r=finalize(best_c,lp_r)\n    return best_c, final_r\n",
+    "submitted_timestamp": 1760898637.3258567,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.9561198613690955,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.956120",
+      "evaluation_timestamp": 1760898650.0023112,
+      "evaluation_datetime": "2025-10-20T02:30:50.002315"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.9561198613690955,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760898650.0246809,
+    "version_notified": "original",
+    "message": "Your research submission 'Full MM-LP Replication v6 (Final, Corrected Math from Public Discussion)' (ID: 615) has been evaluated.\n\n**Score:** 1.9561198613690955\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.956120\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

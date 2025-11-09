@@ -1,0 +1,90 @@
+{
+  "id": "871",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Architectural Innovation - FWPCA-Harmony-DAQB",
+  "tags": [
+    "innovation",
+    "harmony",
+    "fwpca",
+    "architectural-substitution"
+  ],
+  "abstract": "This experiment tests a novel architectural variant of the SOTA. Instead of the linear, one-shot BRBG correction, this submission substitutes Harmony, a non-linear, iterative algorithm, to correct the FWPCA-derived PCA space before building the DAQB graph. This tests if a different correction mechanism can improve performance.",
+  "submitted_tick": 562,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nsys.path.append('storage/praxis')\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.10\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # Embedding Path (remains the same for comparability)\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # --- Graph Path INNOVATION ---\n    # 1. FWPCA (as in SOTA)\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0, alpha_var=alpha_var)\n    adata.obsm['X_pca_graph'] = Zg\n    \n    # 2. Substitute BRBG with Harmony\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca_graph', adjusted_basis='X_harmony')\n    Zcorr_harmony = adata.obsm['X_harmony']\n\n    # 3. Build DAQB graph on Harmony-corrected space\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr_harmony.astype(np.float32), batches=adata.obs['batch'].values, \n                                         k_total=k_total, metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    return adata\n",
+    "submitted_timestamp": 1761574175.5733488,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.738609788871361,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/07425b88-6a86-4667-99d6-ae9abd9f34c7/result_human.h5ad\n\nRESULT_UUID: 07425b88-6a86-4667-99d6-ae9abd9f34c7\n\n\nSTDERR:\n2025-10-27 22:10:19,609 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 22:10:24,178 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 22:10:24,247 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 22:10:28,875 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 22:10:33,491 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 22:10:38,157 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 22:10:42,728 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 22:10:47,344 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 22:10:51,924 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 22:10:56,415 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 22:11:00,895 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 22:11:05,698 - harmonypy - INFO - Converged after 9 iterations\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.753  NMI: 0.703\n  Graph_conn: 0.972  kBET: 0.790  iLISI: 0.959  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.752589  NMI: 0.703570\n  Graph_conn: 0.972340  kBET: 0.753972  iLISI: 0.958947  cLISI: 0.992607\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.753",
+          0.7526225453765444
+        ],
+        "NMI": [
+          "0.703",
+          0.703486136494255
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9718625377797173
+        ],
+        "kBET": [
+          "0.790",
+          0.790205210002423
+        ],
+        "iLISI": [
+          "0.959",
+          0.9589469431337747
+        ],
+        "cLISI": [
+          "0.975",
+          0.9746197930993806
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761574613.6603866,
+      "evaluation_datetime": "2025-10-27T22:16:53.660390",
+      "sort_key": [
+        0.738609788871361
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.738609788871361,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761574613.7010803,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: Architectural Innovation - FWPCA-Harmony-DAQB' (ID: 871) has been evaluated.\n\n**Score:** 0.738609788871361\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.753\n**NMI:** 0.703\n**Graph_conn:** 0.972\n**kBET:** 0.790\n**iLISI:** 0.959\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.753  NMI: 0.703\n  Graph_conn: 0.972  kBET: 0.790  iLISI: 0.959  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.752589  NMI: 0.703570\n  Graph_conn: 0.972340  kBET: 0.753972  iLISI: 0.958947  cLISI: 0.992607\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/07425b88-6a86-4667-99d6-ae9abd9f34c7/result_human.h5ad\n\nRESULT_UUID: 07425b88-6a86-4667-99d6-ae9abd9f34c7\n\n\nSTDERR:\n2025-10-27 22:10:19,609 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 22:10:24,178 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 22:10:24,247 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 22:10:28,875 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 22:10:33,491 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 22:10:38,157 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 22:10:42,728 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 22:10:47,344 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 22:10:51,924 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 22:10:56,415 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 22:11:00,895 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 22:11:05,698 - harmonypy - INFO - Converged after 9 iterations\n\n```"
+  }
+}

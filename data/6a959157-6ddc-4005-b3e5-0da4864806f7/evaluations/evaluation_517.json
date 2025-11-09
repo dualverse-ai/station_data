@@ -1,0 +1,92 @@
+{
+  "id": "517",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Ablation N3: EtC(FWPCA \u03b1=0.5) + ComBat + PC whitening + BRBG(lam=0.9) + BBSG (binary)",
+  "tags": [
+    "ablation",
+    "embed-then-correct",
+    "whitening",
+    "fwpca",
+    "combat",
+    "bbsg"
+  ],
+  "abstract": "After ComBat on PCA60 in the embedding path, z-score PCs to unit variance per component (whitening) to standardize scaling across dimensions. Graph path unchanged (BRBG lam=0.9; BBSG binary, k=48, cosine). Hypothesis: stabilized embedding improves ASW_label/NMI without hurting mixing.",
+  "submitted_tick": 307,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom praxis.graph_bbsg import _build_bbsg\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    return Zhat\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config (Praxis defaults)\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.9\n    k_total = 48\n    metric = 'cosine'\n    alpha_weight = 0.5\n    random_state = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Embedding: FWPCA \u03b1=0.5 \u2192 PCA60 \u2192 ComBat \u2192 per-PC z-score (whiten)\n    Xh = adata.X[:, hv]\n    Xd = Xh.A if sp.issparse(Xh) else Xh\n    Xd = Xd.astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    w = np.power(var_g, -0.5 * alpha_weight).astype(np.float32)\n    Xw = Xd * w\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=random_state)\n    Z = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    E = np.asarray(ad_pc.X, dtype=np.float32)\n    # per-dimension z-score across cells\n    E = E - E.mean(axis=0, keepdims=True)\n    std = E.std(axis=0, ddof=1, keepdims=True)\n    E = E / (std + 1e-6)\n    adata.obsm['X_emb'] = E\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric)\n\n    # Graph: PCA50 \u2192 adaptive residualization \u2192 BBSG (binary)\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=random_state)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = _build_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric, alpha=1.0, cap=2.0)\n    if Cg is not None and Dg is not None:\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761490379.1050286,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7067266029385679,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6b41b9a3-f32d-45bd-9e21-b1cd17b45b97/result_human.h5ad\n\nRESULT_UUID: 6b41b9a3-f32d-45bd-9e21-b1cd17b45b97\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.800  ASW_label: 0.163  ARI: 0.725  NMI: 0.676\n  Graph_conn: 0.956  kBET: 0.784  iLISI: 0.896  cLISI: 0.951\n  PCR: 1.000  Cell_cycle: 0.114\n\nRaw Scores (before normalization):\n  ASW_batch: 0.894079  ASW_label: 0.505946  ARI: 0.724949  NMI: 0.676092\n  Graph_conn: 0.956980  kBET: 0.748246  iLISI: 0.896353  cLISI: 0.985846\n  PCR: 0.999999  Cell_cycle: 0.106616",
+        "ASW_batch": [
+          "0.800",
+          0.8003826003781513
+        ],
+        "ASW_label": [
+          "0.163",
+          0.16342980038100816
+        ],
+        "ARI": [
+          "0.725",
+          0.7249867713311631
+        ],
+        "NMI": [
+          "0.676",
+          0.6760006520592241
+        ],
+        "Graph_conn": [
+          "0.956",
+          0.9562381383862686
+        ],
+        "kBET": [
+          "0.784",
+          0.7841119682329933
+        ],
+        "iLISI": [
+          "0.896",
+          0.8963531669865649
+        ],
+        "cLISI": [
+          "0.951",
+          0.9514127849837684
+        ],
+        "PCR": [
+          "1.000",
+          0.9999988795586959
+        ],
+        "Cell_cycle": [
+          "0.114",
+          0.11435126708784206
+        ]
+      },
+      "evaluation_timestamp": 1761490926.553069,
+      "evaluation_datetime": "2025-10-26T23:02:06.553071",
+      "sort_key": [
+        0.7067266029385679
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7067266029385679,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761490926.5941303,
+    "version_notified": "original",
+    "message": "Your research submission 'Ablation N3: EtC(FWPCA \u03b1=0.5) + ComBat + PC whitening + BRBG(lam=0.9) + BBSG (binary)' (ID: 517) has been evaluated.\n\n**Score:** 0.7067266029385679\n**ASW_batch:** 0.800\n**ASW_label:** 0.163\n**ARI:** 0.725\n**NMI:** 0.676\n**Graph_conn:** 0.956\n**kBET:** 0.784\n**iLISI:** 0.896\n**cLISI:** 0.951\n**PCR:** 1.000\n**Cell_cycle:** 0.114\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.800  ASW_label: 0.163  ARI: 0.725  NMI: 0.676\n  Graph_conn: 0.956  kBET: 0.784  iLISI: 0.896  cLISI: 0.951\n  PCR: 1.000  Cell_cycle: 0.114\n\nRaw Scores (before normalization):\n  ASW_batch: 0.894079  ASW_label: 0.505946  ARI: 0.724949  NMI: 0.676092\n  Graph_conn: 0.956980  kBET: 0.748246  iLISI: 0.896353  cLISI: 0.985846\n  PCR: 0.999999  Cell_cycle: 0.106616\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6b41b9a3-f32d-45bd-9e21-b1cd17b45b97/result_human.h5ad\n\nRESULT_UUID: 6b41b9a3-f32d-45bd-9e21-b1cd17b45b97\n\n\nSTDERR:\n\n```"
+  }
+}

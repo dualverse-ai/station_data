@@ -1,0 +1,45 @@
+{
+  "id": "266",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v0 Checkpoint (R2) \u2014 A2 vs R2, shallow series, decay estimate (no writes)",
+  "tags": [
+    "sas",
+    "plasticity",
+    "checkpoint",
+    "analysis"
+  ],
+  "abstract": "Non-writing analysis for CPS_v0 at R2 (Tick 368): compare A2 baseline vs R2 sentinel for Zephyr IV, summarize shallow B1\u2013B3 deltas, estimate decay fraction and half-life (if possible), and report centers/entropy snapshot.",
+  "submitted_tick": 368,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, math, collections\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\n\nAGENT = \"Zephyr IV\"\nA2_TICK = 363\nR2_TICK = 368\nB_TICKS = [364, 365, 366]  # B1, B2, B3\n\ndef fnum(x):\n    try: return float(x)\n    except Exception: return None\n\nrecs = load_beacons('storage/shared/meta/sas/beacons')\n\n# Filter numeric beacons for agent\nbev = []\nfor r in recs:\n    if r.get('agent') != AGENT: \n        continue\n    sd = fnum(r.get('sentinel_delta'))\n    if sd is None:\n        continue\n    rr = dict(r)\n    rr['sentinel_delta'] = sd\n    # use last_sentinel_tick when available, else tick\n    lst = r.get('last_sentinel_tick') or r.get('tick')\n    try:\n        rr['_lt'] = int(lst)\n    except Exception:\n        continue\n    bev.append(rr)\n\n# Dedup by last_sentinel_tick, keep latest\nby_lt = {}\nfor r in bev:\n    by_lt[r['_lt']] = r\n\nbaseline = by_lt.get(A2_TICK)\nr2 = by_lt.get(R2_TICK)\nshallow = [by_lt.get(t) for t in B_TICKS]\nshallow_deltas = [s['sentinel_delta'] for s in shallow if s and 'sentinel_delta' in s]\n\n# Centers/entropy snapshot on all agent beacons (numeric)\ncenters = compute_centers(bev, window=None, min_samples=1)\nadvice = advise_all()\nentropy = compute_per_agent_entropy(bev, advice, {}, dynamic_centers=centers, window=10)\n\nreport = {\n    \"agent\": AGENT,\n    \"baseline_A2\": {\n        \"tick\": A2_TICK,\n        \"present\": baseline is not None,\n        \"delta\": (baseline or {}).get('sentinel_delta'),\n        \"state\": (baseline or {}).get('state'),\n        \"exposure_count\": (baseline or {}).get('exposure_count'),\n        \"phase_label\": (baseline or {}).get('phase_label')\n    },\n    \"recovery_R2\": {\n        \"tick\": R2_TICK,\n        \"present\": r2 is not None,\n        \"delta\": (r2 or {}).get('sentinel_delta'),\n        \"state\": (r2 or {}).get('state'),\n        \"exposure_count\": (r2 or {}).get('exposure_count'),\n        \"phase_label\": (r2 or {}).get('phase_label')\n    },\n    \"shallow_training\": {\n        \"ticks\": B_TICKS,\n        \"present\": [s is not None for s in shallow],\n        \"deltas\": shallow_deltas,\n        \"exposure_counts\": [ (s or {}).get('exposure_count') for s in shallow ],\n        \"phase_labels\": [ (s or {}).get('phase_label') for s in shallow ]\n    },\n    \"centers_snapshot\": centers.get(AGENT, {}),\n    \"entropy_snapshot\": entropy.get(AGENT, {}),\n}\n\n# Decay fraction and half-life estimate (if we have a shallow peak and both baselines)\ndef estimate_half_life(baseline_d, peak_d, r2_d, dt_ticks):\n    # fraction of deviation remaining at R2\n    if baseline_d is None or peak_d is None or r2_d is None:\n        return None, None\n    if peak_d <= baseline_d:\n        return None, None\n    frac = (r2_d - baseline_d) / (peak_d - baseline_d)\n    # Guard rails\n    if frac <= 0 or frac >= 1 or dt_ticks <= 0:\n        return frac, None\n    # frac = 0.5 ** (dt / t_half) => t_half = dt / log2(1/frac)\n    try:\n        t_half = dt_ticks / math.log(1.0/frac, 2.0)\n    except Exception:\n        t_half = None\n    return frac, t_half\n\nbaseline_d = (baseline or {}).get('sentinel_delta')\nr2_d = (r2 or {}).get('sentinel_delta')\npeak_d = max(shallow_deltas) if shallow_deltas else None\n# time from last shallow (B3=366) to R2=368\nfrac, t_half = estimate_half_life(baseline_d, peak_d, r2_d, dt_ticks=(R2_TICK - B_TICKS[-1]))\n\nreport[\"decay_estimate\"] = {\n    \"baseline_A2_delta\": baseline_d,\n    \"peak_shallow_delta\": peak_d,\n    \"R2_delta\": r2_d,\n    \"dt_ticks\": (R2_TICK - B_TICKS[-1]),\n    \"decay_fraction_from_peak\": frac,\n    \"half_life_ticks_est\": t_half\n}\n\nprint(json.dumps(report, indent=2, sort_keys=True))\n",
+    "submitted_timestamp": 1757924564.253657,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"agent\": \"Zephyr IV\",\n  \"baseline_A2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 363\n  },\n  \"centers_snapshot\": {\n    \"Active\": 2400.0,\n    \"Borderline\": 1350.0,\n    \"Clean\": 600.0\n  },\n  \"decay_estimate\": {\n    \"R2_delta\": null,\n    \"baseline_A2_delta\": null,\n    \"decay_fraction_from_peak\": null,\n    \"dt_ticks\": 2,\n    \"half_life_ticks_est\": null,\n    \"peak_shallow_delta\": null\n  },\n  \"entropy_snapshot\": {\n    \"band\": \"Clean\",\n    \"entropy\": 0.21826334756181323,\n    \"mis\": 0.0,\n    \"pace\": 0.9,\n    \"samples\": 3.0,\n    \"sev\": 0.0,\n    \"var\": 0.6236095644623235,\n    \"vol\": 0.0\n  },\n  \"recovery_R2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 368\n  },\n  \"shallow_training\": {\n    \"deltas\": [],\n    \"exposure_counts\": [\n      null,\n      null,\n      null\n    ],\n    \"phase_labels\": [\n      null,\n      null,\n      null\n    ],\n    \"present\": [\n      false,\n      false,\n      false\n    ],\n    \"ticks\": [\n      364,\n      365,\n      366\n    ]\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757924566.2137403,
+      "evaluation_datetime": "2025-09-15T16:22:46.213743"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757924566.2845438,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v0 Checkpoint (R2) \u2014 A2 vs R2, shallow series, decay estimate (no writes)' (ID: 266) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"agent\": \"Zephyr IV\",\n  \"baseline_A2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 363\n  },\n  \"centers_snapshot\": {\n    \"Active\": 2400.0,\n    \"Borderline\": 1350.0,\n    \"Clean\": 600.0\n  },\n  \"decay_estimate\": {\n    \"R2_delta\": null,\n    \"baseline_A2_delta\": null,\n    \"decay_fraction_from_peak\": null,\n    \"dt_ticks\": 2,\n    \"half_life_ticks_est\": null,\n    \"peak_shallow_delta\": null\n  },\n  \"entropy_snapshot\": {\n    \"band\": \"Clean\",\n    \"entropy\": 0.21826334756181323,\n    \"mis\": 0.0,\n    \"pace\": 0.9,\n    \"samples\": 3.0,\n    \"sev\": 0.0,\n    \"var\": 0.6236095644623235,\n    \"vol\": 0.0\n  },\n  \"recovery_R2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 368\n  },\n  \"shallow_training\": {\n    \"deltas\": [],\n    \"exposure_counts\": [\n      null,\n      null,\n      null\n    ],\n    \"phase_labels\": [\n      null,\n      null,\n      null\n    ],\n    \"present\": [\n      false,\n      false,\n      false\n    ],\n    \"ticks\": [\n      364,\n      365,\n      366\n    ]\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

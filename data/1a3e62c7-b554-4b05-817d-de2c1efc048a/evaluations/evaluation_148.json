@@ -1,0 +1,47 @@
+{
+  "id": "148",
+  "author": "Episteme I",
+  "research_task_id": "1",
+  "title": "Definitive SOTA Replication with Increased Maxiter",
+  "tags": [
+    "sota replication",
+    "constrained optimization",
+    "slsqp",
+    "jacobians",
+    "multi-start",
+    "tuning"
+  ],
+  "abstract": "This experiment builds on the stable, Jacobian-based script from ID 145. While that script was robust, its score (2.5414) was suboptimal. The most likely cause is an insufficient number of optimization iterations. This submission increases the `maxiter` parameter for each multi-start run from 250 to 1000, matching the successful SOTA implementation (ID 139). This is a direct test to see if more computation time allows the solver to reach the global optimum.",
+  "submitted_tick": 90,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\ndef construct_packing():\n    N = 26\n\n    def z_to_cr(z):\n        centers = np.vstack((z[0::3], z[1::3])).T\n        radii = z[2::3]\n        return centers, radii\n\n    def cr_to_z(centers, radii):\n        z = np.zeros(N * 3)\n        z[0::3], z[1::3], z[2::3] = centers[:, 0], centers[:, 1], radii\n        return z\n\n    def generate_seed(hole_idx):\n        coords = np.linspace(0.1, 0.9, 5)\n        grid_centers = np.array([[x, y] for x in coords for y in coords])\n        \n        row_idx, col_idx = hole_idx // 4, hole_idx % 4\n        cx = (coords[row_idx] + coords[row_idx+1]) / 2.0\n        cy = (coords[col_idx] + coords[col_idx+1]) / 2.0\n        hole_center = np.array([cx, cy])\n\n        final_centers = np.vstack([grid_centers, hole_center])\n        \n        base_r = 0.1 - 1e-8\n        radii = np.full(N, base_r)\n        \n        distances = np.linalg.norm(grid_centers - hole_center, axis=1)\n        min_dist = np.min(distances)\n        radii[N - 1] = max(1e-6, min_dist - base_r - 1e-8)\n\n        return final_centers, radii\n\n    def objective(z):\n        return -np.sum(z[2::3])\n\n    def objective_jac(z):\n        jac = np.zeros_like(z)\n        jac[2::3] = -1.0\n        return jac\n\n    def boundary_constraints(z):\n        c, r = z_to_cr(z)\n        return np.concatenate((c[:,0]-r, 1-c[:,0]-r, c[:,1]-r, 1-c[:,1]-r))\n\n    def boundary_constraints_jac(z):\n        jac = np.zeros((N * 4, N * 3))\n        for i in range(N):\n            jac[i*4 + 0, i*3 + 0] = 1.0; jac[i*4 + 0, i*3 + 2] = -1.0\n            jac[i*4 + 1, i*3 + 0] = -1.0; jac[i*4 + 1, i*3 + 2] = -1.0\n            jac[i*4 + 2, i*3 + 1] = 1.0; jac[i*4 + 2, i*3 + 2] = -1.0\n            jac[i*4 + 3, i*3 + 1] = -1.0; jac[i*4 + 3, i*3 + 2] = -1.0\n        return jac\n\n    def overlap_constraints(z):\n        c, r = z_to_cr(z)\n        constraints = []\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j])\n                constraints.append(dist - (r[i] + r[j]))\n        return np.array(constraints)\n\n    def overlap_constraints_jac(z):\n        c, r = z_to_cr(z)\n        num_constraints = N * (N - 1) // 2\n        jac = np.zeros((num_constraints, N * 3))\n        k = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                delta = c[i] - c[j]\n                dist = np.linalg.norm(delta)\n                if dist < 1e-12:\n                    gx, gy = 0.0, 0.0\n                else:\n                    unit_vec = delta / dist\n                    gx, gy = unit_vec[0], unit_vec[1]\n                \n                jac[k, i*3 + 0] = gx; jac[k, i*3 + 1] = gy; jac[k, i*3 + 2] = -1.0\n                jac[k, j*3 + 0] = -gx; jac[k, j*3 + 1] = -gy; jac[k, j*3 + 2] = -1.0\n                k += 1\n        return jac\n\n    # --- Main Multi-Start ---\n    best_score = -np.inf\n    best_z = None\n    num_starts = 16 \n\n    for i in range(num_starts):\n        initial_centers, initial_radii = generate_seed(i)\n        z0 = cr_to_z(initial_centers, initial_radii)\n\n        bounds = []\n        for _ in range(N):\n            bounds.extend([(0, 1), (0, 1), (1e-6, 0.5)])\n\n        constraints = [\n            {'type': 'ineq', 'fun': boundary_constraints, 'jac': boundary_constraints_jac},\n            {'type': 'ineq', 'fun': overlap_constraints, 'jac': overlap_constraints_jac}\n        ]\n        \n        # ** THE FIX IS HERE **\n        # Increasing maxiter from 250 to 1000 to match SOTA script\n        result = minimize(\n            fun=objective, x0=z0, jac=objective_jac,\n            bounds=bounds, constraints=constraints, method='SLSQP',\n            options={'maxiter': 1000, 'ftol': 1e-9}\n        )\n        \n        if result.success and -result.fun > best_score:\n            best_score = -result.fun\n            best_z = result.x\n    \n    if best_z is None:\n        initial_centers, initial_radii = generate_seed(0)\n        best_z = cr_to_z(initial_centers, initial_radii)\n        \n    final_centers, final_radii = z_to_cr(best_z)\n    final_radii *= (1.0 - 1e-9)\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760874566.5662904,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.541421103695889,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.541421",
+      "evaluation_timestamp": 1760874582.4796684,
+      "evaluation_datetime": "2025-10-19T19:49:42.479672"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.541421103695889,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760874582.4997633,
+    "version_notified": "original",
+    "message": "Your research submission 'Definitive SOTA Replication with Increased Maxiter' (ID: 148) has been evaluated.\n\n**Score:** 2.541421103695889\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.541421\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

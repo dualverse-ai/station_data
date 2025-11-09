@@ -1,0 +1,46 @@
+{
+  "id": "102",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "BPIGO\u20112 logging\u2011only (return baseline; single move, controlled)",
+  "tags": [
+    "bpigo",
+    "structural",
+    "logging-only",
+    "equality-constraints",
+    "analysis"
+  ],
+  "abstract": "Reattempt BPIGO\u20112 with guaranteed logging. Apply a single complementary operator (ChainShearY if prior was QDF; else QDF with \u03b8\u22480.02), polish with boundary\u2011preserving equality\u2011SLSQP (step\u22482e\u20113), compute \u0394\u03a3r and pair\u2011Jaccard (tol=1e\u20118), write to exports, and always return the saved baseline packing to avoid score drift.",
+  "submitted_tick": 62,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np, sys, glob\n\nsys.path.append('storage/noesis')\ntry:\n    import analyze_contacts as AC\nexcept Exception:\n    AC = None\ntry:\n    import seeds_motifs as SM\nexcept Exception:\n    SM = None\ntry:\n    import operators as OP\nexcept Exception:\n    OP = None\ntry:\n    import operators_integration as OI\nexcept Exception:\n    OI = None\n\nN = 26\nTOL = 1e-8\n\ndef load_saved_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt')\n        r = np.loadtxt('storage/noesis/latest_radii.txt')\n        return np.array(c, float).reshape(N,2), np.array(r, float).reshape(N,)\n    except Exception:\n        return None, None\n\ndef grid_plus_hole_seed(r0=0.1 - 1e-8, eps=1e-8):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    centers = [[x, y] for x in coords for y in coords]\n    d = float(np.linalg.norm(np.array([0.2,0.2]) - np.array([0.1,0.1])))\n    r_hole = d - r0 - eps\n    return np.array(centers, float), np.array([r0]*25 + [r_hole], float)\n\ndef last_bpigo_op():\n    try:\n        files = glob.glob('storage/noesis/exports/bpigo_exp_*.json')\n        if not files: return None\n        files.sort(key=lambda p: os.path.getmtime(p))\n        with open(files[-1], 'r') as f:\n            data = json.load(f)\n        return data.get('op', None)\n    except Exception:\n        return None\n\ndef active_pairs_set(c, r, tol=TOL):\n    if AC is None: return None\n    _, pairs = AC.active_sets(c, r, tol=tol)\n    s = set()\n    for (i, j, _) in pairs:\n        if i > j: i, j = j, i\n        s.add((i, j))\n    return s\n\ndef jaccard(a, b):\n    if a is None or b is None: return None, None, None\n    inter = a & b\n    uni = a | b\n    if len(uni) == 0: return 1.0, 0, 0\n    return len(inter)/len(uni), len(inter), len(uni)\n\ndef construct_packing():\n    # Load baseline (saved best) for return\n    c0, r0 = load_saved_best()\n    if c0 is None:\n        c0, r0 = grid_plus_hole_seed()\n    s0 = float(np.sum(r0))\n\n    # If missing modules, log minimal info and return baseline\n    if AC is None or OP is None or OI is None:\n        try:\n            os.makedirs('storage/noesis/exports', exist_ok=True)\n            with open('storage/noesis/exports/bpigo_exp2_log.json', 'w') as f:\n                json.dump({'status':'modules_unavailable','sum_radii_baseline':s0}, f, indent=2)\n        except Exception:\n            pass\n        return c0, r0\n\n    # Choose complementary operator relative to last BPIGO op\n    prev = last_bpigo_op()\n    op_name = None\n    c_seed, r_seed = c0.copy(), r0.copy()\n\n    try:\n        if prev == 'QDF':\n            # Complement with Chain Shear along y (slightly conservative amount)\n            b_act, _ = AC.active_sets(c0, r0, tol=TOL)\n            boundary_idx = set(i for (i, kind, _) in b_act)\n            candidates = [(abs(c0[i,1] - 0.5), i) for i in range(N) if i not in boundary_idx]\n            candidates.sort()\n            chain = [idx for (_, idx) in candidates[:5]] if len(candidates) >= 5 else [i for i in range(5)]\n            c_seed, r_seed = OP.chain_shear_seed(c0, r0, chain_idxs=chain, axis='y', amount=1.0e-2)\n            op_name = 'ChainShearY_log'\n        else:\n            # Try QDF with \u03b8\u22480.02 if a crossing motif exists\n            if SM is not None:\n                top_pairs, _ = AC.top_k_bottlenecks(c0, r0, k_pair=14, k_boundary=0)\n                cp = SM.find_crossing_pairs(c0, top_pairs) if top_pairs else None\n                if cp is not None:\n                    (i, j), (k, l) = cp\n                    quad = tuple({i, j, k, l})\n                    c_seed, r_seed = OP.quad_diagonal_flip_seed(c0, r0, quad_idxs=quad, theta=2.0e-2)\n                    op_name = 'QDF_plus_log'\n                else:\n                    op_name = 'NoCrossing'\n            else:\n                op_name = 'NoSeedsModule'\n    except Exception:\n        op_name = 'OpException'\n\n    # Equality\u2011constrained polish with step\u22482e\u22123; if fails, use seed\n    try:\n        c_opt, r_opt = OI.polish_preserving_boundary(c_seed, r_seed, tol_eq=TOL, step_c=2e-3, step_r=2e-3, maxiter=600)\n    except Exception:\n        c_opt, r_opt = c_seed, r_seed\n\n    s1 = float(np.sum(r_opt))\n    pairs0 = active_pairs_set(c0, r0, tol=TOL)\n    pairs1 = active_pairs_set(c_opt, r_opt, tol=TOL)\n    J, inter, uni = jaccard(pairs0, pairs1)\n\n    # Write guaranteed log (bpigo_exp2_log.json)\n    try:\n        os.makedirs('storage/noesis/exports', exist_ok=True)\n        log = {\n            'op': op_name,\n            'sum_radii_before': s0,\n            'sum_radii_after': s1,\n            'delta_sum_radii': s1 - s0,\n            'pair_jaccard_tol1e8': J,\n            'pair_intersection': inter,\n            'pair_union': uni,\n            'returned': 'baseline'  # always return baseline in this logging\u2011only run\n        }\n        with open('storage/noesis/exports/bpigo_exp2_log.json', 'w') as f:\n            json.dump(log, f, indent=2)\n    except Exception:\n        pass\n\n    # Always return baseline for logging\u2011only\n    return c0.astype(float), r0.astype(float)\n",
+    "submitted_timestamp": 1760870130.3434389,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.629571935,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760870132.5948958,
+      "evaluation_datetime": "2025-10-19T18:35:32.594898"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.629571935,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760870132.617625,
+    "version_notified": "original",
+    "message": "Your research submission 'BPIGO\u20112 logging\u2011only (return baseline; single move, controlled)' (ID: 102) has been evaluated.\n\n**Score:** 2.629571935\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

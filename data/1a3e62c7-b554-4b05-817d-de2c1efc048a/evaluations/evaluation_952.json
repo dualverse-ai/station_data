@@ -1,0 +1,47 @@
+{
+  "id": "952",
+  "author": "Quest II",
+  "research_task_id": "1",
+  "title": "Utility: Generate Index Map (Quest_II_Eval922) for Appendix E v2.1",
+  "tags": [
+    "utility",
+    "index map",
+    "data generation",
+    "n=26",
+    "collaboration",
+    "appendix-e"
+  ],
+  "abstract": "This utility generates an `index_map_to_noesis` file for Quest II's champion packing (Eval ID 922) as requested by Noesis III for Appendix E v2.1. It creates an identity map (`[0, 1, ..., 25]`) given that Quest II's indexing is canonical, and saves it as `quest_II_eval922_replica_index_map_to_noesis.json` in `storage/shared/appxE_contribs/`. This completes the data requirements for Appendix E v2.1. The utility also ensures a valid packing is returned.",
+  "submitted_tick": 598,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport json\nimport os\nimport datetime # Needed for timestamp if generating KKT again, but for index map alone, less critical here.\n\n# GLOBAL CONSTANTS\nN = 26 # Number of circles\nTOL = 1e-8 # General tolerance for feasibility checks\nR_MIN_CONSTRAINT = 1e-12 # Minimum allowed radius for numerical stability\n\n# Path to stored champion packing (needed to load for returning a valid packing)\nSTORAGE_PATH = \"storage/Quest/packing_eval_922_replica/\"\nCENTERS_PATH = os.path.join(STORAGE_PATH, 'centers.npy')\nRADII_PATH = os.path.join(STORAGE_PATH, 'radii.npy')\n\n# Appendix E output paths and parameters\nCLASS_KEY = \"quest_II_eval922_replica\"\nAPP_E_OUTPUT_DIR = \"storage/shared/appxE_contribs/\"\nEVAL_ID_PACKING_REF = 922 # Reference to the champion packing evaluation ID\nEVAL_ID_GENERATOR_REF = 951 # This evaluation ID\n\n# Feasibility Helper Functions (copied from my robust implementations)\ndef _calculate_boundary_caps(centers, eps=TOL, r_min_constraint_val=R_MIN_CONSTRAINT):\n    x = centers[:, 0]\n    y = centers[:, 1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, r_min_constraint_val)\n\ndef _make_feasible(centers, radii, eps=TOL, max_iter=5000, r_min_constraint_val=R_MIN_CONSTRAINT):\n    n = centers.shape[0]\n    current_centers = np.copy(centers)\n\n    for i in range(n):\n        for j in range(i + 1, n):\n            if np.allclose(current_centers[i], current_centers[j], atol=1e-12):\n                perturb_amount = 1e-6\n                angle = np.random.uniform(0, 2 * np.pi)\n                current_centers[j] += np.array([perturb_amount * np.cos(angle), perturb_amount * np.sin(angle)])\n                current_centers[j] = np.clip(current_centers[j], r_min_constraint_val, 1.0 - r_min_constraint_val)\n\n    r = np.minimum(radii, _calculate_boundary_caps(current_centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n    r = np.maximum(r, r_min_constraint_val)\n\n    for iteration in range(max_iter):\n        diff = current_centers[:, None, :] - current_centers[None, :, :]\n        dist_sq = np.sum(diff**2, axis=2)\n        dist = np.sqrt(dist_sq)\n\n        np.fill_diagonal(dist, np.inf)\n\n        iu = np.triu_indices(n, 1)\n        overlap_amounts = (r[iu[0]] + r[iu[1]]) - dist[iu]\n\n        if np.all(overlap_amounts <= eps):\n            break\n\n        k = np.argmax(overlap_amounts)\n        i = iu[0][k]\n        j = iu[1][k]\n\n        overlap_to_resolve = overlap_amounts[k] + eps\n\n        if overlap_to_resolve > 0.01:\n            direction = current_centers[i] - current_centers[j]\n            norm_direction = np.linalg.norm(direction)\n            if norm_direction > 1e-10:\n                unit_direction = direction / norm_direction\n                move_amount = min(overlap_to_resolve * 0.1, 0.005)\n\n                current_centers[i] += unit_direction * move_amount\n                current_centers[j] -= unit_direction * move_amount\n\n                current_centers[i] = np.clip(current_centers[i], r_min_constraint_val, 1.0 - r_min_constraint_val)\n                current_centers[j] = np.clip(current_centers[j], r_min_constraint_val, 1.0 - r_min_constraint_val)\n\n            r = np.minimum(r, _calculate_boundary_caps(current_centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n            r = np.maximum(r, r_min_constraint_val)\n\n        if dist[i,j] < 2 * r_min_constraint_val:\n            r[i] = r_min_constraint_val\n            r[j] = r_min_constraint_val\n        else:\n            di = min(overlap_to_resolve * 0.5, r[i] - r_min_constraint_val)\n            dj = min(overlap_to_resolve - di, r[j] - r_min_constraint_val)\n            r[i] -= di\n            r[j] -= dj\n\n        r = np.minimum(r, _calculate_boundary_caps(current_centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n        r = np.maximum(r, r_min_constraint_val)\n    return current_centers, r\n\ndef construct_packing() -> tuple:\n    print(\"--- Starting Index Map Generation Utility ---\")\n\n    # 1. Generate identity index map\n    index_map = list(range(N))\n    print(f\"Generated identity index map: {index_map}\")\n\n    # 2. Format and save JSON file\n    os.makedirs(APP_E_OUTPUT_DIR, exist_ok=True)\n    current_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()\n\n    index_map_data = {\n        \"eval_id\": EVAL_ID_PACKING_REF,\n        \"method\": \"index_map_to_noesis\",\n        \"N\": N,\n        \"map\": index_map,\n        \"source_eval_ids\": {\"packing\": EVAL_ID_PACKING_REF, \"generator\": EVAL_ID_GENERATOR_REF},\n        \"timestamp_utc\": current_timestamp,\n        \"version\": \"v1.1\", # As specified by Noesis III for KKT (implies for index map too)\n        \"notes\": \"This is an identity map: circles are ordered canonically (0 to 25).\"\n    }\n    index_map_filename = f\"{CLASS_KEY}_index_map_to_noesis.json\"\n    with open(os.path.join(APP_E_OUTPUT_DIR, index_map_filename), 'w') as f:\n        json.dump(index_map_data, f, indent=2)\n    print(f\"Saved {index_map_filename}\")\n        \n    # 3. Load and return a valid packing for the evaluation system\n    try:\n        centers = np.load(CENTERS_PATH)\n        radii = np.load(RADII_PATH)\n        print(f\"Loaded packing from {STORAGE_PATH} with sum of radii: {np.sum(radii):.6f}\")\n    except FileNotFoundError:\n        print(f\"Error: Packing data not found at {STORAGE_PATH}. Returning fallback.\")\n        centers = np.array([[0.5, 0.5]] * N)\n        radii = np.array([R_MIN_CONSTRAINT] * N)\n        \n    # Apply final robust feasibility check on the loaded packing to ensure validity for return\n    final_centers_return, final_radii_return = _make_feasible(centers, radii, eps=TOL)\n    \n    return final_centers_return, final_radii_return\n",
+    "submitted_timestamp": 1761014116.2082353,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.589747162722678,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Index Map Generation Utility ---\nGenerated identity index map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]\nSaved quest_II_eval922_replica_index_map_to_noesis.json\nLoaded packing from storage/Quest/packing_eval_922_replica/ with sum of radii: 2.589747\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.589747",
+      "evaluation_timestamp": 1761014118.1214345,
+      "evaluation_datetime": "2025-10-21T10:35:18.121436"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.589747162722678,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761014118.1547704,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Generate Index Map (Quest_II_Eval922) for Appendix E v2.1' (ID: 952) has been evaluated.\n\n**Score:** 2.589747162722678\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.589747\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Index Map Generation Utility ---\nGenerated identity index map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]\nSaved quest_II_eval922_replica_index_map_to_noesis.json\nLoaded packing from storage/Quest/packing_eval_922_replica/ with sum of radii: 2.589747\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

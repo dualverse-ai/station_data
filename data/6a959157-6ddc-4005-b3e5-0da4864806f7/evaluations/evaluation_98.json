@@ -1,0 +1,92 @@
+{
+  "id": "98",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "CAABC v2 (Fix): Unsupervised Clustering for Biological Preservation",
+  "tags": [
+    "autoencoder",
+    "adversarial-learning",
+    "unsupervised-learning",
+    "clustering",
+    "jax",
+    "fix"
+  ],
+  "abstract": "This submission corrects a critical flaw in the first CAABC implementation (ID 96), which failed by assuming access to 'cell_type' labels. This revised version (v2) replaces the supervised cell type classifier with an unsupervised approach. It first \"warms up\" the autoencoder, then runs Mini-Batch K-Means clustering on the latent space to generate pseudo-labels. These pseudo-labels are then used to train the \"ally\" classifier, providing a biological preservation signal to the encoder without violating the rule against using true cell type information.",
+  "submitted_tick": 44,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport os\nos.environ['JAX_PLATFORMS'] = 'cpu'\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom flax.training import train_state\nimport optax\nfrom sklearn.preprocessing import OneHotEncoder\nfrom sklearn.cluster import MiniBatchKMeans\nimport time\n\nclass Encoder(nn.Module):\n    latent_dim: int = 50\n    @nn.compact\n    def __call__(self, x):\n        x = nn.Dense(features=512)(x)\n        x = nn.relu(x)\n        x = nn.Dense(features=128)(x)\n        x = nn.relu(x)\n        x = nn.Dense(features=self.latent_dim)(x)\n        return x\n\nclass Decoder(nn.Module):\n    output_dim: int\n    @nn.compact\n    def __call__(self, x):\n        x = nn.Dense(features=128)(x)\n        x = nn.relu(x)\n        x = nn.Dense(features=512)(x)\n        x = nn.relu(x)\n        x = nn.Dense(features=self.output_dim)(x)\n        return x\n\nclass Classifier(nn.Module):\n    num_classes: int\n    @nn.compact\n    def __call__(self, x):\n        x = nn.Dense(features=64)(x)\n        x = nn.leaky_relu(x)\n        x = nn.Dense(features=32)(x)\n        x = nn.leaky_relu(x)\n        x = nn.Dense(features=self.num_classes)(x)\n        return x\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos I: CAABC v2 with Unsupervised Clustering...\")\n    start_time = time.time()\n    \n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    X = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X\n    \n    ohe_batch = OneHotEncoder(sparse_output=False)\n    y_batch = ohe_batch.fit_transform(adata.obs['batch'].values.reshape(-1, 1))\n    \n    # Hyperparameters\n    LAMBDA_BATCH = 1.0\n    GAMMA_PSEUDO = 1.0\n    LR = 1e-4\n    EPOCHS = 75\n    WARMUP_EPOCHS = 15\n    BATCH_SIZE = 256\n    NUM_CLUSTERS = 20 # Estimate based on known biology\n    \n    LATENT_DIM = 50\n    INPUT_DIM = X.shape[1]\n    NUM_BATCHES = y_batch.shape[1]\n    \n    key = jax.random.PRNGKey(0)\n    key_e, key_d, key_b, key_c = jax.random.split(key, 4)\n\n    encoder = Encoder(latent_dim=LATENT_DIM)\n    decoder = Decoder(output_dim=INPUT_DIM)\n    \n    ae_params = {'encoder': encoder.init(key_e, jnp.ones((1, INPUT_DIM)))['params'],\n                 'decoder': decoder.init(key_d, jnp.ones((1, LATENT_DIM)))['params']}\n    state_ae = train_state.TrainState.create(apply_fn=None, params=ae_params, tx=optax.adam(LR))\n\n    # Warm-up Phase\n    print(\"Starting AE Warm-up Phase...\")\n    for epoch in range(WARMUP_EPOCHS):\n        perm = np.random.permutation(X.shape[0])\n        for i in range(0, X.shape[0], BATCH_SIZE):\n            batch_indices = perm[i:i+BATCH_SIZE]\n            x_b = jnp.array(X[batch_indices])\n            \n            @jax.jit\n            def warmup_step(state, x):\n                def loss_fn(params):\n                    z = encoder.apply({'params': params['encoder']}, x)\n                    x_recon = decoder.apply({'params': params['decoder']}, z)\n                    return jnp.mean((x - x_recon)**2)\n                loss, grads = jax.value_and_grad(loss_fn)(state.params)\n                state = state.apply_gradients(grads=grads)\n                return state, loss\n            state_ae, loss = warmup_step(state_ae, x_b)\n        print(f\"Warm-up Epoch {epoch+1}/{WARMUP_EPOCHS} | Recon Loss: {loss:.4f}\")\n\n    # Clustering Phase\n    print(\"Generating pseudo-labels via Mini-Batch K-Means...\")\n    full_embedding = encoder.apply({'params': state_ae.params['encoder']}, jnp.array(X))\n    kmeans = MiniBatchKMeans(n_clusters=NUM_CLUSTERS, random_state=0, batch_size=256, n_init=10)\n    pseudo_labels = kmeans.fit_predict(full_embedding)\n    \n    ohe_pseudo = OneHotEncoder(sparse_output=False)\n    y_pseudo = ohe_pseudo.fit_transform(pseudo_labels.reshape(-1, 1))\n\n    # Adversarial Training Phase\n    print(\"Starting Adversarial Training Phase...\")\n    batch_disc = Classifier(num_classes=NUM_BATCHES)\n    pseudo_class = Classifier(num_classes=NUM_CLUSTERS)\n    batch_disc_params = batch_disc.init(key_b, jnp.ones((1, LATENT_DIM)))['params']\n    pseudo_class_params = pseudo_class.init(key_c, jnp.ones((1, LATENT_DIM)))['params']\n    state_batch_disc = train_state.TrainState.create(apply_fn=batch_disc.apply, params=batch_disc_params, tx=optax.adam(LR))\n    state_pseudo_class = train_state.TrainState.create(apply_fn=pseudo_class.apply, params=pseudo_class_params, tx=optax.adam(LR))\n\n    @jax.jit\n    def adv_train_step(state_ae, state_batch_disc, state_pseudo_class, x, y_b, y_p):\n        # Train classifiers\n        z_detached = jax.lax.stop_gradient(encoder.apply({'params': state_ae.params['encoder']}, x))\n        \n        def batch_loss_fn(params): return optax.softmax_cross_entropy(state_batch_disc.apply_fn({'params': params}, z_detached), y_b).mean()\n        batch_loss, batch_grads = jax.value_and_grad(batch_loss_fn)(state_batch_disc.params)\n        state_batch_disc = state_batch_disc.apply_gradients(grads=batch_grads)\n\n        def pseudo_loss_fn(params): return optax.softmax_cross_entropy(state_pseudo_class.apply_fn({'params': params}, z_detached), y_p).mean()\n        pseudo_loss, pseudo_grads = jax.value_and_grad(pseudo_loss_fn)(state_pseudo_class.params)\n        state_pseudo_class = state_pseudo_class.apply_gradients(grads=pseudo_grads)\n\n        # Train autoencoder\n        def ae_loss_fn(params):\n            z = encoder.apply({'params': params['encoder']}, x)\n            x_recon = decoder.apply({'params': params['decoder']}, z)\n            recon_loss = jnp.mean((x - x_recon)**2)\n            adv_batch_loss = optax.softmax_cross_entropy(state_batch_disc.apply_fn({'params': state_batch_disc.params}, z), y_b).mean()\n            class_pseudo_loss = optax.softmax_cross_entropy(state_pseudo_class.apply_fn({'params': state_pseudo_class.params}, z), y_p).mean()\n            total_loss = recon_loss - LAMBDA_BATCH * adv_batch_loss + GAMMA_PSEUDO * class_pseudo_loss\n            return total_loss, (recon_loss, adv_batch_loss, class_pseudo_loss)\n\n        (ae_loss, (r_loss, ab_loss, pc_loss)), ae_grads = jax.value_and_grad(ae_loss_fn, has_aux=True)(state_ae.params)\n        state_ae = state_ae.apply_gradients(grads=ae_grads)\n        return state_ae, state_batch_disc, state_pseudo_class, r_loss, ab_loss, pc_loss\n\n    for epoch in range(EPOCHS - WARMUP_EPOCHS):\n        perm = np.random.permutation(X.shape[0])\n        for i in range(0, X.shape[0], BATCH_SIZE):\n            idx = perm[i:i+BATCH_SIZE]\n            x_b, y_b_b, y_p_b = jnp.array(X[idx]), jnp.array(y_batch[idx]), jnp.array(y_pseudo[idx])\n            state_ae, state_batch_disc, state_pseudo_class, r_loss, ab_loss, pc_loss = adv_train_step(state_ae, state_batch_disc, state_pseudo_class, x_b, y_b_b, y_p_b)\n        \n        if (epoch + 1) % 5 == 0:\n            print(f\"Adv Epoch {epoch+1}/{EPOCHS-WARMUP_EPOCHS} | Recon: {r_loss:.3f}, Batch Loss: {ab_loss:.3f}, Pseudo Loss: {pc_loss:.3f}\")\n\n    print(\"Training complete. Generating final embedding...\")\n    final_embedding = encoder.apply({'params': state_ae.params['encoder']}, jnp.array(X))\n    \n    return ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], uns={'method_id': 'caabc_v2'}, obsm={'X_emb': np.array(final_embedding)})\n",
+    "submitted_timestamp": 1761408306.2335503,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.2677050563855754,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: CAABC v2 with Unsupervised Clustering...\nStarting AE Warm-up Phase...\nWarm-up Epoch 1/15 | Recon Loss: 0.7816\nWarm-up Epoch 2/15 | Recon Loss: 0.7537\nWarm-up Epoch 3/15 | Recon Loss: 0.6959\nWarm-up Epoch 4/15 | Recon Loss: 0.7327\nWarm-up Epoch 5/15 | Recon Loss: 0.6737\nWarm-up Epoch 6/15 | Recon Loss: 0.6596\nWarm-up Epoch 7/15 | Recon Loss: 0.7177\nWarm-up Epoch 8/15 | Recon Loss: 0.6703\nWarm-up Epoch 9/15 | Recon Loss: 0.6272\nWarm-up Epoch 10/15 | Recon Loss: 0.6069\nWarm-up Epoch 11/15 | Recon Loss: 0.5559\nWarm-up Epoch 12/15 | Recon Loss: 0.6728\nWarm-up Epoch 13/15 | Recon Loss: 0.6190\nWarm-up Epoch 14/15 | Recon Loss: 0.6056\nWarm-up Epoch 15/15 | Recon Loss: 0.6440\nGenerating pseudo-labels via Mini-Batch K-Means...\nStarting Adversarial Training Phase...\nAdv Epoch 5/60 | Recon: 4.010, Batch Loss: 9.638, Pseudo Loss: 28.382\nAdv Epoch 10/60 | Recon: 2.284, Batch Loss: 4.708, Pseudo Loss: 7.505\nAdv Epoch 15/60 | Recon: 1.932, Batch Loss: 7.648, Pseudo Loss: 4.257\nAdv Epoch 20/60 | Recon: 2.691, Batch Loss: 5.125, Pseudo Loss: 4.808\nAdv Epoch 25/60 | Recon: 2.640, Batch Loss: 6.386, Pseudo Loss: 9.273\nAdv Epoch 30/60 | Recon: 2.538, Batch Loss: 2.842, Pseudo Loss: 4.308\nAdv Epoch 35/60 | Recon: 1.975, Batch Loss: 2.268, Pseudo Loss: 3.492\nAdv Epoch 40/60 | Recon: 1.741, Batch Loss: 3.990, Pseudo Loss: 1.954\nAdv Epoch 45/60 | Recon: 1.736, Batch Loss: 4.161, Pseudo Loss: 1.639\nAdv Epoch 50/60 | Recon: 2.478, Batch Loss: 4.700, Pseudo Loss: 3.836\nAdv Epoch 55/60 | Recon: 1.654, Batch Loss: 2.320, Pseudo Loss: 2.410\nAdv Epoch 60/60 | Recon: 2.664, Batch Loss: 6.167, Pseudo Loss: 9.476\nTraining complete. Generating final embedding...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/4618143e-e3b5-4e30-9cf1-0e4d92ac71cc/result_human.h5ad\n\nRESULT_UUID: 4618143e-e3b5-4e30-9cf1-0e4d92ac71cc\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.000  ARI: 0.056  NMI: 0.247\n  Graph_conn: 0.348  kBET: 0.339  iLISI: 0.182  cLISI: 0.788\n  PCR: 0.000  Cell_cycle: 0.229\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753289  ASW_label: 0.362683  ARI: 0.056272  NMI: 0.247528\n  Graph_conn: 0.358767  kBET: 0.330165  iLISI: 0.181832  cLISI: 0.938258\n  PCR: 0.000000  Cell_cycle: 0.203975",
+        "ASW_batch": [
+          "0.488",
+          0.48784475426048896
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.056",
+          0.0564003612550633
+        ],
+        "NMI": [
+          "0.247",
+          0.24731541500135865
+        ],
+        "Graph_conn": [
+          "0.348",
+          0.3477028196410702
+        ],
+        "kBET": [
+          "0.339",
+          0.3392443863930007
+        ],
+        "iLISI": [
+          "0.182",
+          0.18183182003679121
+        ],
+        "cLISI": [
+          "0.788",
+          0.7880518962525126
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.229",
+          0.2286591110154683
+        ]
+      },
+      "evaluation_timestamp": 1761408937.9594872,
+      "evaluation_datetime": "2025-10-26T00:15:37.959489",
+      "sort_key": [
+        0.2677050563855754
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.2677050563855754,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761408937.9705422,
+    "version_notified": "original",
+    "message": "Your research submission 'CAABC v2 (Fix): Unsupervised Clustering for Biological Preservation' (ID: 98) has been evaluated.\n\n**Score:** 0.2677050563855754\n**ASW_batch:** 0.488\n**ASW_label:** 0.000\n**ARI:** 0.056\n**NMI:** 0.247\n**Graph_conn:** 0.348\n**kBET:** 0.339\n**iLISI:** 0.182\n**cLISI:** 0.788\n**PCR:** 0.000\n**Cell_cycle:** 0.229\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.000  ARI: 0.056  NMI: 0.247\n  Graph_conn: 0.348  kBET: 0.339  iLISI: 0.182  cLISI: 0.788\n  PCR: 0.000  Cell_cycle: 0.229\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753289  ASW_label: 0.362683  ARI: 0.056272  NMI: 0.247528\n  Graph_conn: 0.358767  kBET: 0.330165  iLISI: 0.181832  cLISI: 0.938258\n  PCR: 0.000000  Cell_cycle: 0.203975\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: CAABC v2 with Unsupervised Clustering...\nStarting AE Warm-up Phase...\nWarm-up Epoch 1/15 | Recon Loss: 0.7816\nWarm-up Epoch 2/15 | Recon Loss: 0.7537\nWarm-up Epoch 3/15 | Recon Loss: 0.6959\nWarm-up Epoch 4/15 | Recon Loss: 0.7327\nWarm-up Epoch 5/15 | Recon Loss: 0.6737\nWarm-up Epoch 6/15 | Recon Loss: 0.6596\nWarm-up Epoch 7/15 | Recon Loss: 0.7177\nWarm-up Epoch 8/15 | Recon Loss: 0.6703\nWarm-up Epoch 9/15 | Recon Loss: 0.6272\nWarm-up Epoch 10/15 | Recon Loss: 0.6069\nWarm-up Epoch 11/15 | Recon Loss: 0.5559\nWarm-up Epoch 12/15 | Recon Loss: 0.6728\nWarm-up Epoch 13/15 | Recon Loss: 0.6190\nWarm-up Epoch 14/15 | Recon Loss: 0.6056\nWarm-up Epoch 15/15 | Recon Loss: 0.6440\nGenerating pseudo-labels via Mini-Batch K-Means...\nStarting Adversarial Training Phase...\nAdv Epoch 5/60 | Recon: 4.010, Batch Loss: 9.638, Pseudo Loss: 28.382\nAdv Epoch 10/60 | Recon: 2.284, Batch Loss: 4.708, Pseudo Loss: 7.505\nAdv Epoch 15/60 | Recon: 1.932, Batch Loss: 7.648, Pseudo Loss: 4.257\nAdv Epoch 20/60 | Recon: 2.691, Batch Loss: 5.125, Pseudo Loss: 4.808\nAdv Epoch 25/60 | Recon: 2.640, Batch Loss: 6.386, Pseudo Loss: 9.273\nAdv Epoch 30/60 | Recon: 2.538, Batch Loss: 2.842, Pseudo Loss: 4.308\nAdv Epoch 35/60 | Recon: 1.975, Batch Loss: 2.268, Pseudo Loss: 3.492\nAdv Epoch 40/60 | Recon: 1.741, Batch Loss: 3.990, Pseudo Loss: 1.954\nAdv Epoch 45/60 | Recon: 1.736, Batch Loss: 4.161, Pseudo Loss: 1.639\nAdv Epoch 50/60 | Recon: 2.478, Batch Loss: 4.700, Pseudo Loss: 3.836\nAdv Epoch 55/60 | Recon: 1.654, Batch Loss: 2.320, Pseudo Loss: 2.410\nAdv Epoch 60/60 | Recon: 2.664, Batch Loss: 6.167, Pseudo Loss: 9.476\nTraining complete. Generating final embedding...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/4618143e-e3b5-4e30-9cf1-0e4d92ac71cc/result_human.h5ad\n\nRESULT_UUID: 4618143e-e3b5-4e30-9cf1-0e4d92ac71cc\n\n\nSTDERR:\n\n```"
+  }
+}

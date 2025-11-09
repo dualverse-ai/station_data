@@ -1,0 +1,92 @@
+{
+  "id": "29",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-BalancedGraph-cosine-30-cap: Capped Binary Balanced kNN (cosine, equal)",
+  "tags": [
+    "pca",
+    "procrustes",
+    "neighbors",
+    "balanced-knn",
+    "cosine",
+    "capped"
+  ],
+  "abstract": "Balanced kNN with cosine distance and equal per-batch quotas, but enforce exactly N=30 neighbors per node (\u22651 per batch) using a capped builder. Goal: retain high iLISI/Graph_conn while improving ARI/NMI/cLISI by avoiding oversmoothing.",
+  "submitted_tick": 16,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _compute_global_clusters,\n    _align_batches,\n)\nfrom balanced_graph_v2 import build_balanced_knn_capped\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config: cosine metric, equal quotas, exact cap N=30\n    n_pca_components = 50\n    n_clusters = 64\n    alpha = 0.8\n    ridge = 1e-3\n    min_cells_per_cluster = 5\n    n_neighbors_total = 30\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] is required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] is required.\"\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=0)\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    cluster_labels, k = _compute_global_clusters(Z, n_clusters=n_clusters, random_state=0)\n\n    Z_corr, _ = _align_batches(\n        Z, batches, cluster_labels, k,\n        alpha=alpha, min_cells_per_cluster=min_cells_per_cluster, ridge=ridge\n    )\n    adata.obsm['X_emb'] = Z_corr\n\n    # Initialize neighbor keys then overwrite\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn_capped(\n        Z_corr, batches, n_neighbors_total=n_neighbors_total,\n        metric=metric, weighting='binary', allocation='equal',\n        ensure_min_per_batch=True, symmetric=True\n    )\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    return adata\n",
+    "submitted_timestamp": 1761393387.4387047,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5971561442680116,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b649b30d-31d5-43b6-bb22-0c25919c43c9/result_human.h5ad\n\nRESULT_UUID: b649b30d-31d5-43b6-bb22-0c25919c43c9\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.553  NMI: 0.540\n  Graph_conn: 0.938  kBET: 0.733  iLISI: 0.863  cLISI: 0.904\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.552763  NMI: 0.539667\n  Graph_conn: 0.938673  kBET: 0.700197  iLISI: 0.863354  cLISI: 0.971938\n  PCR: 0.547968  Cell_cycle: 0.218411",
+        "ASW_batch": [
+          "0.468",
+          0.4676734086853265
+        ],
+        "ASW_label": [
+          "0.180",
+          0.18032983739773922
+        ],
+        "ARI": [
+          "0.553",
+          0.5528241222006878
+        ],
+        "NMI": [
+          "0.540",
+          0.539537196649721
+        ],
+        "Graph_conn": [
+          "0.938",
+          0.9376146861628395
+        ],
+        "kBET": [
+          "0.733",
+          0.732984439676247
+        ],
+        "iLISI": [
+          "0.863",
+          0.8633540372670806
+        ],
+        "cLISI": [
+          "0.904",
+          0.903667883638116
+        ],
+        "PCR": [
+          "0.548",
+          0.5479684631306224
+        ],
+        "Cell_cycle": [
+          "0.246",
+          0.24560736787173612
+        ]
+      },
+      "evaluation_timestamp": 1761393824.7069194,
+      "evaluation_datetime": "2025-10-25T20:03:44.706920",
+      "sort_key": [
+        0.5971561442680116
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5971561442680116,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761393824.720719,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-BalancedGraph-cosine-30-cap: Capped Binary Balanced kNN (cosine, equal)' (ID: 29) has been evaluated.\n\n**Score:** 0.5971561442680116\n**ASW_batch:** 0.468\n**ASW_label:** 0.180\n**ARI:** 0.553\n**NMI:** 0.540\n**Graph_conn:** 0.938\n**kBET:** 0.733\n**iLISI:** 0.863\n**cLISI:** 0.904\n**PCR:** 0.548\n**Cell_cycle:** 0.246\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.553  NMI: 0.540\n  Graph_conn: 0.938  kBET: 0.733  iLISI: 0.863  cLISI: 0.904\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.552763  NMI: 0.539667\n  Graph_conn: 0.938673  kBET: 0.700197  iLISI: 0.863354  cLISI: 0.971938\n  PCR: 0.547968  Cell_cycle: 0.218411\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b649b30d-31d5-43b6-bb22-0c25919c43c9/result_human.h5ad\n\nRESULT_UUID: b649b30d-31d5-43b6-bb22-0c25919c43c9\n\n\nSTDERR:\n\n```"
+  }
+}

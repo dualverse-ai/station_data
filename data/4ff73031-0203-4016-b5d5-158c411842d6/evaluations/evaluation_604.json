@@ -1,0 +1,73 @@
+{
+  "id": "604",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Test\u2011only probes: 5\u2011step LN\u2011ConvLSTM(64) + Attn\u2295GAP (vlc=0.55) \u2014 Init R_vp (inline)",
+  "tags": [
+    "diagnostics",
+    "probes",
+    "policy gradient",
+    "convlstm",
+    "attention",
+    "test-only"
+  ],
+  "abstract": "CPU\u2011only, test\u2011mode diagnostic. Computes initial R_vp on a lightweight synthetic batch for the 5\u2011step (64ch) architecture with value loss coefficient context (0.55). No training runs; logs JSON and prints metrics.",
+  "submitted_tick": 355,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "\"\"\"\nTest-only probes for 5-step LN-ConvLSTM + Attn\u2295GAP (64ch).\nComputes initial R_vp on a small synthetic batch; no training.\n\"\"\"\nimport json, os\nimport jax\nimport jax.numpy as jnp\nimport numpy as np\nfrom typing import Dict, Any\nimport sys\nsys.path.append('storage/zephyr')\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\n\nPROBE_PATH = 'storage/zephyr/results/probes_init_pg5.json'\n\ndef create_network(hparams: Dict[str, Any]):\n    return PG_Stepped_AttnGap(\n        cnn_features_1=32,\n        cnn_features_2=64,\n        convlstm_features=64,\n        dilation=6,\n        bottleneck_ratio=0.28,\n        head_hidden=64,\n        steps=5,\n    )\n\ndef _forward(network, params, observations, dones):\n    B, T = observations.shape[:2]\n    obs_flat = observations.reshape(B*T, *observations.shape[2:])\n    dones_flat = dones.reshape(B*T)\n    logits_flat, values_flat, _ = network.apply(params, obs_flat, dones_flat, None)\n    return logits_flat.reshape(B,T,-1), values_flat.reshape(B,T)\n\ndef _global_norm(tree):\n    leaves = jax.tree_util.tree_leaves(tree)\n    if not leaves: return jnp.array(0.0)\n    return jnp.sqrt(sum([jnp.sum(jnp.square(x)) for x in leaves]) + 1e-12)\n\ndef test():\n    key = jax.random.PRNGKey(43)\n    B, T = 8, 4\n    observations = jax.random.normal(key, (B, T, 8, 8, 8)) * 0.1\n    dones = jnp.zeros((B, T), dtype=bool)\n    actions = jax.random.randint(key, (B, T), 0, 4)\n    adv = jax.random.normal(key, (B, T))\n    ret = adv  # simple proxy\n\n    net = create_network({})\n    params = net.init(key, observations.reshape(B*T,8,8,8), dones.reshape(B*T), None)['params']\n\n    def loss_policy(p):\n        logits, _ = _forward(net, p, observations, dones)\n        log_probs_all = jax.nn.log_softmax(logits, axis=-1)\n        idx = (jnp.arange(B)[:,None], jnp.arange(T), actions)\n        log_probs = log_probs_all[idx]\n        return -jnp.mean(jax.lax.stop_gradient(adv) * log_probs)\n\n    def loss_value(p):\n        _, values = _forward(net, p, observations, dones)\n        return 0.5 * jnp.mean((values - jax.lax.stop_gradient(ret))**2)\n\n    g_pol = jax.grad(loss_policy)(params)\n    g_val = jax.grad(loss_value)(params)\n    g_pol_n = float(_global_norm(g_pol))\n    g_val_n = float(_global_norm(g_val))\n    rvp = g_val_n / (g_pol_n + 1e-12)\n\n    out = {\"mode\":\"init\",\"arch\":\"5step_64ch_vlc055\",\"grad_trunk_policy\":g_pol_n,\"grad_trunk_value\":g_val_n,\"rvp_ratio\":rvp}\n    try:\n        with open(PROBE_PATH, 'w') as f:\n            json.dump(out, f)\n    except Exception:\n        pass\n    print(json.dumps(out))\n    return \"init probe complete\"\n",
+    "submitted_timestamp": 1758073922.5838826,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/storage/system/main.py\", line 458, in <module>\n    test_result = submission.test()\n                  ^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 62, in test\n    g_pol = jax.grad(loss_policy)(params)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 52, in loss_policy\n    logits, _ = _forward(net, p, observations, dones)\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 31, in _forward\n    logits_flat, values_flat, _ = network.apply(params, obs_flat, dones_flat, None)\n                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/storage/zephyr/submissions/submission_pg_quadstep.py\", line 71, in __call__\n    x = nn.Conv(self.cnn_features_1, (3,3), padding='SAME',\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/flax/linen/linear.py\", line 662, in __call__\n    kernel = self.param(\n             ^^^^^^^^^^^\nflax.errors.ScopeCollectionNotFound: Tried to access \"kernel\" from collection \"params\" in \"/Conv_0\" but the collection is empty. (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.ScopeCollectionNotFound)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1758073933.603919,
+      "evaluation_datetime": "2025-09-17T09:52:13.603920"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_604_1758073933",
+      "started_timestamp": 1758073933.6033719,
+      "completed_timestamp": 1758074025.7564347,
+      "final_report": "# Debug Report for Evaluation 604\n\n## Summary\nSuccess - Fixed the Flax parameter structure issue that was causing a ScopeCollectionNotFound error.\n\n## Root Cause\nThe original code was passing parameters incorrectly to the `network.apply()` method in the `_forward()` function. The code used `network.apply(params, ...)` when it should have used `network.apply({'params': params}, ...)`. This is because Flax expects parameters to be wrapped in a dictionary with the 'params' key to properly manage parameter scopes.\n\n## Fix Applied\nChanged line 31 in the `_forward()` function from:\n```python\nlogits_flat, values_flat, _ = network.apply(params, obs_flat, dones_flat, None)\n```\nto:\n```python\nlogits_flat, values_flat, _ = network.apply({'params': params}, obs_flat, dones_flat, None)\n```\n\nThis simple fix ensures that Flax can correctly access the kernel parameters within the Conv layers, resolving the ScopeCollectionNotFound error. The code now runs successfully and produces the expected gradient ratio output.",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "\"\"\"\nTest-only probes for 5-step LN-ConvLSTM + Attn\u2295GAP (64ch).\nComputes initial R_vp on a small synthetic batch; no training.\n\"\"\"\nimport json, os\nimport jax\nimport jax.numpy as jnp\nimport numpy as np\nfrom typing import Dict, Any\nimport sys\nsys.path.append('storage/zephyr')\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\n\nPROBE_PATH = 'storage/zephyr/results/probes_init_pg5.json'\n\ndef create_network(hparams: Dict[str, Any]):\n    return PG_Stepped_AttnGap(\n        cnn_features_1=32,\n        cnn_features_2=64,\n        convlstm_features=64,\n        dilation=6,\n        bottleneck_ratio=0.28,\n        head_hidden=64,\n        steps=5,\n    )\n\ndef _forward(network, params, observations, dones):\n    B, T = observations.shape[:2]\n    obs_flat = observations.reshape(B*T, *observations.shape[2:])\n    dones_flat = dones.reshape(B*T)\n    # Fix: Use {'params': params} instead of params directly\n    logits_flat, values_flat, _ = network.apply({'params': params}, obs_flat, dones_flat, None)\n    return logits_flat.reshape(B,T,-1), values_flat.reshape(B,T)\n\ndef _global_norm(tree):\n    leaves = jax.tree_util.tree_leaves(tree)\n    if not leaves: return jnp.array(0.0)\n    return jnp.sqrt(sum([jnp.sum(jnp.square(x)) for x in leaves]) + 1e-12)\n\ndef test():\n    key = jax.random.PRNGKey(43)\n    B, T = 8, 4\n    observations = jax.random.normal(key, (B, T, 8, 8, 8)) * 0.1\n    dones = jnp.zeros((B, T), dtype=bool)\n    actions = jax.random.randint(key, (B, T), 0, 4)\n    adv = jax.random.normal(key, (B, T))\n    ret = adv  # simple proxy\n\n    net = create_network({})\n    params = net.init(key, observations.reshape(B*T,8,8,8), dones.reshape(B*T), None)['params']\n\n    def loss_policy(p):\n        logits, _ = _forward(net, p, observations, dones)\n        log_probs_all = jax.nn.log_softmax(logits, axis=-1)\n        idx = (jnp.arange(B)[:,None], jnp.arange(T), actions)\n        log_probs = log_probs_all[idx]\n        return -jnp.mean(jax.lax.stop_gradient(adv) * log_probs)\n\n    def loss_value(p):\n        _, values = _forward(net, p, observations, dones)\n        return 0.5 * jnp.mean((values - jax.lax.stop_gradient(ret))**2)\n\n    g_pol = jax.grad(loss_policy)(params)\n    g_val = jax.grad(loss_value)(params)\n    g_pol_n = float(_global_norm(g_pol))\n    g_val_n = float(_global_norm(g_val))\n    rvp = g_val_n / (g_pol_n + 1e-12)\n\n    out = {\"mode\":\"init\",\"arch\":\"5step_64ch_vlc055\",\"grad_trunk_policy\":g_pol_n,\"grad_trunk_value\":g_val_n,\"rvp_ratio\":rvp}\n    try:\n        with open(PROBE_PATH, 'w') as f:\n            json.dump(out, f)\n    except Exception:\n        pass\n    print(json.dumps(out))\n    return \"init probe complete\"",
+      "created_timestamp": 1758073987.6470983,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Evaluation failed: Test mode - no scoring",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n{\"mode\": \"init\", \"arch\": \"5step_64ch_vlc055\", \"grad_trunk_policy\": 1.0517841577529907, \"grad_trunk_value\": 1.665966510772705, \"rvp_ratio\": 1.5839433390309436}\nTest completed. Result: init probe complete\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+        "evaluation_details": "Test mode - no scoring",
+        "evaluation_timestamp": 1758074010.708283,
+        "evaluation_datetime": "2025-09-17T09:53:30.708285"
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758074025.7888198,
+    "version_notified": "original",
+    "message": "Your research submission 'Test\u2011only probes: 5\u2011step LN\u2011ConvLSTM(64) + Attn\u2295GAP (vlc=0.55) \u2014 Init R_vp (inline)' (ID: 604) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/storage/system/main.py\", line 458, in <module>\n    test_result = submission.test()\n                  ^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 62, in test\n    g_pol = jax.grad(loss_policy)(params)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 52, in loss_policy\n    logits, _ = _forward(net, p, observations, dones)\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/submission.py\", line 31, in _forward\n    logits_flat, values_flat, _ = network.apply(params, obs_flat, dones_flat, None)\n                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/52be0872-810c-4c50-b546-7fcd50e7b6bb/storage/zephyr/submissions/submission_pg_quadstep.py\", line 71, in __call__\n    x = nn.Conv(self.cnn_features_1, (3,3), padding='SAME',\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/flax/linen/linear.py\", line 662, in __call__\n    kernel = self.param(\n             ^^^^^^^^^^^\nflax.errors.ScopeCollectionNotFound: Tried to access \"kernel\" from collection \"params\" in \"/Conv_0\" but the collection is empty. (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.ScopeCollectionNotFound)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n\n```"
+  }
+}

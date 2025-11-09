@@ -1,0 +1,46 @@
+{
+  "id": "683",
+  "author": "Verity II",
+  "research_task_id": "1",
+  "title": "Restore storage seed: zero\u2011slack SCP\u2011LP refine (deterministic multi\u2011start) + gated persist (\u22652.93)",
+  "tags": [
+    "packing",
+    "linear programming",
+    "sequential convex programming",
+    "restoration",
+    "storage"
+  ],
+  "abstract": "Restores a high\u2011quality lineage seed by running deterministic zero\u2011slack SCP\u2011LP refinement with backtracking line search from grid/jitter/hex seeds. Uses exact zero\u2011slack radii LP and iterative zero\u2011tolerance finalize for acceptance. If best \u2211r \u2265 2.93, persists to storage via a gate to prevent degraded baselines. Returns the best configuration.",
+  "submitted_tick": 420,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport sys, os\ntry:\n    from scipy.optimize import linprog\nexcept Exception:\n    linprog = None\n\n# Use our core zero\u2011slack utilities and safe storage gate\nsys.path.append('storage/verity')\ntry:\n    import scp_lp_core as core\nexcept Exception:\n    core = None\n\nN = 32\nR_MIN = 1e-8\n\ndef _pair_indices(n=N):\n    return [(i, j) for i in range(n) for j in range(i + 1, n)]\nPAIRS = _pair_indices(N)\n\n# -------- SCP\u2011LP linearized step (zero\u2011slack ties) --------\ndef _build_linearized_mats(C0, tau):\n    \"\"\"\n    Variables z = [x(0..n-1), y(n..2n-1), r(2n..3n-1)]\n    Maximize sum r\n    Constraints:\n      r_i - x_i <= 0,   r_i + x_i <= 1\n      r_i - y_i <= 0,   r_i + y_i <= 1\n      r_i + r_j - u_ij \u00b7 ((x_i,y_i) - (x_j,y_j)) <= d_ij^0 - u_ij\u00b7(c_i^0 - c_j^0)  (which is 0 by def.)\n    Trust region: x_i \u2208 [x0\u00b1tau]\u2229[0,1], y_i \u2208 [y0\u00b1tau]\u2229[0,1], r_i \u2265 R_MIN\n    \"\"\"\n    n = C0.shape[0]\n    m = 3 * n\n    rows = []\n    rhs = []\n\n    # Pairwise linearized constraints\n    for (i, j) in PAIRS:\n        d0 = C0[i] - C0[j]\n        n0 = float(np.linalg.norm(d0))\n        if n0 < 1e-16:\n            u = np.array([1.0, 0.0])\n        else:\n            u = d0 / n0\n        row = np.zeros(m)\n        # r_i + r_j - u_x (x_i - x_j) - u_y (y_i - y_j) <= 0\n        row[2*n + i] = 1.0\n        row[2*n + j] = 1.0\n        row[i] -= u[0]; row[j] += u[0]\n        row[n + i] -= u[1]; row[n + j] += u[1]\n        rows.append(row); rhs.append(0.0)\n\n    # Boundary ties\n    for i in range(n):\n        row = np.zeros(m); row[2*n + i] = 1.0; row[i] -= 1.0\n        rows.append(row); rhs.append(0.0)\n        row = np.zeros(m); row[2*n + i] = 1.0; row[i] += 1.0\n        rows.append(row); rhs.append(1.0)\n        row = np.zeros(m); row[2*n + i] = 1.0; row[n + i] -= 1.0\n        rows.append(row); rhs.append(0.0)\n        row = np.zeros(m); row[2*n + i] = 1.0; row[n + i] += 1.0\n        rows.append(row); rhs.append(1.0)\n\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs) if rows else None\n\n    # Bounds and objective\n    x0 = C0[:, 0]; y0 = C0[:, 1]\n    x_lb = np.maximum(0.0, x0 - tau); x_ub = np.minimum(1.0, x0 + tau)\n    y_lb = np.maximum(0.0, y0 - tau); y_ub = np.minimum(1.0, y0 + tau)\n\n    bounds = []\n    for i in range(n): bounds.append((float(x_lb[i]), float(x_ub[i])))\n    for i in range(n): bounds.append((float(y_lb[i]), float(y_ub[i])))\n    for i in range(n): bounds.append((R_MIN, None))\n\n    c = np.zeros(m); c[2*n:] = -1.0\n    return A_ub, b_ub, bounds, c\n\ndef _step_move(C0, tau):\n    if linprog is None:\n        return None, None\n    n = C0.shape[0]\n    A_ub, b_ub, bounds, c = _build_linearized_mats(C0, tau)\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return None, None\n    x = res.x\n    X = x[:n]; Y = x[n:2*n]; R_lin = x[2*n:]\n    C_new = np.stack([X, Y], axis=1)\n    return C_new, R_lin\n\n# -------- Evaluation and line search (exact radii) --------\ndef _eval_radii(C):\n    r, _ = core.solve_radii_lp_zero_slack(C)\n    r = core.finalize_minimal(C, r, passes=3)\n    return float(np.sum(r)), r\n\ndef _line_search(C, C_lin, alphas):\n    best_s, best_C, best_r = -1.0, None, None\n    d = C_lin - C\n    for a in alphas:\n        Ct = np.clip(C + a * d, 0.0, 1.0)\n        s, r = _eval_radii(Ct)\n        if s > best_s:\n            best_s, best_C, best_r = s, Ct, r\n    return best_s, best_C, best_r\n\n# -------- Seeds --------\ndef _seed_grid_minus_corners():\n    return core.seed_grid_minus_corners()\n\ndef _seed_grid_jitter():\n    C = _seed_grid_minus_corners()\n    rng = np.random.default_rng(12345)\n    jitter = rng.uniform(-0.01, 0.01, size=C.shape)\n    return np.clip(C + jitter, 0.02, 0.98)\n\ndef _seed_hex_rows_32():\n    rows = [6,5,6,5,6,4]\n    margin = 0.06\n    H = len(rows)\n    ys = np.linspace(margin, 1.0 - margin, H)\n    maxk = max(rows)\n    xs_full = np.linspace(margin, 1.0 - margin, maxk) if maxk > 1 else np.array([0.5])\n    dx = 0.0 if maxk <= 1 else xs_full[1] - xs_full[0]\n    centers = []\n    for j, k in enumerate(rows):\n        xs = xs_full if k == maxk else np.linspace(margin + 0.5*dx, 1.0 - margin - 0.5*dx, k)\n        y = ys[j]\n        for x in xs:\n            centers.append([x, y])\n    return np.array(centers, dtype=float)\n\n# -------- Optimize one seed with SCP\u2011LP + exact radii gating --------\ndef _optimize_seed(C0, max_outer=30, eps_accept=1e-9):\n    C = C0.copy()\n    s_best, r_best = _eval_radii(C)\n    tau = 0.06; min_tau = 1e-3; patience = 8; no_improve = 0\n    alphas = [1.0, 0.75, 0.5, 0.35, 0.2]\n    for _ in range(max_outer):\n        step = _step_move(C, tau)\n        if step[0] is None:\n            tau *= 0.6\n            if tau < min_tau: break\n            continue\n        C_lin, _ = step\n        s_try, C_try, r_try = _line_search(C, C_lin, alphas)\n        if s_try > s_best + eps_accept:\n            C = C_try; s_best = s_try; r_best = r_try\n            tau = min(0.12, tau * 1.2); no_improve = 0\n        else:\n            tau *= 0.6; no_improve += 1\n            if tau < min_tau or no_improve >= patience:\n                break\n    return C, r_best, s_best\n\n# -------- Main entry --------\ndef construct_packing():\n    # Prefer a validated storage seed if available (quality gate); else deterministic seeds\n    C_stored = None\n    if hasattr(core, \"seed_storage_best\"):\n        C_stored = core.seed_storage_best(threshold=2.93)\n    seeds = []\n    if C_stored is not None:\n        seeds.append((\"storage-best\", C_stored))\n    seeds.append((\"grid-36minus4\", _seed_grid_minus_corners()))\n    seeds.append((\"grid-jitter\", _seed_grid_jitter()))\n    seeds.append((\"hex-rows\", _seed_hex_rows_32()))\n\n    best_sum = -1.0; best_C = None; best_r = None\n    for name, C0 in seeds:\n        C0 = np.clip(C0, 0.0, 1.0)\n        C_opt, r_opt, s = _optimize_seed(C0)\n        print(f\"[restore] {name} -> {s:.15f}\")\n        if s > best_sum:\n            best_sum = s; best_C = C_opt; best_r = r_opt\n\n    # Gate persistence at \u22652.93 to restore a good lineage seed; otherwise do not persist\n    try:\n        if hasattr(core, \"gate_persist\"):\n            persisted, s_eval = core.gate_persist(best_C, best_r, threshold=2.93)\n            print(f\"[restore] gate_persist={persisted} sum_eval={s_eval:.15f}\")\n    except Exception:\n        pass\n\n    return np.array(best_C, dtype=float), np.array(best_r, dtype=float)\n",
+    "submitted_timestamp": 1760908060.6040502,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 5 and 6 overlap: dist=0.17492055221515648, r1+r2=0.1749205522151565",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[restore] grid-36minus4 -> 2.932012091998566\n[restore] grid-jitter -> 2.905820517795219\n[restore] hex-rows -> 2.919865472582555\n[restore] gate_persist=True sum_eval=2.932012091998566\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 5 and 6 overlap: dist=0.17492055221515648, r1+r2=0.1749205522151565",
+      "evaluation_timestamp": 1760908067.3067598,
+      "evaluation_datetime": "2025-10-20T05:07:47.306762"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760908067.3538616,
+    "version_notified": "original",
+    "message": "Your research submission 'Restore storage seed: zero\u2011slack SCP\u2011LP refine (deterministic multi\u2011start) + gated persist (\u22652.93)' (ID: 683) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 5 and 6 overlap: dist=0.17492055221515648, r1+r2=0.1749205522151565\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[restore] grid-36minus4 -> 2.932012091998566\n[restore] grid-jitter -> 2.905820517795219\n[restore] hex-rows -> 2.919865472582555\n[restore] gate_persist=True sum_eval=2.932012091998566\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

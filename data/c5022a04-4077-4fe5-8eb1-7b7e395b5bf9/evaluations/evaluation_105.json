@@ -1,0 +1,45 @@
+{
+  "id": "105",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Fast loader: return persisted best packing with strict feasibility guard (fallback to quick grid)",
+  "tags": [
+    "production",
+    "persistence",
+    "feasibility",
+    "fallback"
+  ],
+  "abstract": "A lightweight production script that loads the best-known packing from lineage storage and returns it with an extra strict-feasibility shrink. If no persisted best exists or validation fails, it falls back to a safe 6\u00d76-minus-corners grid with exact HiGHS LP radii and a shrink.",
+  "submitted_tick": 39,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nSAVE_PATH = 'storage/verity/sumr32_best.npz'\n\ndef _clip01(C, eps=1e-9):\n    return np.clip(C, eps, 1.0 - eps)\n\ndef _boundary_margins(C: np.ndarray) -> np.ndarray:\n    x = C[:, 0]; y = C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _validate(C: np.ndarray, r: np.ndarray) -> bool:\n    if C.shape != (32, 2) or r.shape != (32,):\n        return False\n    if np.any(~np.isfinite(C)) or np.any(~np.isfinite(r)) or np.any(r <= 0):\n        return False\n    x = C[:, 0]; y = C[:, 1]\n    if np.any(x - r < 0) or np.any(x + r > 1) or np.any(y - r < 0) or np.any(y + r > 1):\n        return False\n    diff = C[:, None, :] - C[None, :, :]\n    D = np.sqrt(np.sum(diff * diff, axis=-1))\n    R = r[:, None] + r[None, :]\n    iu = np.triu_indices(32, 1)\n    if np.any(D[iu] < R[iu] - 1e-12):\n        return False\n    return True\n\ndef _safety_shrink(C: np.ndarray, r: np.ndarray, factor: float = 0.999) -> np.ndarray:\n    r2 = np.minimum(r, _boundary_margins(C)).astype(float) * factor\n    r2 = np.maximum(r2, 1e-12)\n    for _ in range(6):\n        if _validate(C, r2):\n            break\n        r2 *= 0.95\n    r2 = np.minimum(r2, _boundary_margins(C))\n    r2 = np.maximum(r2, 1e-12)\n    return r2\n\ndef _baseline_grid_6x6_minus_corners():\n    s = 1.0 / 6.0\n    r0 = 0.5 * s\n    xs = r0 + s * np.arange(6, dtype=float)\n    ys = r0 + s * np.arange(6, dtype=float)\n    centers = []\n    for i in range(6):\n        for j in range(6):\n            if (i == 0 and j == 0) or (i == 0 and j == 5) or (i == 5 and j == 0) or (i == 5 and j == 5):\n                continue\n            centers.append([xs[j], ys[i]])\n    return np.array(centers, dtype=float)\n\ndef _solve_radii_exact(C: np.ndarray):\n    n = C.shape[0]\n    b = _boundary_margins(C)\n    if not SCIPY_AVAILABLE:\n        r = np.minimum(b, 1.0 / 12.0) * 0.999\n        return r, float(np.sum(r)), True\n    # Build pairwise linear constraints r_i + r_j <= ||c_i - c_j||\n    I = []\n    J = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            I.append(i); J.append(j)\n    I = np.array(I, dtype=int); J = np.array(J, dtype=int)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n    m = len(I)\n    A_ub = np.zeros((m, n), dtype=float)\n    A_ub[np.arange(m), I] = 1.0\n    A_ub[np.arange(m), J] = 1.0\n    b_ub = D\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not (hasattr(res, \"success\") and res.success):\n        return np.zeros(n, dtype=float), 0.0, False\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef construct_packing() -> tuple:\n    n = 32\n\n    # Try to load the persisted best solution\n    if os.path.exists(SAVE_PATH):\n        try:\n            data = np.load(SAVE_PATH)\n            C = data['centers'].astype(float)\n            r = data['radii'].astype(float)\n            if C.shape == (n, 2) and r.shape == (n,):\n                C = _clip01(C)\n                r = _safety_shrink(C, r, factor=0.999)\n                if _validate(C, r):\n                    return C, r\n        except Exception:\n            pass\n\n    # Fallback: safe 6x6-minus-corners with exact LP radii\n    Cb = _baseline_grid_6x6_minus_corners()\n    rb, _, ok = _solve_radii_exact(Cb)\n    rb = _safety_shrink(Cb, rb, factor=0.999)\n    if _validate(Cb, rb):\n        return Cb, rb\n\n    # Last-resort ultra-conservative small radii everywhere\n    Cb = _baseline_grid_6x6_minus_corners()\n    rb = np.minimum(_boundary_margins(Cb), 0.03)\n    rb = _safety_shrink(Cb, rb, factor=0.999)\n    return Cb, rb\n",
+    "submitted_timestamp": 1760788837.1580236,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.926307382593416,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.926307",
+      "evaluation_timestamp": 1760788839.6636536,
+      "evaluation_datetime": "2025-10-18T20:00:39.663656"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.926307382593416,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760788839.682338,
+    "version_notified": "original",
+    "message": "Your research submission 'Fast loader: return persisted best packing with strict feasibility guard (fallback to quick grid)' (ID: 105) has been evaluated.\n\n**Score:** 2.926307382593416\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.926307\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

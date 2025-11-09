@@ -1,0 +1,46 @@
+{
+  "id": "173",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Multi-Start Hill Climbing: Robust LP Infeasibility Handling (Attempt 2)",
+  "tags": [
+    "optimization",
+    "hill climbing",
+    "linear-programming",
+    "robustness",
+    "infeasibility-handling"
+  ],
+  "abstract": "This submission revisits the multi-start hill climbing approach, focusing on robust handling of LP infeasibility within `compute_max_radii`. Instead of a hard penalty, if the LP solver fails, the `objective_function_for_minimize` will now return a value derived from the heuristic `compute_max_radii_heuristic`, providing a smoother and more robust signal to the hill-climbing optimizer. `lp_safety_margin` is set to `1e-9`. This aims to overcome the numerical instability encountered with SLSQP and achieve a higher, more stable score by utilizing a method less sensitive to gradient noise.",
+  "submitted_tick": 74,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\n\n# Original heuristic, kept as fallback and for smoother penalty\ndef compute_max_radii_heuristic(centers: np.ndarray) -> np.ndarray:\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7 \n  overlap_safety_margin = 1e-8 \n  min_positive_radius = 1e-9 \n\n  x_coords = centers[:, 0]\n  y_coords = centers[:, 1]\n  \n  radii = np.minimum.reduce([\n      x_coords - boundary_epsilon,\n      y_coords - boundary_epsilon,\n      1 - x_coords - boundary_epsilon,\n      1 - y_coords - boundary_epsilon\n  ])\n  radii = np.maximum(radii, min_positive_radius) \n\n  distances_sq = np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :])**2, axis=2)\n  np.fill_diagonal(distances_sq, np.inf)\n\n  for _ in range(40):\n    for i in range(n):\n      for j in range(i + 1, n):\n        dist_sq = distances_sq[i, j]\n        dist = np.sqrt(dist_sq) \n\n        rad_sum = radii[i] + radii[j]\n        \n        if dist < rad_sum + overlap_safety_margin: \n          if rad_sum > 0: \n            scale_factor = (dist - overlap_safety_margin) / rad_sum\n            if scale_factor > (min_positive_radius * 2 / rad_sum): \n              radii[i] *= scale_factor\n              radii[j] *= scale_factor\n            else: \n                radii[i] = min_positive_radius\n                radii[j] = min_positive_radius\n          else: \n              radii[i] = min_positive_radius\n              radii[j] = min_positive_radius\n\n  return np.maximum(radii, min_positive_radius)\n\n\ndef compute_max_radii(centers: np.ndarray) -> tuple[np.ndarray, bool]:\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7\n  min_positive_radius = 1e-9\n  lp_safety_margin = 1e-9 \n\n  c = -np.ones(n)\n\n  A_ub = [] \n  b_ub = [] \n\n  for i in range(n):\n      x, y = centers[i]\n      \n      row_x1 = np.zeros(n); row_x1[i] = 1; A_ub.append(row_x1); b_ub.append(x - boundary_epsilon)\n      row_y1 = np.zeros(n); row_y1[i] = 1; A_ub.append(row_y1); b_ub.append(y - boundary_epsilon)\n      row_x2 = np.zeros(n); row_x2[i] = 1; A_ub.append(row_x2); b_ub.append(1 - x - boundary_epsilon)\n      row_y2 = np.zeros(n); row_y2[i] = 1; A_ub.append(row_y2); b_ub.append(1 - y - boundary_epsilon)\n\n  distances = np.linalg.norm(centers[:, np.newaxis, :] - centers[np.newaxis, :, :], axis=2)\n\n  for i in range(n):\n      for j in range(i + 1, n): \n          row_overlap = np.zeros(n); row_overlap[i] = 1; row_overlap[j] = 1; A_ub.append(row_overlap)\n          b_ub.append(distances[i, j] - lp_safety_margin) \n\n  A_ub = np.array(A_ub)\n  b_ub = np.array(b_ub)\n\n  bounds = [(min_positive_radius, None) for _ in range(n)]\n\n  res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs', options={'presolve': True}) \n\n  if res.success:\n      return np.array(res.x), True\n  else:\n      return np.full(n, min_positive_radius), False \n\n\ndef objective_function_for_hill_climbing(centers: np.ndarray) -> float:\n    radii, lp_success = compute_max_radii(centers)\n    \n    if lp_success:\n        return np.sum(radii)\n    else:\n        # If LP fails, return the score from the heuristic, which provides a smoother signal\n        # to the optimizer about \"badness\" rather than a hard penalty.\n        return np.sum(compute_max_radii_heuristic(centers))\n\ndef construct_packing() -> tuple:\n    n = 32\n    \n    # Multi-Start Hill Climbing Parameters (Aggressively Tuned)\n    num_restarts = 20 # Keep restarts high for global exploration\n    num_iterations_per_run = 1500 # Keep iterations per run reasonable\n    perturbation_strength = 0.01 # Standard deviation for Gaussian perturbation\n    clip_margin = 1e-7 # Margin for clipping centers\n\n    global_best_score = -np.inf\n    global_best_centers = None\n    global_best_radii = None\n\n    for restart_idx in range(num_restarts):\n        current_centers = np.random.rand(n, 2)\n        current_score = objective_function_for_hill_climbing(current_centers)\n        current_radii, _ = compute_max_radii(current_centers) # Store radii for final return\n\n        for _ in range(num_iterations_per_run):\n            candidate_centers = current_centers + np.random.normal(0, perturbation_strength, (n, 2))\n            candidate_centers = np.clip(candidate_centers, clip_margin, 1 - clip_margin) \n\n            candidate_score = objective_function_for_hill_climbing(candidate_centers)\n\n            if candidate_score > current_score:\n                current_score = candidate_score\n                current_centers = candidate_centers\n                current_radii, _ = compute_max_radii(current_centers) # Update radii if centers improve\n\n        if current_score > global_best_score:\n            global_best_score = current_score\n            global_best_centers = current_centers\n            global_best_radii = current_radii\n            \n    # Final check for global best radii if the last `current_radii` was from a non-LP success\n    if global_best_radii is None or not np.array_equal(compute_max_radii(global_best_centers)[0], global_best_radii):\n        global_best_radii, _ = compute_max_radii(global_best_centers)\n\n    return global_best_centers, global_best_radii\n",
+    "submitted_timestamp": 1760798929.4934916,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.4112749693046283,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.411275",
+      "evaluation_timestamp": 1760799045.5068214,
+      "evaluation_datetime": "2025-10-18T22:50:45.506824"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.4112749693046283,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760799045.530836,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start Hill Climbing: Robust LP Infeasibility Handling (Attempt 2)' (ID: 173) has been evaluated.\n\n**Score:** 2.4112749693046283\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.411275\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

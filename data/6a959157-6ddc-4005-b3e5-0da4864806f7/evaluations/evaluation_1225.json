@@ -1,0 +1,118 @@
+{
+  "id": "1225",
+  "author": "Praxis IV",
+  "research_task_id": "1",
+  "title": "FWPCA embedding baseline: PCA60(F\u2011weighted) + kNN50 (cosine), binary",
+  "tags": [
+    "fwpca",
+    "embedding",
+    "baseline",
+    "pca",
+    "knn",
+    "graph"
+  ],
+  "abstract": "Implements a Feature\u2011Weighted PCA embedding using per\u2011gene ANOVA F\u2011scores on batches; runs PCA(60) on weighted expression and builds a vanilla kNN50 (cosine), binary connectivities + true distances. Tests FWPCA alone on the simple scaffold.",
+  "submitted_tick": 869,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom embedding_fwpca_knn import eliminate_batch_effect_fn as _run\ndef eliminate_batch_effect_fn(adata: ad.AnnData):\n    return _run(adata)\n",
+    "submitted_timestamp": 1761680155.1610806,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/sklearn/feature_selection/_univariate_selection.py:111: RuntimeWarning: invalid value encountered in divide\n  f = msb / msw\nTraceback (most recent call last):\n  File \"/tmp/tmppy8wtvaq/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmppy8wtvaq/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmppy8wtvaq/submission.py\", line 6, in eliminate_batch_effect_fn\n    return _run(adata)\n           ^^^^^^^^^^^\n  File \"/tmp/tmppy8wtvaq/storage/praxis/embedding_fwpca_knn.py\", line 59, in eliminate_batch_effect_fn\n    f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761680161.0084927,
+      "evaluation_datetime": "2025-10-29T03:36:01.008554"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1225_1761680161",
+      "started_timestamp": 1761680161.0060947,
+      "completed_timestamp": 1761680627.9946442,
+      "final_report": "# Debug Report for Evaluation 1225\n\n## Summary\n**SUCCESS** - Fixed the ValueError in the FWPCA embedding code. The submission now runs without crashing.\n\n## Root Cause\nThe original code had a bug in `storage/praxis/embedding_fwpca_knn.py` at line 59:\n\n```python\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n```\n\nThe issue was the expression `np.isfinite(f_scores) and f_scores`, which attempts to use a boolean array in a logical `and` operation. This raises:\n```\nValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()\n```\n\nThis is a common numpy pitfall - you cannot use boolean arrays with Python's `and`/`or` operators because the truth value of an array with multiple elements is ambiguous.\n\n## Fix Applied\nI copied the `eliminate_batch_effect_fn` function from the lineage file into `submissions/submission_v2.py` and fixed the buggy line:\n\n**Original buggy code:**\n```python\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n```\n\n**Fixed code:**\n```python\nfinite_mask = np.isfinite(f_scores)\nfinite_values = f_scores[finite_mask] if finite_mask.any() else np.array([1.0])\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(finite_values))\n```\n\nThe fix:\n1. Creates a boolean mask of finite values\n2. Extracts finite values using array indexing (or defaults to `[1.0]` if none exist)\n3. Uses `finite_mask.any()` for the conditional check, which returns a single boolean\n4. Passes the extracted finite values to `np.max()`\n\nI also kept the imports for the helper functions `_to_dense_float32` and `_build_knn_graph` from the lineage file since they work correctly.\n\n## Verification\nThe monitor script confirmed success with exit code 0:\n- The code ran for 300+ seconds without crashing\n- This indicates the fix resolved the ValueError and the algorithm is executing properly\n- The evaluation is taking time to complete (likely due to PCA and kNN computations on 20,000 cells)\n\n## Implementation Notes\n- **Version:** submission_v2.py\n- **Approach:** Copied only the buggy function, fixed the boolean logic error\n- **Imports:** Maintained working helper functions from lineage directory\n- **Status:** Running without crashes (success criteria met)\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.feature_selection import f_classif\nfrom sklearn.neighbors import NearestNeighbors\n\nsys.path.append('storage/praxis')\n# Import helper functions that work correctly\nfrom embedding_fwpca_knn import _to_dense_float32, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log1p\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # Compute FWPCA weights on genes using batch labels\n    X = _to_dense_float32(adata.X)\n    y = adata.obs['batch'].astype('category').cat.codes.to_numpy()\n    # f_classif expects (n_samples, n_features)\n    f_scores, _ = f_classif(X, y)\n    # FIX: Replace buggy boolean logic with proper numpy array indexing\n    # Original line: f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n    # The issue: \"np.isfinite(f_scores) and f_scores\" causes \"ambiguous truth value\" error\n    # Fix: Use array indexing to get finite values, or default to [1.0] if none exist\n    finite_mask = np.isfinite(f_scores)\n    finite_values = f_scores[finite_mask] if finite_mask.any() else np.array([1.0])\n    f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(finite_values))\n\n    # Normalize weights to mean 1.0; alpha=1.0\n    w = f_scores.astype(np.float32)\n    w = w / (np.mean(w) + 1e-8)\n    # Apply column scaling in expression space\n    Xw = X * w[None, :]\n\n    # PCA(60) on weighted expression for embedding\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    X_emb = np.asarray(ad_emb.obsm['X_pca'], dtype=np.float32)\n    adata.obsm['X_emb'] = X_emb\n\n    # Build vanilla kNN graph on embedding PCs\n    C, D = _build_knn_graph(X_emb, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n",
+      "created_timestamp": 1761680210.2428367,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.21018770824093358,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/24571e13-1982-49eb-9503-185f01f799f0/result_human.h5ad\n\nRESULT_UUID: 24571e13-1982-49eb-9503-185f01f799f0\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/sklearn/feature_selection/_univariate_selection.py:111: RuntimeWarning: invalid value encountered in divide\n  f = msb / msw\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.055  NMI: 0.211\n  Graph_conn: 0.364  kBET: 0.451  iLISI: 0.000  cLISI: 0.743\n  PCR: 0.000  Cell_cycle: 0.279\n\nRaw Scores (before normalization):\n  ASW_batch: 0.419329  ASW_label: 0.156231  ARI: 0.054636  NMI: 0.210783\n  Graph_conn: 0.374837  kBET: 0.434830  iLISI: 0.000000  cLISI: 0.925219\n  PCR: 0.000000  Cell_cycle: 0.246509",
+          "ASW_batch": [
+            "0.000",
+            0.0
+          ],
+          "ASW_label": [
+            "0.000",
+            0.0
+          ],
+          "ARI": [
+            "0.055",
+            0.05476411319702222
+          ],
+          "NMI": [
+            "0.211",
+            0.21056009392339348
+          ],
+          "Graph_conn": [
+            "0.364",
+            0.36404999661452
+          ],
+          "kBET": [
+            "0.451",
+            0.4506153337798273
+          ],
+          "iLISI": [
+            "0.000",
+            2.220446049250313e-16
+          ],
+          "cLISI": [
+            "0.743",
+            0.7432897047529464
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.279",
+            0.2785978401416261
+          ]
+        },
+        "evaluation_timestamp": 1761680580.7632458,
+        "evaluation_datetime": "2025-10-29T03:43:00.763247",
+        "sort_key": [
+          0.21018770824093358
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.21018770824093358,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761680628.0679858,
+    "version_notified": "v2",
+    "message": "Your research submission 'FWPCA embedding baseline: PCA60(F\u2011weighted) + kNN50 (cosine), binary' (ID: 1225) succeeded after automatic debugging.\n\n**Score:** 0.21018770824093358\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.055\n**NMI:** 0.211\n**Graph_conn:** 0.364\n**kBET:** 0.451\n**iLISI:** 0.000\n**cLISI:** 0.743\n**PCR:** 0.000\n**Cell_cycle:** 0.279\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.055  NMI: 0.211\n  Graph_conn: 0.364  kBET: 0.451  iLISI: 0.000  cLISI: 0.743\n  PCR: 0.000  Cell_cycle: 0.279\n\nRaw Scores (before normalization):\n  ASW_batch: 0.419329  ASW_label: 0.156231  ARI: 0.054636  NMI: 0.210783\n  Graph_conn: 0.374837  kBET: 0.434830  iLISI: 0.000000  cLISI: 0.925219\n  PCR: 0.000000  Cell_cycle: 0.246509\n\n**Debugger Report:** # Debug Report for Evaluation 1225\n\n## Summary\n**SUCCESS** - Fixed the ValueError in the FWPCA embedding code. The submission now runs without crashing.\n\n## Root Cause\nThe original code had a bug in `storage/praxis/embedding_fwpca_knn.py` at line 59:\n\n```python\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n```\n\nThe issue was the expression `np.isfinite(f_scores) and f_scores`, which attempts to use a boolean array in a logical `and` operation. This raises:\n```\nValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()\n```\n\nThis is a common numpy pitfall - you cannot use boolean arrays with Python's `and`/`or` operators because the truth value of an array with multiple elements is ambiguous.\n\n## Fix Applied\nI copied the `eliminate_batch_effect_fn` function from the lineage file into `submissions/submission_v2.py` and fixed the buggy line:\n\n**Original buggy code:**\n```python\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n```\n\n**Fixed code:**\n```python\nfinite_mask = np.isfinite(f_scores)\nfinite_values = f_scores[finite_mask] if finite_mask.any() else np.array([1.0])\nf_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(finite_values))\n```\n\nThe fix:\n1. Creates a boolean mask of finite values\n2. Extracts finite values using array indexing (or defaults to `[1.0]` if none exist)\n3. Uses `finite_mask.any()` for the conditional check, which returns a single boolean\n4. Passes the extracted finite values to `np.max()`\n\nI also kept the imports for the helper functions `_to_dense_float32` and `_build_knn_graph` from the lineage file since they work correctly.\n\n## Verification\nThe monitor script confirmed success with exit code 0:\n- The code ran for 300+ seconds without crashing\n- This indicates the fix resolved the ValueError and the algorithm is executing properly\n- The evaluation is taking time to complete (likely due to PCA and kNN computations on 20,000 cells)\n\n## Implementation Notes\n- **Version:** submission_v2.py\n- **Approach:** Copied only the buggy function, fixed the boolean logic error\n- **Imports:** Maintained working helper functions from lineage directory\n- **Status:** Running without crashes (success criteria met)\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.feature_selection import f_classif\nfrom sklearn.neighbors import NearestNeighbors\n\nsys.path.append('storage/praxis')\n# Import helper functions that work correctly\nfrom embedding_fwpca_knn import _to_dense_float32, _build_knn_graph\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + log1p\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4, inplace=True)\n    sc.pp.log1p(adata)\n\n    # Compute FWPCA weights on genes using batch labels\n    X = _to_dense_float32(adata.X)\n    y = adata.obs['batch'].astype('category').cat.codes.to_numpy()\n    # f_classif expects (n_samples, n_features)\n    f_scores, _ = f_classif(X, y)\n    # FIX: Replace buggy boolean logic with proper numpy array indexing\n    # Original line: f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(np.isfinite(f_scores) and f_scores or [1.0]))\n    # The issue: \"np.isfinite(f_scores) and f_scores\" causes \"ambiguous truth value\" error\n    # Fix: Use array indexing to get finite values, or default to [1.0] if none exist\n    finite_mask = np.isfinite(f_scores)\n    finite_values = f_scores[finite_mask] if finite_mask.any() else np.array([1.0])\n    f_scores = np.nan_to_num(f_scores, nan=0.0, posinf=np.max(finite_values))\n\n    # Normalize weights to mean 1.0; alpha=1.0\n    w = f_scores.astype(np.float32)\n    w = w / (np.mean(w) + 1e-8)\n    # Apply column scaling in expression space\n    Xw = X * w[None, :]\n\n    # PCA(60) on weighted expression for embedding\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=60, svd_solver='arpack', random_state=0)\n    X_emb = np.asarray(ad_emb.obsm['X_pca'], dtype=np.float32)\n    adata.obsm['X_emb'] = X_emb\n\n    # Build vanilla kNN graph on embedding PCs\n    C, D = _build_knn_graph(X_emb, k=50, metric='cosine')\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/24571e13-1982-49eb-9503-185f01f799f0/result_human.h5ad\n\nRESULT_UUID: 24571e13-1982-49eb-9503-185f01f799f0\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/sklearn/feature_selection/_univariate_selection.py:111: RuntimeWarning: invalid value encountered in divide\n  f = msb / msw\n\n```"
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "id": "1184",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Testing Praxis IV's 'invite_trim' Symmetrizer on my SOTA Pipeline",
+  "tags": [
+    "praxis-pipeline",
+    "symmetrization",
+    "invite-trim",
+    "collaboration",
+    "validation"
+  ],
+  "abstract": "This experiment represents a formal pivot to collaborative validation, using a prototype symmetrizer provided by Praxis IV. Following the failure of my own symmetrization methods, this submission integrates Praxis IV's 'invite_trim' function (from 'adapter_symmetrize_ridge.py') into my best-performing pipeline variant (alpha_g=0.75). The goal is to rigorously test their advanced, principled approach to solving the 'mixing shortfall' problem, with the hope of preserving both local mixing and global structure.",
+  "submitted_tick": 823,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the new, purpose-built adapter from Praxis IV\nsys.path.append('storage/shared/sym')\nfrom adapter_symmetrize_ridge import symmetrize_ridge_graph\n\n# --- My SOTA Zcorr Generation ---\n# This function produces the Zcorr embedding using my optimized alpha_g=0.75\ndef _build_axiom_Zcorr(adata: ad.AnnData) -> np.ndarray:\n    print(\"  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\")\n    # Utility functions\n    def _normalize_log1p_inplace(ad, t=1e4): sc.pp.normalize_total(ad,t); sc.pp.log1p(ad)\n    def _pca_on_dense(Xd, n, r=0): ad_tmp=ad.AnnData(Xd); sc.pp.pca(ad_tmp,n,svd_solver='arpack',random_state=r); return ad_tmp.obsm['X_pca']\n    def _one_hot_batches(b): c=np.unique(b); B=np.zeros((b.shape[0],c.size),dtype=np.float32); [np.put(B[:,j],np.where(b==cat),1) for j,cat in enumerate(c)]; return B\n    def _ridge_fit_predict(B,Z,l=1e-3): BTB=B.T@B+l*np.eye(B.shape[1],dtype=np.float32); W=np.linalg.solve(BTB,B.T@Z); return B@W\n\n    # Main pipeline logic\n    alpha_g = 0.75\n    n_pcs_graph = 50\n    lam = 0.60\n    \n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].values)\n    Xd = adata.X[:, hv].A.astype(np.float32)\n    \n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Zg = _pca_on_dense(Xd * wv_graph, n_pcs_graph, r=0)\n    \n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg)\n    R2 = np.clip((Zhat.var(0,ddof=1)+1e-8)/(Zg.var(0,ddof=1)+1e-8), 0.0, 1.0)\n    gamma = np.minimum(0.74, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    \n    return Zcorr.astype(np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Phase 1: Generate my optimized Zcorr embedding\n    Zcorr = _build_axiom_Zcorr(adata)\n    adata.obsm['X_emb'] = Zcorr # Store it for the symmetrizer\n\n    # Phase 2: Apply Praxis IV's 'invite_trim' symmetrizer using their adapter\n    print(\"  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\")\n    # The adapter takes the full adata object and works on the embedding in 'X_emb'\n    # It also requires the alpha_g to be passed to correctly build the directed graph proposals\n    adata_out = symmetrize_ridge_graph(adata, method='invite_trim', alpha_g=0.75, rng_seed=0)\n    \n    return adata_out\n",
+    "submitted_timestamp": 1761663677.887959,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\n  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpmv0vuvmg/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpmv0vuvmg/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpmv0vuvmg/submission.py\", line 54, in eliminate_batch_effect_fn\n    adata_out = symmetrize_ridge_graph(adata, method='invite_trim', alpha_g=0.75, rng_seed=0)\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: symmetrize_ridge_graph() got an unexpected keyword argument 'alpha_g'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761663692.1550465,
+      "evaluation_datetime": "2025-10-28T23:01:32.155063"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1184_1761663692",
+      "started_timestamp": 1761663692.154266,
+      "completed_timestamp": 1761664363.386574,
+      "final_report": "# Debug Report for Evaluation 1184\n\n## Summary\n**SUCCESS** - Fixed the code after 2 iterations. The submission now runs without crashing.\n\n## Root Cause\nThe original code had two issues when calling the `symmetrize_ridge_graph()` function from the shared adapter:\n\n1. **Invalid parameter `alpha_g=0.75`**: The function signature does not accept an `alpha_g` parameter. The agent (Axiom I) was trying to pass their optimized alpha value, but the adapter function builds Zcorr internally with a hardcoded `alpha_g=0.5`.\n\n2. **Invalid parameter `rng_seed=0`**: Similarly, this parameter doesn't exist in the function signature.\n\n3. **Return type mismatch**: The adapter function returns a tuple `(adata, (C, D))` but the task expects only an AnnData object.\n\n## Fix Applied\n\n### Version 2 (submission_v2.py)\nRemoved the invalid keyword arguments from the function call:\n```python\n# Before (v1):\nadata_out = symmetrize_ridge_graph(adata, method='invite_trim', alpha_g=0.75, rng_seed=0)\n\n# After (v2):\nadata_out = symmetrize_ridge_graph(adata, method='invite_trim')\n```\n\nThis fixed the `TypeError: symmetrize_ridge_graph() got an unexpected keyword argument 'alpha_g'` error, but revealed a second issue: the function returns a tuple instead of just the AnnData object.\n\n### Version 3 (submission_v3.py) - FINAL SUCCESS\nUnpacked the tuple return value to extract only the AnnData object:\n```python\n# Fixed return value handling:\nadata_out, _ = symmetrize_ridge_graph(adata, method='invite_trim')\nreturn adata_out\n```\n\nThis resolved the `ERROR: Function must return AnnData object` error. The code now runs successfully without crashing.\n\n## Technical Notes\n\nThe agent's approach was conceptually interesting but had an implementation mismatch:\n- **Intent**: Use their optimized alpha_g=0.75 Zcorr embedding with Praxis IV's symmetrizer\n- **Reality**: The adapter function rebuilds Zcorr from scratch using its own parameters, ignoring the pre-computed embedding stored in `adata.obsm['X_emb']`\n\nThe code is functionally correct now and computes the batch integration successfully, though the adapter rebuilds the Zcorr with alpha_g=0.5 rather than using the agent's pre-computed alpha_g=0.75 version. This is a semantic difference that doesn't prevent the code from running.\n",
+      "success": true,
+      "versions_created": [
+        "v2",
+        "v3"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the new, purpose-built adapter from Praxis IV\nsys.path.append('storage/shared/sym')\nfrom adapter_symmetrize_ridge import symmetrize_ridge_graph\n\n# --- My SOTA Zcorr Generation ---\n# This function produces the Zcorr embedding using my optimized alpha_g=0.75\ndef _build_axiom_Zcorr(adata: ad.AnnData) -> np.ndarray:\n    print(\"  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\")\n    # Utility functions\n    def _normalize_log1p_inplace(ad, t=1e4): sc.pp.normalize_total(ad,t); sc.pp.log1p(ad)\n    def _pca_on_dense(Xd, n, r=0): ad_tmp=ad.AnnData(Xd); sc.pp.pca(ad_tmp,n,svd_solver='arpack',random_state=r); return ad_tmp.obsm['X_pca']\n    def _one_hot_batches(b): c=np.unique(b); B=np.zeros((b.shape[0],c.size),dtype=np.float32); [np.put(B[:,j],np.where(b==cat),1) for j,cat in enumerate(c)]; return B\n    def _ridge_fit_predict(B,Z,l=1e-3): BTB=B.T@B+l*np.eye(B.shape[1],dtype=np.float32); W=np.linalg.solve(BTB,B.T@Z); return B@W\n\n    # Main pipeline logic\n    alpha_g = 0.75\n    n_pcs_graph = 50\n    lam = 0.60\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].values)\n    Xd = adata.X[:, hv].A.astype(np.float32)\n\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Zg = _pca_on_dense(Xd * wv_graph, n_pcs_graph, r=0)\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg)\n    R2 = np.clip((Zhat.var(0,ddof=1)+1e-8)/(Zg.var(0,ddof=1)+1e-8), 0.0, 1.0)\n    gamma = np.minimum(0.74, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    return Zcorr.astype(np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Phase 1: Generate my optimized Zcorr embedding\n    Zcorr = _build_axiom_Zcorr(adata)\n    adata.obsm['X_emb'] = Zcorr # Store it for the symmetrizer\n\n    # Phase 2: Apply Praxis IV's 'invite_trim' symmetrizer using their adapter\n    print(\"  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\")\n    # The adapter takes the full adata object and works on the embedding in 'X_emb'\n    # Fixed: Removed alpha_g and rng_seed parameters that don't exist in the function signature\n    adata_out = symmetrize_ridge_graph(adata, method='invite_trim')\n\n    return adata_out\n",
+      "created_timestamp": 1761663732.931487,
+      "evaluation_result": {
+        "status": "failed",
+        "score": "n.a.",
+        "success": false,
+        "error": "Evaluation failed: ERROR: Function must return AnnData object",
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\n  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\nERROR: Function must return AnnData object\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n",
+        "evaluation_details": "ERROR: Function must return AnnData object",
+        "evaluation_timestamp": 1761664020.7366567,
+        "evaluation_datetime": "2025-10-28T23:07:00.736660",
+        "sort_key": [
+          -Infinity
+        ]
+      }
+    },
+    "v3": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the new, purpose-built adapter from Praxis IV\nsys.path.append('storage/shared/sym')\nfrom adapter_symmetrize_ridge import symmetrize_ridge_graph\n\n# --- My SOTA Zcorr Generation ---\n# This function produces the Zcorr embedding using my optimized alpha_g=0.75\ndef _build_axiom_Zcorr(adata: ad.AnnData) -> np.ndarray:\n    print(\"  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\")\n    # Utility functions\n    def _normalize_log1p_inplace(ad, t=1e4): sc.pp.normalize_total(ad,t); sc.pp.log1p(ad)\n    def _pca_on_dense(Xd, n, r=0): ad_tmp=ad.AnnData(Xd); sc.pp.pca(ad_tmp,n,svd_solver='arpack',random_state=r); return ad_tmp.obsm['X_pca']\n    def _one_hot_batches(b): c=np.unique(b); B=np.zeros((b.shape[0],c.size),dtype=np.float32); [np.put(B[:,j],np.where(b==cat),1) for j,cat in enumerate(c)]; return B\n    def _ridge_fit_predict(B,Z,l=1e-3): BTB=B.T@B+l*np.eye(B.shape[1],dtype=np.float32); W=np.linalg.solve(BTB,B.T@Z); return B@W\n\n    # Main pipeline logic\n    alpha_g = 0.75\n    n_pcs_graph = 50\n    lam = 0.60\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].values)\n    Xd = adata.X[:, hv].A.astype(np.float32)\n\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Zg = _pca_on_dense(Xd * wv_graph, n_pcs_graph, r=0)\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg)\n    R2 = np.clip((Zhat.var(0,ddof=1)+1e-8)/(Zg.var(0,ddof=1)+1e-8), 0.0, 1.0)\n    gamma = np.minimum(0.74, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    return Zcorr.astype(np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Phase 1: Generate my optimized Zcorr embedding\n    Zcorr = _build_axiom_Zcorr(adata)\n    adata.obsm['X_emb'] = Zcorr # Store it for the symmetrizer\n\n    # Phase 2: Apply Praxis IV's 'invite_trim' symmetrizer using their adapter\n    print(\"  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\")\n    # The adapter returns a tuple (adata, (C, D)), we only need the adata\n    adata_out, _ = symmetrize_ridge_graph(adata, method='invite_trim')\n\n    return adata_out\n",
+      "created_timestamp": 1761664038.005916,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.4723907169565389,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\n  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/935d99de-8aa2-4c97-9538-df44fbfeef0f/result_human.h5ad\n\nRESULT_UUID: 935d99de-8aa2-4c97-9538-df44fbfeef0f\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.510  ASW_label: 0.222  ARI: 0.482  NMI: 0.679\n  Graph_conn: 0.909  kBET: 0.607  iLISI: 0.004  cLISI: 0.995\n  PCR: 0.000  Cell_cycle: 0.317\n\nRaw Scores (before normalization):\n  ASW_batch: 0.763051  ASW_label: 0.539702  ARI: 0.481706  NMI: 0.679327\n  Graph_conn: 0.910311  kBET: 0.581472  iLISI: 0.004089  cLISI: 0.998446\n  PCR: 0.000000  Cell_cycle: 0.279561",
+          "ASW_batch": [
+            "0.510",
+            0.5095151876201987
+          ],
+          "ASW_label": [
+            "0.222",
+            0.22180481308638225
+          ],
+          "ARI": [
+            "0.482",
+            0.4817760513329983
+          ],
+          "NMI": [
+            "0.679",
+            0.6792363888844345
+          ],
+          "Graph_conn": [
+            "0.909",
+            0.9087637097431565
+          ],
+          "kBET": [
+            "0.607",
+            0.606652630327693
+          ],
+          "iLISI": [
+            "0.004",
+            0.004089299029814993
+          ],
+          "cLISI": [
+            "0.995",
+            0.9946662776326961
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.317",
+            0.31740281190801517
+          ]
+        },
+        "evaluation_timestamp": 1761664563.8352811,
+        "evaluation_datetime": "2025-10-28T23:16:03.835284",
+        "sort_key": [
+          0.4723907169565389
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v3",
+    "latest_score": 0.4723907169565389,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761664563.865678,
+    "version_notified": "v3",
+    "message": "Your research submission 'Testing Praxis IV's 'invite_trim' Symmetrizer on my SOTA Pipeline' (ID: 1184) succeeded after automatic debugging.\n\n**Score:** 0.4723907169565389\n**ASW_batch:** 0.510\n**ASW_label:** 0.222\n**ARI:** 0.482\n**NMI:** 0.679\n**Graph_conn:** 0.909\n**kBET:** 0.607\n**iLISI:** 0.004\n**cLISI:** 0.995\n**PCR:** 0.000\n**Cell_cycle:** 0.317\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.510  ASW_label: 0.222  ARI: 0.482  NMI: 0.679\n  Graph_conn: 0.909  kBET: 0.607  iLISI: 0.004  cLISI: 0.995\n  PCR: 0.000  Cell_cycle: 0.317\n\nRaw Scores (before normalization):\n  ASW_batch: 0.763051  ASW_label: 0.539702  ARI: 0.481706  NMI: 0.679327\n  Graph_conn: 0.910311  kBET: 0.581472  iLISI: 0.004089  cLISI: 0.998446\n  PCR: 0.000000  Cell_cycle: 0.279561\n\n**Debugger Report:** # Debug Report for Evaluation 1184\n\n## Summary\n**SUCCESS** - Fixed the code after 2 iterations. The submission now runs without crashing.\n\n## Root Cause\nThe original code had two issues when calling the `symmetrize_ridge_graph()` function from the shared adapter:\n\n1. **Invalid parameter `alpha_g=0.75`**: The function signature does not accept an `alpha_g` parameter. The agent (Axiom I) was trying to pass their optimized alpha value, but the adapter function builds Zcorr internally with a hardcoded `alpha_g=0.5`.\n\n2. **Invalid parameter `rng_seed=0`**: Similarly, this parameter doesn't exist in the function signature.\n\n3. **Return type mismatch**: The adapter function returns a tuple `(adata, (C, D))` but the task expects only an AnnData object.\n\n## Fix Applied\n\n### Version 2 (submission_v2.py)\nRemoved the invalid keyword arguments from the function call:\n```python\n# Before (v1):\nadata_out = symmetrize_ridge_graph(adata, method='invite_trim', alpha_g=0.75, rng_seed=0)\n\n# After (v2):\nadata_out = symmetrize_ridge_graph(adata, method='invite_trim')\n```\n\nThis fixed the `TypeError: symmetrize_ridge_graph() got an unexpected keyword argument 'alpha_g'` error, but revealed a second issue: the function returns a tuple instead of just the AnnData object.\n\n### Version 3 (submission_v3.py) - FINAL SUCCESS\nUnpacked the tuple return value to extract only the AnnData object:\n```python\n# Fixed return value handling:\nadata_out, _ = symmetrize_ridge_graph(adata, method='invite_trim')\nreturn adata_out\n```\n\nThis resolved the `ERROR: Function must return AnnData object` error. The code now runs successfully without crashing.\n\n## Technical Notes\n\nThe agent's approach was conceptually interesting but had an implementation mismatch:\n- **Intent**: Use their optimized alpha_g=0.75 Zcorr embedding with Praxis IV's symmetrizer\n- **Reality**: The adapter function rebuilds Zcorr from scratch using its own parameters, ignoring the pre-computed embedding stored in `adata.obsm['X_emb']`\n\nThe code is functionally correct now and computes the batch integration successfully, though the adapter rebuilds the Zcorr with alpha_g=0.5 rather than using the agent's pre-computed alpha_g=0.75 version. This is a semantic difference that doesn't prevent the code from running.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v3):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# Using the new, purpose-built adapter from Praxis IV\nsys.path.append('storage/shared/sym')\nfrom adapter_symmetrize_ridge import symmetrize_ridge_graph\n\n# --- My SOTA Zcorr Generation ---\n# This function produces the Zcorr embedding using my optimized alpha_g=0.75\ndef _build_axiom_Zcorr(adata: ad.AnnData) -> np.ndarray:\n    print(\"  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\")\n    # Utility functions\n    def _normalize_log1p_inplace(ad, t=1e4): sc.pp.normalize_total(ad,t); sc.pp.log1p(ad)\n    def _pca_on_dense(Xd, n, r=0): ad_tmp=ad.AnnData(Xd); sc.pp.pca(ad_tmp,n,svd_solver='arpack',random_state=r); return ad_tmp.obsm['X_pca']\n    def _one_hot_batches(b): c=np.unique(b); B=np.zeros((b.shape[0],c.size),dtype=np.float32); [np.put(B[:,j],np.where(b==cat),1) for j,cat in enumerate(c)]; return B\n    def _ridge_fit_predict(B,Z,l=1e-3): BTB=B.T@B+l*np.eye(B.shape[1],dtype=np.float32); W=np.linalg.solve(BTB,B.T@Z); return B@W\n\n    # Main pipeline logic\n    alpha_g = 0.75\n    n_pcs_graph = 50\n    lam = 0.60\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].values)\n    Xd = adata.X[:, hv].A.astype(np.float32)\n\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Zg = _pca_on_dense(Xd * wv_graph, n_pcs_graph, r=0)\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_fit_predict(B, Zg)\n    R2 = np.clip((Zhat.var(0,ddof=1)+1e-8)/(Zg.var(0,ddof=1)+1e-8), 0.0, 1.0)\n    gamma = np.minimum(0.74, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    return Zcorr.astype(np.float32)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Phase 1: Generate my optimized Zcorr embedding\n    Zcorr = _build_axiom_Zcorr(adata)\n    adata.obsm['X_emb'] = Zcorr # Store it for the symmetrizer\n\n    # Phase 2: Apply Praxis IV's 'invite_trim' symmetrizer using their adapter\n    print(\"  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\")\n    # The adapter returns a tuple (adata, (C, D)), we only need the adata\n    adata_out, _ = symmetrize_ridge_graph(adata, method='invite_trim')\n\n    return adata_out\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  [Phase 1] Building Zcorr using Axiom I's optimized pipeline (alpha_g=0.75)...\n  [Phase 2] Applying Praxis IV's 'invite_trim' symmetrizer...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/935d99de-8aa2-4c97-9538-df44fbfeef0f/result_human.h5ad\n\nRESULT_UUID: 935d99de-8aa2-4c97-9538-df44fbfeef0f\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n\n```"
+  }
+}

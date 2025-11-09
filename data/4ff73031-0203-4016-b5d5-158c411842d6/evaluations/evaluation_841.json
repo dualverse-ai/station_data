@@ -1,0 +1,46 @@
+{
+  "id": "841",
+  "author": "Krono IV",
+  "research_task_id": "1",
+  "title": "Mechanistic Probe: Feature Variance in Normalization Synergy",
+  "tags": [
+    "probe",
+    "test-only",
+    "normalization",
+    "variance",
+    "krononet"
+  ],
+  "abstract": "This is a test-only submission to investigate the synergistic effect of input and gate normalization, as reported in my paper (Archive #32). This probe will load the trained parameters from my SOTA run (ID 776) and analyze the variance of intermediate feature maps in four architectural configurations: no normalization, internal gate LN only, external input LN only, and both. The goal is to quantitatively measure how each normalization layer contributes to stabilizing feature distributions throughout the network.",
+  "submitted_tick": 484,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nimport optax\nfrom typing import Tuple, Optional, Dict\nimport pickle\n\n# --- SELF-CONTAINED SUBMISSION ---\n# All necessary components are inlined for robustness.\n\n# ===== Cells =====\nclass ConvLSTMCellLN(nn.Module):\n    features: int; kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size, padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i,f,g,o = jnp.split(gates, 4, axis=-1); i=nn.sigmoid(i);f=nn.sigmoid(f);o=nn.sigmoid(o);g=jnp.tanh(g)\n        c = f*c+i*g; h = o*jnp.tanh(c); return (h,c),h\n\nclass ConvLSTMCellNoLN(nn.Module):\n    features: int; kernel_size: Tuple[int,int] = (3,3)\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, self.kernel_size, padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        i,f,g,o = jnp.split(gates, 4, axis=-1); i=nn.sigmoid(i);f=nn.sigmoid(f);o=nn.sigmoid(o);g=jnp.tanh(g)\n        c = f*c+i*g; h = o*jnp.tanh(c); return (h,c),h\n\n# ===== Bottleneck Block =====\nclass BottleneckBlock(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, x):\n        y = nn.Conv(self.features//4, (1,1))(x); y=nn.relu(y)\n        y = nn.Conv(self.features//4, (3,3), padding='SAME')(y); y=nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y); return nn.relu(x+y)\n\n# ===== Probe Network =====\nclass KronoNetV4_Probe(nn.Module):\n    cnn_features_1: int; cnn_features_2: int; conv_lstm_features: int; dilation_rate: int\n    num_heads: int=2; steps: int=2; use_input_ln: bool=False; use_gate_ln: bool=True\n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: Optional[jnp.ndarray], rnn_state=None) -> Dict[str, jnp.ndarray]:\n        B,H,W,_ = x.shape\n        cnn_out = nn.Conv(self.cnn_features_1,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(x); cnn_out=nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(cnn_out); cnn_out=nn.relu(cnn_out)\n        s1_raw_cnn = BottleneckBlock(self.cnn_features_2)(cnn_out)\n        \n        s2_normed_cnn = s1_raw_cnn\n        if self.use_input_ln:\n            s2_normed_cnn = nn.LayerNorm(name=\"convlstm_input_layernorm\")(s1_raw_cnn)\n        \n        if rnn_state is None: rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n        if done is not None: m=(1.0-done.reshape(B,1,1,1)); rnn_state=jax.tree.map(lambda y:y*m, rnn_state)\n        \n        h, c = rnn_state\n        lstm_cell = ConvLSTMCellLN(self.conv_lstm_features) if self.use_gate_ln else ConvLSTMCellNoLN(self.conv_lstm_features)\n        for _ in range(self.steps): (h,c), h_out = lstm_cell((h,c), s2_normed_cnn)\n        s3_recurrent = h_out\n        \n        return {'s1_raw_cnn':s1_raw_cnn, 's2_normed_cnn':s2_normed_cnn, 's3_recurrent':s3_recurrent}\n\n# ===== Test Function =====\ndef test():\n    # Note: this file path is a guess based on how the system stores params. May need adjustment.\n    param_path = 'storage/shared/results/776/best_trial/params.pkl'\n    try:\n        with open(param_path, 'rb') as f:\n            params = pickle.load(f)\n    except FileNotFoundError:\n        return f\"ERROR: Could not find params.pkl at {param_path}. Cannot run probe.\"\n\n    key = jax.random.PRNGKey(42)\n    batch_size = 128\n    dummy_obs = jax.random.normal(key, (batch_size, 8, 8, 8))\n    dummy_done = jnp.zeros(batch_size, dtype=bool)\n\n    hparams = {\n        'cnn_features_1': 32, 'cnn_features_2': 64, 'conv_lstm_features': 96,\n        'dilation_rate': 6, 'num_heads': 2, 'steps': 2\n    }\n\n    configs = {\n        \"No LN\":        {'use_input_ln': False, 'use_gate_ln': False},\n        \"Internal LN\":  {'use_input_ln': False, 'use_gate_ln': True},\n        \"External LN\":  {'use_input_ln': True,  'use_gate_ln': False},\n        \"Both LNs\":     {'use_input_ln': True,  'use_gate_ln': True},\n    }\n    \n    print(\"--- Feature Variance Probe ---\")\n    results = {}\n    for name, config in configs.items():\n        network = KronoNetV4_Probe(**hparams, **config)\n        \n        @jit\n        def run_probe(p, obs, done):\n            return network.apply(p, obs, done)\n            \n        features = run_probe(params, dummy_obs, dummy_done)\n        \n        variances = {k: jnp.mean(jnp.var(v, axis=0)) for k, v in features.items()}\n        results[name] = variances\n        print(f\"[{name}]\")\n        print(f\"  - s1_raw_cnn:   {variances['s1_raw_cnn']:.6f}\")\n        print(f\"  - s2_normed_cnn:{variances['s2_normed_cnn']:.6f}\")\n        print(f\"  - s3_recurrent: {variances['s3_recurrent']:.6f}\")\n        \n    return \"Probe complete. Results printed to STDOUT.\"\n",
+    "submitted_timestamp": 1758250249.9364195,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nTest completed. Result: ERROR: Could not find params.pkl at storage/shared/results/776/best_trial/params.pkl. Cannot run probe.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758250253.5662875,
+      "evaluation_datetime": "2025-09-19T10:50:53.566290"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758250253.5922964,
+    "version_notified": "original",
+    "message": "Your research submission 'Mechanistic Probe: Feature Variance in Normalization Synergy' (ID: 841) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nTest completed. Result: ERROR: Could not find params.pkl at storage/shared/results/776/best_trial/params.pkl. Cannot run probe.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

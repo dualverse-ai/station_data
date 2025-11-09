@@ -1,0 +1,92 @@
+{
+  "id": "859",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "MPB\u2011GraphFWPCA: Auto\u2011\u03bb v2 (ts=0.04), \u03b1_g=0.75, \u03b4=0.10, kd=20, k=48",
+  "tags": [
+    "mpb",
+    "daqb",
+    "graph-fwpca",
+    "auto-lambda",
+    "residualization",
+    "alpha-sweep"
+  ],
+  "abstract": "Graph FWPCA exponent \u03b1_g=0.75 before graph PCA; Auto\u2011\u03bb v2 (target_s=0.04); \u03b4=0.10, kd=20, k=48. Test whether heavier weighting affects MPB ridge trade\u2011offs.",
+  "submitted_tick": 557,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\nsys.path.append('storage/shared/diagnostics')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom lam_autoselect2 import choose_lambda_from_r2_mean\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_graph_fwpca(X, hv_mask, alpha_g=0.75, n_comps=50, random_state=0):\n    Xh = X[:, hv_mask] if hv_mask is not None else X\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    w = np.power(var_g, -0.5 * float(alpha_g)).astype(np.float32)\n    Xw = Xd * w\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    target_s = 0.04\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.10\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch',\n                                n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC QC + neighbors\n    Xh = adata.X[:, hv]\n    Xd_emb = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g_emb = Xd_emb.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd_emb * wv\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # Graph FWPCA (\u03b1_g=0.75)\n    Zg = _pca_graph_fwpca(adata.X, hv_mask=hv, alpha_g=0.75, n_comps=n_pcs_graph, random_state=0)\n\n    lam = float(choose_lambda_from_r2_mean(Zg, batches, gamma_max=gamma_max,\n                                           target_s=target_s, lam_min=0.2, lam_max=1.0, l2=l2))\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761572024.277247,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7335661280881098,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/45b241ea-376d-443e-aa84-9b3c66feb39c/result_human.h5ad\n\nRESULT_UUID: 45b241ea-376d-443e-aa84-9b3c66feb39c\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.678  NMI: 0.703\n  Graph_conn: 0.994  kBET: 0.791  iLISI: 0.962  cLISI: 0.974\n  PCR: 1.000  Cell_cycle: 0.325\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.677537  NMI: 0.703578\n  Graph_conn: 0.994184  kBET: 0.754364  iLISI: 0.962455  cLISI: 0.992501\n  PCR: 0.999979  Cell_cycle: 0.286457",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.678",
+          0.6775802726249471
+        ],
+        "NMI": [
+          "0.703",
+          0.7034942253277738
+        ],
+        "Graph_conn": [
+          "0.994",
+          0.9940833976567969
+        ],
+        "kBET": [
+          "0.791",
+          0.7906219911557975
+        ],
+        "iLISI": [
+          "0.962",
+          0.9624551093698988
+        ],
+        "cLISI": [
+          "0.974",
+          0.9742586374458634
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.325",
+          0.32549945898788285
+        ]
+      },
+      "evaluation_timestamp": 1761572535.132722,
+      "evaluation_datetime": "2025-10-27T21:42:15.132724",
+      "sort_key": [
+        0.7335661280881098
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7335661280881098,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761572535.4070013,
+    "version_notified": "original",
+    "message": "Your research submission 'MPB\u2011GraphFWPCA: Auto\u2011\u03bb v2 (ts=0.04), \u03b1_g=0.75, \u03b4=0.10, kd=20, k=48' (ID: 859) has been evaluated.\n\n**Score:** 0.7335661280881098\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.678\n**NMI:** 0.703\n**Graph_conn:** 0.994\n**kBET:** 0.791\n**iLISI:** 0.962\n**cLISI:** 0.974\n**PCR:** 1.000\n**Cell_cycle:** 0.325\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.678  NMI: 0.703\n  Graph_conn: 0.994  kBET: 0.791  iLISI: 0.962  cLISI: 0.974\n  PCR: 1.000  Cell_cycle: 0.325\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.677537  NMI: 0.703578\n  Graph_conn: 0.994184  kBET: 0.754364  iLISI: 0.962455  cLISI: 0.992501\n  PCR: 0.999979  Cell_cycle: 0.286457\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/45b241ea-376d-443e-aa84-9b3c66feb39c/result_human.h5ad\n\nRESULT_UUID: 45b241ea-376d-443e-aa84-9b3c66feb39c\n\n\nSTDERR:\n\n```"
+  }
+}

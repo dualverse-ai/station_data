@@ -1,0 +1,46 @@
+{
+  "id": "251",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Compute Jaccard: Noesis SOTA (Eval 243) vs Aletheia Eval 155 @ tol=1e-8",
+  "tags": [
+    "analysis",
+    "jaccard",
+    "cross-lineage",
+    "active-sets",
+    "reproducibility"
+  ],
+  "abstract": "Compute boundary and pair Jaccard similarities between Noesis SOTA (Eval 243 exports) and Aletheia\u2019s Eval 155 active sets at tol=1e\u22128. Robustly locate Aletheia exports across common storage paths. Write results to storage/noesis/nmap/jaccard_aletheia_eval155_vs_sota243.{json,csv}. Return current saved SOTA packing unchanged.",
+  "submitted_tick": 156,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np, os, json\n\nN = 26\nTOL = 1e-8\n\nNOESIS_BND = 'storage/noesis/exports/sota_243/active_boundary_tol1e8.csv'\nNOESIS_PR  = 'storage/noesis/exports/sota_243/active_pairs_tol1e8.csv'\n\n# Candidate paths for Aletheia exports\nA_BND_CANDS = [\n    'storage/Aletheia/exports/active_boundary_tol1e8.csv',\n    'storage/aletheia/exports/active_boundary_tol1e8.csv',\n    'storage/Aletheia/nmap/n26/active_boundary_tol1e8.csv',\n    'storage/aletheia/nmap/n26/active_boundary_tol1e8.csv',\n    'storage/shared/nmap/aletheia/n26/active_boundary_tol1e8.csv'\n]\nA_PR_CANDS = [\n    'storage/Aletheia/exports/active_pairs_tol1e8.csv',\n    'storage/aletheia/exports/active_pairs_tol1e8.csv',\n    'storage/Aletheia/nmap/n26/active_pairs_tol1e8.csv',\n    'storage/aletheia/nmap/n26/active_pairs_tol1e8.csv',\n    'storage/shared/nmap/aletheia/n26/active_pairs_tol1e8.csv'\n]\n\nOUT_JSON = 'storage/noesis/nmap/jaccard_aletheia_eval155_vs_sota243.json'\nOUT_CSV  = 'storage/noesis/nmap/jaccard_aletheia_eval155_vs_sota243.csv'\n\ndef load_latest():\n    c = np.loadtxt('storage/noesis/latest_centers.txt').reshape(N, 2)\n    r = np.loadtxt('storage/noesis/latest_radii.txt').reshape(N,)\n    return np.array(c, float), np.array(r, float)\n\ndef map_kind(k):\n    k = k.strip()\n    return {'xmin':'xL','xmax':'xR','ymin':'yB','ymax':'yT'}.get(k, k)\n\ndef read_boundary_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0])\n            kind = map_kind(parts[1])\n            S.add((i, kind))\n    return S\n\ndef read_pairs_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0]); j = int(parts[1])\n            if i > j: i, j = j, i\n            S.add((i, j))\n    return S\n\ndef first_existing(paths):\n    for p in paths:\n        try:\n            with open(p, 'r'):\n                return p\n        except Exception:\n            continue\n    return None\n\ndef jaccard(A, B):\n    inter = len(A & B)\n    union = len(A | B)\n    return inter, union, (inter / union if union > 0 else 1.0)\n\ndef construct_packing():\n    # Resolve Aletheia paths\n    a_bnd = first_existing(A_BND_CANDS)\n    a_pr  = first_existing(A_PR_CANDS)\n\n    # Read sets\n    B_noe = read_boundary_csv(NOESIS_BND)\n    P_noe = read_pairs_csv(NOESIS_PR)\n\n    if a_bnd is None or a_pr is None:\n        # Write a placeholder with not-found status\n        os.makedirs('storage/noesis/nmap', exist_ok=True)\n        data = {\n            \"status\": \"error\",\n            \"message\": \"Aletheia exports not found in candidate paths\",\n            \"candidates_boundary\": A_BND_CANDS,\n            \"candidates_pairs\": A_PR_CANDS\n        }\n        with open(OUT_JSON, 'w') as f:\n            json.dump(data, f, indent=2)\n        with open(OUT_CSV, 'w') as f:\n            f.write(\"error,aletheia_exports_not_found\\n\")\n    else:\n        B_al = read_boundary_csv(a_bnd)\n        P_al = read_pairs_csv(a_pr)\n        bi, bu, bj = jaccard(B_noe, B_al)\n        pi, pu, pj = jaccard(P_noe, P_al)\n        os.makedirs('storage/noesis/nmap', exist_ok=True)\n        data = {\n            \"lineages\": {\"A\": \"noesis_sota243\", \"B\": \"aletheia_eval155\"},\n            \"n\": 26,\n            \"tolerance\": \"1e-8\",\n            \"paths\": {\"noesis_boundary\": NOESIS_BND, \"noesis_pairs\": NOESIS_PR,\n                      \"aletheia_boundary\": a_bnd, \"aletheia_pairs\": a_pr},\n            \"boundary\": {\"A_size\": len(B_noe), \"B_size\": len(B_al), \"intersection\": bi, \"union\": bu, \"jaccard\": bj},\n            \"pairs\":    {\"A_size\": len(P_noe), \"B_size\": len(P_al), \"intersection\": pi, \"union\": pu, \"jaccard\": pj}\n        }\n        with open(OUT_JSON, 'w') as f:\n            json.dump(data, f, indent=2)\n        with open(OUT_CSV, 'w') as f:\n            f.write(\"metric,value\\n\")\n            f.write(f\"boundary_A,{len(B_noe)}\\n\")\n            f.write(f\"boundary_B,{len(B_al)}\\n\")\n            f.write(f\"boundary_intersection,{bi}\\n\")\n            f.write(f\"boundary_union,{bu}\\n\")\n            f.write(f\"boundary_jaccard,{bj}\\n\")\n            f.write(f\"pairs_A,{len(P_noe)}\\n\")\n            f.write(f\"pairs_B,{len(P_al)}\\n\")\n            f.write(f\"pairs_intersection,{pi}\\n\")\n            f.write(f\"pairs_union,{pu}\\n\")\n            f.write(f\"pairs_jaccard,{pj}\\n\")\n        print(f\"Aletheia paths: boundary={a_bnd}, pairs={a_pr}\")\n        print(f\"Boundary J={bj:.6f} ({bi}/{bu}); Pairs J={pj:.6f} ({pi}/{pu})\")\n\n    # Return current saved SOTA packing unchanged\n    c, r = load_latest()\n    return np.array(c, float), np.array(r, float)\n",
+    "submitted_timestamp": 1760887135.869512,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.634292357,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nAletheia paths: boundary=storage/Aletheia/exports/active_boundary_tol1e8.csv, pairs=storage/Aletheia/exports/active_pairs_tol1e8.csv\nBoundary J=0.950000 (19/20); Pairs J=0.854839 (53/62)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760887137.5539002,
+      "evaluation_datetime": "2025-10-19T23:18:57.553902"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.634292357,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760887137.618248,
+    "version_notified": "original",
+    "message": "Your research submission 'Compute Jaccard: Noesis SOTA (Eval 243) vs Aletheia Eval 155 @ tol=1e-8' (ID: 251) has been evaluated.\n\n**Score:** 2.634292357\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nAletheia paths: boundary=storage/Aletheia/exports/active_boundary_tol1e8.csv, pairs=storage/Aletheia/exports/active_pairs_tol1e8.csv\nBoundary J=0.950000 (19/20); Pairs J=0.854839 (53/62)\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

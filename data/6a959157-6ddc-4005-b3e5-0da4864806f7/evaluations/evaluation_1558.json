@@ -1,0 +1,92 @@
+{
+  "id": "1558",
+  "author": "Fathom I",
+  "research_task_id": "1",
+  "title": "Tuned Adversarial Autoencoder (Lower Adv Weight, More Epochs)",
+  "tags": [
+    "deep-learning",
+    "adversarial-autoencoder",
+    "aae",
+    "jax",
+    "flax",
+    "hyperparameter-tuning"
+  ],
+  "abstract": "An iteration on the previous Adversarial Autoencoder (AAE) submission. The prior attempt failed, likely due to poor hyperparameter balance, resulting in a loss of biological structure. This submission tests the hypothesis that a better balance can be achieved by significantly reducing the weight of the adversarial loss (from 0.1 to 0.01) and increasing the number of training epochs (from 20 to 50). The model architecture, imported from lineage storage, remains the same. The goal is to prioritize reconstruction to preserve biological signal while still applying gentle adversarial pressure to remove the batch effect.",
+  "submitted_tick": 1088,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os\nos.environ['JAX_PLATFORMS'] = 'cpu'\nimport sys\nsys.path.append('storage/fathom')\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom flax.training import train_state\nimport optax\nfrom sklearn.preprocessing import OneHotEncoder\nimport torch\nfrom torch.utils.data import DataLoader, TensorDataset\nimport warnings\n\n# Import model definitions from my lineage storage\nfrom aae_utils import Encoder, Decoder, Discriminator\n\nwarnings.filterwarnings(\"ignore\", category=FutureWarning, module=\"flax\")\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Starting Tuned Adversarial Autoencoder (AAE)...\")\n    # --- Tuned Config ---\n    n_latent = 32\n    learning_rate_ae = 1e-4\n    learning_rate_disc = 1e-4\n    n_epochs = 50  # Increased from 20\n    batch_size = 256\n    recon_weight = 1.0\n    adv_weight = 0.01  # Decreased from 0.1\n    \n    print(f\"  Hyperparameters: epochs={n_epochs}, adv_weight={adv_weight}\")\n\n    # --- Preprocessing (with debugger fixes) ---\n    print(\"  Preprocessing data...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    X = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X\n    \n    batch_labels = adata.obs['batch'].values\n    ohe = OneHotEncoder(sparse_output=False)\n    y = ohe.fit_transform(batch_labels.reshape(-1, 1))\n    n_batches = y.shape[1]\n    \n    dataset = TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32))\n    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)\n    \n    # --- Initialization ---\n    print(\"  Initializing models and optimizers...\")\n    key = jax.random.PRNGKey(0)\n    \n    encoder = Encoder(n_latent=n_latent)\n    decoder = Decoder(n_output=X.shape[1])\n    discriminator = Discriminator(n_classes=n_batches)\n    \n    dummy_x = jnp.ones((1, X.shape[1]))\n    dummy_z = jnp.ones((1, n_latent))\n    \n    encoder_params = encoder.init(key, dummy_x)['params']\n    decoder_params = decoder.init(key, dummy_z)['params']\n    discriminator_params = discriminator.init(key, dummy_z)['params']\n    \n    ae_params = {'encoder': encoder_params, 'decoder': decoder_params}\n    \n    state_ae = train_state.TrainState.create(\n        apply_fn=None, params=ae_params, tx=optax.adam(learning_rate_ae))\n    state_disc = train_state.TrainState.create(\n        apply_fn=discriminator.apply, params=discriminator_params, tx=optax.adam(learning_rate_disc))\n\n    @jax.jit\n    def train_step(state_ae, state_disc, batch_x, batch_y):\n        def disc_loss_fn(disc_params):\n            z = encoder.apply({'params': state_ae.params['encoder']}, batch_x)\n            logits = state_disc.apply_fn({'params': disc_params}, z)\n            loss = optax.softmax_cross_entropy(logits, batch_y).mean()\n            return loss\n        disc_grad_fn = jax.value_and_grad(disc_loss_fn)\n        disc_loss, disc_grads = disc_grad_fn(state_disc.params)\n        new_state_disc = state_disc.apply_gradients(grads=disc_grads)\n\n        def ae_loss_fn(ae_params):\n            z = encoder.apply({'params': ae_params['encoder']}, batch_x)\n            recon_x = decoder.apply({'params': ae_params['decoder']}, z)\n            recon_loss = jnp.mean((batch_x - recon_x)**2)\n            disc_logits = state_disc.apply_fn({'params': new_state_disc.params}, z)\n            adv_loss = -optax.softmax_cross_entropy(disc_logits, batch_y).mean()\n            total_loss = recon_weight * recon_loss + adv_weight * adv_loss\n            return total_loss, (recon_loss, adv_loss)\n        ae_grad_fn = jax.value_and_grad(ae_loss_fn, has_aux=True)\n        (ae_loss, (recon_loss, adv_loss)), ae_grads = ae_grad_fn(state_ae.params)\n        new_state_ae = state_ae.apply_gradients(grads=ae_grads)\n        \n        return new_state_ae, new_state_disc, recon_loss, disc_loss\n\n    # --- Training Loop ---\n    print(f\"  Starting training for {n_epochs} epochs...\")\n    for epoch in range(n_epochs):\n        for batch_x_torch, batch_y_torch in dataloader:\n            batch_x, batch_y = jnp.array(batch_x_torch.numpy()), jnp.array(batch_y_torch.numpy())\n            state_ae, state_disc, recon_loss, disc_loss = train_step(state_ae, state_disc, batch_x, batch_y)\n        \n        if (epoch + 1) % 10 == 0:\n            print(f\"    Epoch {epoch+1}/{n_epochs} | Recon Loss: {recon_loss:.4f} | Disc Loss: {disc_loss:.4f}\")\n            \n    # --- Generate Embedding ---\n    print(\"  Training complete. Generating final embedding...\")\n    final_embedding = encoder.apply({'params': state_ae.params['encoder']}, jnp.array(X))\n    \n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={'X_emb': np.array(final_embedding)}\n    )\n    \n    print(\"\u2713 Tuned Adversarial Autoencoder complete.\")\n    return output\n",
+    "submitted_timestamp": 1761761499.3517962,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.48927288964991467,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Tuned Adversarial Autoencoder (AAE)...\n  Hyperparameters: epochs=50, adv_weight=0.01\n  Preprocessing data...\n  Initializing models and optimizers...\n  Starting training for 50 epochs...\n    Epoch 10/50 | Recon Loss: 0.7000 | Disc Loss: 0.9770\n    Epoch 20/50 | Recon Loss: 0.6638 | Disc Loss: 0.7155\n    Epoch 30/50 | Recon Loss: 0.6238 | Disc Loss: 0.5001\n    Epoch 40/50 | Recon Loss: 0.6573 | Disc Loss: 0.3815\n    Epoch 50/50 | Recon Loss: 0.6250 | Disc Loss: 0.3901\n  Training complete. Generating final embedding...\n\u2713 Tuned Adversarial Autoencoder complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/0ba03124-ea36-4f19-b0cd-0dfc99763945/result_human.h5ad\n\nRESULT_UUID: 0ba03124-ea36-4f19-b0cd-0dfc99763945\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.465  ASW_label: 0.182  ARI: 0.576  NMI: 0.673\n  Graph_conn: 0.854  kBET: 0.690  iLISI: 0.064  cLISI: 0.976\n  PCR: 0.000  Cell_cycle: 0.413\n\nRaw Scores (before normalization):\n  ASW_batch: 0.743202  ASW_label: 0.516494  ARI: 0.575959  NMI: 0.672947\n  Graph_conn: 0.856718  kBET: 0.659804  iLISI: 0.063898  cLISI: 0.992957\n  PCR: 0.000000  Cell_cycle: 0.360782",
+        "ASW_batch": [
+          "0.465",
+          0.46545223461053464
+        ],
+        "ASW_label": [
+          "0.182",
+          0.18167034927254586
+        ],
+        "ARI": [
+          "0.576",
+          0.5760169147031017
+        ],
+        "NMI": [
+          "0.673",
+          0.6728548962763121
+        ],
+        "Graph_conn": [
+          "0.854",
+          0.8542455506460919
+        ],
+        "kBET": [
+          "0.690",
+          0.690004197754201
+        ],
+        "iLISI": [
+          "0.064",
+          0.0638983397653184
+        ],
+        "cLISI": [
+          "0.976",
+          0.9758227095736519
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.413",
+          0.4127637038973903
+        ]
+      },
+      "evaluation_timestamp": 1761762040.3173223,
+      "evaluation_datetime": "2025-10-30T02:20:40.317323",
+      "sort_key": [
+        0.48927288964991467
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.48927288964991467,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761762040.330498,
+    "version_notified": "original",
+    "message": "Your research submission 'Tuned Adversarial Autoencoder (Lower Adv Weight, More Epochs)' (ID: 1558) has been evaluated.\n\n**Score:** 0.48927288964991467\n**ASW_batch:** 0.465\n**ASW_label:** 0.182\n**ARI:** 0.576\n**NMI:** 0.673\n**Graph_conn:** 0.854\n**kBET:** 0.690\n**iLISI:** 0.064\n**cLISI:** 0.976\n**PCR:** 0.000\n**Cell_cycle:** 0.413\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.465  ASW_label: 0.182  ARI: 0.576  NMI: 0.673\n  Graph_conn: 0.854  kBET: 0.690  iLISI: 0.064  cLISI: 0.976\n  PCR: 0.000  Cell_cycle: 0.413\n\nRaw Scores (before normalization):\n  ASW_batch: 0.743202  ASW_label: 0.516494  ARI: 0.575959  NMI: 0.672947\n  Graph_conn: 0.856718  kBET: 0.659804  iLISI: 0.063898  cLISI: 0.992957\n  PCR: 0.000000  Cell_cycle: 0.360782\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Tuned Adversarial Autoencoder (AAE)...\n  Hyperparameters: epochs=50, adv_weight=0.01\n  Preprocessing data...\n  Initializing models and optimizers...\n  Starting training for 50 epochs...\n    Epoch 10/50 | Recon Loss: 0.7000 | Disc Loss: 0.9770\n    Epoch 20/50 | Recon Loss: 0.6638 | Disc Loss: 0.7155\n    Epoch 30/50 | Recon Loss: 0.6238 | Disc Loss: 0.5001\n    Epoch 40/50 | Recon Loss: 0.6573 | Disc Loss: 0.3815\n    Epoch 50/50 | Recon Loss: 0.6250 | Disc Loss: 0.3901\n  Training complete. Generating final embedding...\n\u2713 Tuned Adversarial Autoencoder complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/0ba03124-ea36-4f19-b0cd-0dfc99763945/result_human.h5ad\n\nRESULT_UUID: 0ba03124-ea36-4f19-b0cd-0dfc99763945\n\n\nSTDERR:\n\n```"
+  }
+}

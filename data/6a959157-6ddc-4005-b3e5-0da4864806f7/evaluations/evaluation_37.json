@@ -1,0 +1,91 @@
+{
+  "id": "37",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-BalancedGraph-cosine-75: Binary Balanced kNN with Cosine (75 neighbors)",
+  "tags": [
+    "pca",
+    "procrustes",
+    "neighbors",
+    "balanced-knn",
+    "cosine"
+  ],
+  "abstract": "Extend the best-performing uncapped, binary, equal-quotas cosine graph to 75 total neighbors to test whether further gains in iLISI/Graph_conn increase the composite score beyond 0.600.",
+  "submitted_tick": 19,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _compute_global_clusters,\n    _align_batches,\n)\nfrom balanced_graph import build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config: cosine metric, equal allocation, total neighbors = 75 (uncapped)\n    n_pca_components = 50\n    n_clusters = 64\n    alpha = 0.8\n    ridge = 1e-3\n    min_cells_per_cluster = 5\n    n_neighbors_total = 75\n    metric = 'cosine'\n\n    print(f\"[Config] PCs={n_pca_components}, neighbors={n_neighbors_total}, metric={metric}, alpha={alpha}\")\n\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] is required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] is required.\"\n\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=0)\n    print(f\"[Embed] Z shape: {Z.shape}\")\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    cluster_labels, k = _compute_global_clusters(Z, n_clusters=n_clusters, random_state=0)\n\n    Z_corr, _ = _align_batches(Z, batches, cluster_labels, k, alpha=alpha,\n                               min_cells_per_cluster=min_cells_per_cluster, ridge=ridge)\n    adata.obsm['X_emb'] = Z_corr\n\n    # Initialize neighbor keys, then overwrite with balanced graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn(\n        Z_corr, batches, n_neighbors_total=n_neighbors_total,\n        metric=metric, weighting='binary', allocation='equal', mutual=False, symmetric=True\n    )\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    return adata\n",
+    "submitted_timestamp": 1761394630.755911,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5982187340023989,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Config] PCs=50, neighbors=75, metric=cosine, alpha=0.8\n[Embed] Z shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9fc64ffc-abf1-4327-87ed-1522728d67c8/result_human.h5ad\n\nRESULT_UUID: 9fc64ffc-abf1-4327-87ed-1522728d67c8\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.521  NMI: 0.502\n  Graph_conn: 0.973  kBET: 0.733  iLISI: 0.938  cLISI: 0.874\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.521093  NMI: 0.501762\n  Graph_conn: 0.973309  kBET: 0.700424  iLISI: 0.937853  cLISI: 0.963267\n  PCR: 0.547968  Cell_cycle: 0.218411",
+        "ASW_batch": [
+          "0.468",
+          0.4676734086853265
+        ],
+        "ASW_label": [
+          "0.180",
+          0.18032983739773922
+        ],
+        "ARI": [
+          "0.521",
+          0.5211578717389745
+        ],
+        "NMI": [
+          "0.502",
+          0.5016209881286586
+        ],
+        "Graph_conn": [
+          "0.973",
+          0.9728481683973428
+        ],
+        "kBET": [
+          "0.733",
+          0.7332261692318759
+        ],
+        "iLISI": [
+          "0.938",
+          0.9378531073446332
+        ],
+        "cLISI": [
+          "0.874",
+          0.8739019580970794
+        ],
+        "PCR": [
+          "0.548",
+          0.5479684631306224
+        ],
+        "Cell_cycle": [
+          "0.246",
+          0.24560736787173612
+        ]
+      },
+      "evaluation_timestamp": 1761394956.612378,
+      "evaluation_datetime": "2025-10-25T20:22:36.612378",
+      "sort_key": [
+        0.5982187340023989
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5982187340023989,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761394956.6314197,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-BalancedGraph-cosine-75: Binary Balanced kNN with Cosine (75 neighbors)' (ID: 37) has been evaluated.\n\n**Score:** 0.5982187340023989\n**ASW_batch:** 0.468\n**ASW_label:** 0.180\n**ARI:** 0.521\n**NMI:** 0.502\n**Graph_conn:** 0.973\n**kBET:** 0.733\n**iLISI:** 0.938\n**cLISI:** 0.874\n**PCR:** 0.548\n**Cell_cycle:** 0.246\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.468  ASW_label: 0.180  ARI: 0.521  NMI: 0.502\n  Graph_conn: 0.973  kBET: 0.733  iLISI: 0.938  cLISI: 0.874\n  PCR: 0.548  Cell_cycle: 0.246\n\nRaw Scores (before normalization):\n  ASW_batch: 0.744203  ASW_label: 0.515718  ARI: 0.521093  NMI: 0.501762\n  Graph_conn: 0.973309  kBET: 0.700424  iLISI: 0.937853  cLISI: 0.963267\n  PCR: 0.547968  Cell_cycle: 0.218411\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Config] PCs=50, neighbors=75, metric=cosine, alpha=0.8\n[Embed] Z shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9fc64ffc-abf1-4327-87ed-1522728d67c8/result_human.h5ad\n\nRESULT_UUID: 9fc64ffc-abf1-4327-87ed-1522728d67c8\n\n\nSTDERR:\n\n```"
+  }
+}

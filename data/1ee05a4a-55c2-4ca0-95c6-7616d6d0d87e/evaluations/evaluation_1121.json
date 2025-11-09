@@ -1,0 +1,46 @@
+{
+  "id": "1121",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN dist-specific ridges: beta07_08 and beta09_09 (thresholds 0.9, 0.75)",
+  "tags": [
+    "ven",
+    "ridge",
+    "beta",
+    "thresholds",
+    "dist-specific"
+  ],
+  "abstract": "Generate VEN ridge heatmaps/surfaces and mode tables for Beta(0.7,0.8) and Beta(0.9,0.9). Thresholds are relative to max VEN per mode (fractions 0.9, 0.75). Outputs per-dist tables and PNGs under VEN/dist_ridges/{dist}/ and a summary CSV.",
+  "submitted_tick": 565,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, csv\nimport numpy as np\nimport matplotlib.pyplot as plt\n\nsys.path.append('storage/shared/agents/kairos')\nimport avd\nfrom ven import compute_ven\n\nOUT_ROOT = 'storage/shared/agents/kairos/VEN/dist_ridges'\nos.makedirs(OUT_ROOT, exist_ok=True)\n\nDISTS = ['beta07_08', 'beta09_09']\nMODES = ['balanced', 'discovery', 'grounded']\nTHRACS = [0.90, 0.75]  # fraction of max VEN\nR_POINTS = 21\nA_POINTS = 11\nN = 150; SEED = 42\nALPHA_MIN, ALPHA_MAX = 0.5, 1.0\n\ndef gen_grid():\n    rs = np.linspace(0.0, 1.0, R_POINTS)\n    alphas = np.linspace(ALPHA_MIN, ALPHA_MAX, A_POINTS)\n    return rs, alphas\n\ndef ensure(outdir):\n    os.makedirs(outdir, exist_ok=True)\n\ndef compute_grid(dist):\n    rs, alphas = gen_grid()\n    balanced, high_var = avd.generate_data(dist, N, SEED)\n    Z = {m: np.zeros((len(alphas), len(rs)), dtype=float) for m in MODES}\n    # also keep component info for balanced (optional)\n    for i, a in enumerate(alphas):\n        for j, r in enumerate(rs):\n            data = high_var * float(r) + balanced * (1.0 - float(r))\n            for mode in MODES:\n                ven = compute_ven(data, mode=mode, alpha=float(a))\n                Z[mode][i, j] = float(ven['ven_score'] or 0.0)\n    return rs, alphas, Z\n\ndef ridge_counts(Z, thr_frac):\n    # thr_frac is relative to per-mode max VEN\n    counts = {}\n    for mode, z in Z.items():\n        zmax = float(np.nanmax(z)) if z.size else 0.0\n        if zmax <= 0:\n            counts[mode] = (0, zmax)\n            continue\n        thr = thr_frac * zmax\n        ridge_pts = int(np.sum(z >= thr))\n        counts[mode] = (ridge_pts, zmax)\n    return counts\n\ndef argmax_info(Z, rs, alphas):\n    info = {}\n    for mode, z in Z.items():\n        if z.size == 0:\n            info[mode] = {'max_r': None, 'max_alpha': None, 'max_ven': None}\n            continue\n        i, j = np.unravel_index(np.nanargmax(z), z.shape)\n        info[mode] = {'max_r': float(rs[j]), 'max_alpha': float(alphas[i]), 'max_ven': float(z[i, j])}\n    return info\n\ndef save_tables_and_plots(dist, rs, alphas, Z):\n    outdir = os.path.join(OUT_ROOT, dist)\n    ensure(outdir)\n    # Per-dist mode table for both thresholds\n    for thr in THRACS:\n        csv_path = os.path.join(outdir, f'ridge_mode_table_thr_{str(thr).replace(\".\",\"p\")}.csv')\n        counts = ridge_counts(Z, thr)\n        ainfo = argmax_info(Z, rs, alphas)\n        with open(csv_path, 'w', encoding='utf-8', newline='') as f:\n            wr = csv.writer(f)\n            wr.writerow(['mode','max_r','max_alpha','max_ven','ridge_points','threshold_frac'])\n            for mode in MODES:\n                rp, _ = counts[mode]\n                wr.writerow([mode, ainfo[mode]['max_r'], ainfo[mode]['max_alpha'], ainfo[mode]['max_ven'], rp, thr])\n    # Plots per mode (heatmap + surface)\n    for mode in MODES:\n        z = Z[mode]\n        # Heatmap\n        plt.figure(figsize=(6.4, 4.8))\n        im = plt.imshow(z, origin='lower', aspect='auto',\n                        extent=(rs.min(), rs.max(), alphas.min(), alphas.max()),\n                        cmap='viridis')\n        plt.colorbar(im, label=f'VEN ({mode})')\n        plt.xlabel('variance ratio r'); plt.ylabel('alpha')\n        plt.title(f'{dist} \u2014 VEN heatmap ({mode})')\n        heat_path = os.path.join(outdir, f'ridge_heatmap_{mode}.png')\n        plt.tight_layout(); plt.savefig(heat_path, dpi=120, bbox_inches='tight'); plt.close()\n        # 3D surface\n        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401\n        R, A = np.meshgrid(rs, alphas)\n        fig = plt.figure(figsize=(7.0, 5.0))\n        ax = fig.add_subplot(111, projection='3d')\n        ax.plot_surface(R, A, z, cmap='viridis', linewidth=0, antialiased=True)\n        ax.set_xlabel('r'); ax.set_ylabel('alpha'); ax.set_zlabel('VEN')\n        ax.set_title(f'{dist} \u2014 VEN surface ({mode})')\n        surf_path = os.path.join(outdir, f'ridge_surface_{mode}.png')\n        plt.tight_layout(); plt.savefig(surf_path, dpi=120, bbox_inches='tight'); plt.close()\n\ndef main():\n    # Summary across dists for thresholds\n    sum_csv = os.path.join(OUT_ROOT, 'ridge_summary.csv')\n    with open(sum_csv, 'w', encoding='utf-8', newline='') as fsum:\n        wr = csv.writer(fsum)\n        wr.writerow(['dist','mode','threshold_frac','ridge_points','max_ven','max_r','max_alpha'])\n        for dist in DISTS:\n            rs, alphas, Z = compute_grid(dist)\n            save_tables_and_plots(dist, rs, alphas, Z)\n            for thr in THRACS:\n                counts = ridge_counts(Z, thr)\n                ainfo = argmax_info(Z, rs, alphas)\n                for mode in MODES:\n                    rp, zmax = counts[mode]\n                    wr.writerow([dist, mode, thr, rp, zmax, ainfo[mode]['max_r'], ainfo[mode]['max_alpha']])\n    print(f\"[artifacts] dist-specific ridge tables and plots under {OUT_ROOT}; summary={sum_csv}\")\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761291537.6971917,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] dist-specific ridge tables and plots under storage/shared/agents/kairos/VEN/dist_ridges; summary=storage/shared/agents/kairos/VEN/dist_ridges/ridge_summary.csv\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761291543.2120485,
+      "evaluation_datetime": "2025-10-24T15:39:03.212052"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761291543.2455766,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN dist-specific ridges: beta07_08 and beta09_09 (thresholds 0.9, 0.75)' (ID: 1121) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] dist-specific ridge tables and plots under storage/shared/agents/kairos/VEN/dist_ridges; summary=storage/shared/agents/kairos/VEN/dist_ridges/ridge_summary.csv\n\n\nSTDERR:\n\n```"
+  }
+}

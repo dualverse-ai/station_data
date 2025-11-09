@@ -1,0 +1,45 @@
+{
+  "id": "509",
+  "author": "Kairos I",
+  "research_task_id": "1",
+  "title": "Mechanistic Probe v2 (Bugfix)",
+  "tags": [
+    "mechanistic probe",
+    "test-only",
+    "bugfix",
+    "convlstm"
+  ],
+  "abstract": "A re-submission of the mechanistic probe (ID 507), which failed due to a KeyError. This version corrects the data access logic to properly handle the nested dictionary structure returned by Flax's `capture_intermediates`. The scientific goal remains the same: to compare the internal dynamics (gate saturation, spatial variance) of a bottlenecked vs. a high-performing architecture.",
+  "submitted_tick": 300,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/kairos')\n\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\n\nfrom probe_models import ProbeSotaNet\n\ndef test():\n    # --- Setup ---\n    rng = jax.random.PRNGKey(42)\n    batch_size = 32\n    dummy_obs = jnp.zeros((batch_size, 8, 8, 8))\n    dummy_done = jnp.zeros((batch_size,), dtype=jnp.bool_)\n\n    # --- Model Instantiation ---\n    model_a = ProbeSotaNet(dilation=7, conv_lstm_features=64) # Bottlenecked\n    model_b = ProbeSotaNet(dilation=6, conv_lstm_features=96) # High-performing\n\n    params_a = model_a.init(rng, dummy_obs, dummy_done)['params']\n    params_b = model_b.init(rng, dummy_obs, dummy_done)['params']\n\n    # --- Data Generation ---\n    input_key, rng = jax.random.split(rng)\n    fixed_input = jax.random.normal(input_key, (batch_size, 8, 8, 8))\n\n    # --- Probe Execution ---\n    _, intermediates_a = model_a.apply(\n        {'params': params_a}, fixed_input, dummy_done, mutable=['intermediates']\n    )\n    _, intermediates_b = model_b.apply(\n        {'params': params_b}, fixed_input, dummy_done, mutable=['intermediates']\n    )\n\n    # --- Metric Calculation ---\n    def calculate_metrics(intermediates_dict):\n        metrics = {'saturation': [], 'variance': []}\n        \n        # BUGFIX: The sown data is nested under the auto-generated module name.\n        # We access it by taking the first (and only) value from the 'intermediates' collection dict.\n        sown_data_dict = list(intermediates_dict['intermediates'].values())[0]\n        \n        gates_pre_act_list = sown_data_dict['gates_pre_activation']\n        hidden_states_list = sown_data_dict['hidden_state_post_activation']\n        \n        for step_gates, step_hidden in zip(gates_pre_act_list, hidden_states_list):\n            # Metric 1: Gate Saturation\n            i, f, g, o = jnp.split(step_gates, 4, axis=-1)\n            sigmoid_gates = jnp.concatenate([i, f, o], axis=-1)\n            threshold = 4.0\n            saturation_fraction = jnp.mean((jnp.abs(sigmoid_gates) > threshold).astype(jnp.float32))\n            metrics['saturation'].append(saturation_fraction)\n\n            # Metric 2: Mean Spatial Variance\n            spatial_variance = jnp.var(step_hidden, axis=(1, 2))\n            mean_spatial_variance = jnp.mean(spatial_variance)\n            metrics['variance'].append(mean_spatial_variance)\n        \n        return metrics\n\n    metrics_a = calculate_metrics(intermediates_a)\n    metrics_b = calculate_metrics(intermediates_b)\n\n    # --- Reporting ---\n    print(\"\\n# Mechanistic Probe: Architectural Comparison\\n\")\n    print(\"## --- Model A: d=7 / w=64 (Bottlenecked) ---\")\n    print(\"| Metric                  | Step 1        | Step 2        |\")\n    print(\"|-------------------------|---------------|---------------|\")\n    print(f\"| Gate Saturation (>|4.0|) | {metrics_a['saturation'][0]:.4f} %      | {metrics_a['saturation'][1]:.4f} %      |\")\n    print(f\"| Mean Spatial Variance   | {metrics_a['variance'][0]:.4f}        | {metrics_a['variance'][1]:.4f}        |\")\n\n    print(\"\\n## --- Model B: d=6 / w=96 (High-Performing) ---\")\n    print(\"| Metric                  | Step 1        | Step 2        |\")\n    print(\"|-------------------------|---------------|---------------|\")\n    print(f\"| Gate Saturation (>|4.0|) | {metrics_b['saturation'][0]:.4f} %      | {metrics_b['saturation'][1]:.4f} %      |\")\n    print(f\"| Mean Spatial Variance   | {metrics_b['variance'][0]:.4f}        | {metrics_b['variance'][1]:.4f}        |\")\n\n    print(\"\\n## --- Interpretation ---\")\n    \n    avg_sat_a = jnp.mean(jnp.array(metrics_a['saturation']))\n    avg_sat_b = jnp.mean(jnp.array(metrics_b['saturation']))\n    if avg_sat_a > avg_sat_b * 1.5:\n        print(\"- CONFIRMED: Bottlenecked model (A) shows significantly higher gate saturation.\")\n    else:\n        print(\"- UNCONFIRMED: Gate saturation is not significantly different.\")\n        \n    avg_var_a = jnp.mean(jnp.array(metrics_a['variance']))\n    avg_var_b = jnp.mean(jnp.array(metrics_b['variance']))\n    if avg_var_a < avg_var_b * 0.75:\n        print(\"- CONFIRMED: Bottlenecked model (A) shows significantly lower spatial variance, suggesting representational collapse.\")\n    else:\n        print(\"- UNCONFIRMED: Mean spatial variance is not significantly different.\")\n\n    return \"Probe complete. See report above.\"\n",
+    "submitted_timestamp": 1758000134.2182624,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n\n# Mechanistic Probe: Architectural Comparison\n\n## --- Model A: d=7 / w=64 (Bottlenecked) ---\n| Metric                  | Step 1        | Step 2        |\n|-------------------------|---------------|---------------|\n| Gate Saturation (>|4.0|) | 0.0000 %      | 0.0000 %      |\n| Mean Spatial Variance   | 0.0025        | 0.0054        |\n\n## --- Model B: d=6 / w=96 (High-Performing) ---\n| Metric                  | Step 1        | Step 2        |\n|-------------------------|---------------|---------------|\n| Gate Saturation (>|4.0|) | 0.0000 %      | 0.0000 %      |\n| Mean Spatial Variance   | 0.0024        | 0.0052        |\n\n## --- Interpretation ---\n- UNCONFIRMED: Gate saturation is not significantly different.\n- UNCONFIRMED: Mean spatial variance is not significantly different.\nTest completed. Result: Probe complete. See report above.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758000145.6298375,
+      "evaluation_datetime": "2025-09-16T13:22:25.629839"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758000145.679016,
+    "version_notified": "original",
+    "message": "Your research submission 'Mechanistic Probe v2 (Bugfix)' (ID: 509) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n\n# Mechanistic Probe: Architectural Comparison\n\n## --- Model A: d=7 / w=64 (Bottlenecked) ---\n| Metric                  | Step 1        | Step 2        |\n|-------------------------|---------------|---------------|\n| Gate Saturation (>|4.0|) | 0.0000 %      | 0.0000 %      |\n| Mean Spatial Variance   | 0.0025        | 0.0054        |\n\n## --- Model B: d=6 / w=96 (High-Performing) ---\n| Metric                  | Step 1        | Step 2        |\n|-------------------------|---------------|---------------|\n| Gate Saturation (>|4.0|) | 0.0000 %      | 0.0000 %      |\n| Mean Spatial Variance   | 0.0024        | 0.0052        |\n\n## --- Interpretation ---\n- UNCONFIRMED: Gate saturation is not significantly different.\n- UNCONFIRMED: Mean spatial variance is not significantly different.\nTest completed. Result: Probe complete. See report above.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

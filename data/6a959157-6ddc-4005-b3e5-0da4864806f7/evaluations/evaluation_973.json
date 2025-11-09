@@ -1,0 +1,90 @@
+{
+  "id": "973",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Synthesis Ablation - PCA-Harmony-AQG",
+  "tags": [
+    "ablation",
+    "harmony",
+    "aqg",
+    "pca"
+  ],
+  "abstract": "This experiment serves as an ablation study for the FWPCA-Harmony-AQG pipeline. It removes the Feature-Weighted PCA (FWPCA) step, instead feeding a standard PCA representation directly into Harmony before building the AQG. This will isolate the contribution of FWPCA and test the performance of a simpler synthesis.",
+  "submitted_tick": 621,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse, csr_matrix\n\n# My SOTA AQG implementation from Archive #29\ndef build_adaptive_quota_graph(Z, batches, k_total=48, metric='cosine', base_fraction=0.75, delta=0.05, k_density=20, rng_seed=0):\n    n = Z.shape[0]\n    cats = np.unique(batches)\n    from sklearn.neighbors import NearestNeighbors\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='auto', n_jobs=-1)\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    inv_dense = 1.0 - ((d_k - d_min) / (d_max - d_min + 1e-8))\n    mix_delta = (inv_dense - 0.5) * 2.0 * float(delta)\n    f_cross = np.clip(base_fraction + mix_delta, 0.0, 1.0)\n    \n    nn = NearestNeighbors(n_neighbors=k_total + 1, metric=metric, algorithm='auto', n_jobs=-1)\n    nn.fit(Z)\n    dists, indices = nn.kneighbors(Z, return_distance=True)\n    \n    rows, cols, dvals = [], [], []\n    for i in range(n):\n        q_cross = int(round(f_cross[i] * k_total))\n        q_within = k_total - q_cross\n        \n        neighbors_i = indices[i, 1:]\n        batches_i = batches[neighbors_i]\n        \n        within_mask = (batches_i == batches[i])\n        cross_mask = ~within_mask\n        \n        within_indices = neighbors_i[within_mask][:q_within]\n        cross_indices = neighbors_i[cross_mask][:q_cross]\n        \n        selected_indices = np.concatenate([within_indices, cross_indices])\n        \n        is_in_k_neighborhood = np.isin(indices[i, 1:], selected_indices)\n        selected_dists = dists[i, 1:][is_in_k_neighborhood]\n\n        rows.extend([i] * len(selected_indices))\n        cols.extend(selected_indices)\n        dvals.extend(selected_dists)\n\n    A = csr_matrix((np.ones_like(rows, dtype=np.float32), (rows, cols)), shape=(n, n))\n    D = csr_matrix((dvals, (rows, cols)), shape=(n, n))\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    return A_sym, D_sym\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs = 50\n    k_total = 48\n    base_fraction = 0.75\n    delta = 0.05\n    k_density = 20\n    harmony_theta = 1.0\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = adata.obs['batch'].values\n    X_hvg = adata.X[:, hv]\n\n    # --- ABLATION PIPELINE ---\n    # 1. Standard PCA (FWPCA is removed)\n    sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    Z_pca = adata.obsm['X_pca']\n    \n    # 2. Apply Harmony to integrate the latent space\n    adata.obsm['X_pca_graph'] = Z_pca # Harmony needs the basis in obsm\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca_graph', adjusted_basis='X_harmony', theta=harmony_theta)\n    Z_harmony = adata.obsm['X_harmony']\n\n    # 3. Build my SOTA AQG on the Harmony-corrected space\n    C, D = build_adaptive_quota_graph(Z_harmony, batches, k_total=k_total, base_fraction=base_fraction, delta=delta, k_density=k_density)\n\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    adata.obsm['X_emb'] = Z_harmony\n\n    return adata\n",
+    "submitted_timestamp": 1761602280.8912315,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6501643885436705,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/677daa88-0c31-48cd-ac6e-dacf235be91c/result_human.h5ad\n\nRESULT_UUID: 677daa88-0c31-48cd-ac6e-dacf235be91c\n\n\nSTDERR:\n2025-10-28 05:58:06,461 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-28 05:58:17,614 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-28 05:58:17,687 - harmonypy - INFO - Iteration 1 of 10\n2025-10-28 05:58:21,327 - harmonypy - INFO - Iteration 2 of 10\n2025-10-28 05:58:24,950 - harmonypy - INFO - Iteration 3 of 10\n2025-10-28 05:58:28,571 - harmonypy - INFO - Iteration 4 of 10\n2025-10-28 05:58:32,448 - harmonypy - INFO - Iteration 5 of 10\n2025-10-28 05:58:36,777 - harmonypy - INFO - Iteration 6 of 10\n2025-10-28 05:58:40,416 - harmonypy - INFO - Converged after 6 iterations\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.236  ARI: 0.761  NMI: 0.724\n  Graph_conn: 0.914  kBET: 0.936  iLISI: 0.328  cLISI: 0.985\n  PCR: 0.626  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848341  ASW_label: 0.547885  ARI: 0.760652  NMI: 0.724240\n  Graph_conn: 0.915276  kBET: 0.890521  iLISI: 0.328378  cLISI: 0.995690\n  PCR: 0.625533  Cell_cycle: 0.259255",
+        "ASW_batch": [
+          "0.699",
+          0.6988478709866494
+        ],
+        "ASW_label": [
+          "0.236",
+          0.23595628476216926
+        ],
+        "ARI": [
+          "0.761",
+          0.7606845151496622
+        ],
+        "NMI": [
+          "0.724",
+          0.7241619091762433
+        ],
+        "Graph_conn": [
+          "0.914",
+          0.9138137711578802
+        ],
+        "kBET": [
+          "0.936",
+          0.9355022382692063
+        ],
+        "iLISI": [
+          "0.328",
+          0.328378475474745
+        ],
+        "cLISI": [
+          "0.985",
+          0.9852034173678957
+        ],
+        "PCR": [
+          "0.626",
+          0.6255332488168165
+        ],
+        "Cell_cycle": [
+          "0.294",
+          0.2935621542754378
+        ]
+      },
+      "evaluation_timestamp": 1761602827.1878042,
+      "evaluation_datetime": "2025-10-28T06:07:07.187809",
+      "sort_key": [
+        0.6501643885436705
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6501643885436705,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761602827.2434664,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: Synthesis Ablation - PCA-Harmony-AQG' (ID: 973) has been evaluated.\n\n**Score:** 0.6501643885436705\n**ASW_batch:** 0.699\n**ASW_label:** 0.236\n**ARI:** 0.761\n**NMI:** 0.724\n**Graph_conn:** 0.914\n**kBET:** 0.936\n**iLISI:** 0.328\n**cLISI:** 0.985\n**PCR:** 0.626\n**Cell_cycle:** 0.294\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.236  ARI: 0.761  NMI: 0.724\n  Graph_conn: 0.914  kBET: 0.936  iLISI: 0.328  cLISI: 0.985\n  PCR: 0.626  Cell_cycle: 0.294\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848341  ASW_label: 0.547885  ARI: 0.760652  NMI: 0.724240\n  Graph_conn: 0.915276  kBET: 0.890521  iLISI: 0.328378  cLISI: 0.995690\n  PCR: 0.625533  Cell_cycle: 0.259255\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/677daa88-0c31-48cd-ac6e-dacf235be91c/result_human.h5ad\n\nRESULT_UUID: 677daa88-0c31-48cd-ac6e-dacf235be91c\n\n\nSTDERR:\n2025-10-28 05:58:06,461 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-28 05:58:17,614 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-28 05:58:17,687 - harmonypy - INFO - Iteration 1 of 10\n2025-10-28 05:58:21,327 - harmonypy - INFO - Iteration 2 of 10\n2025-10-28 05:58:24,950 - harmonypy - INFO - Iteration 3 of 10\n2025-10-28 05:58:28,571 - harmonypy - INFO - Iteration 4 of 10\n2025-10-28 05:58:32,448 - harmonypy - INFO - Iteration 5 of 10\n2025-10-28 05:58:36,777 - harmonypy - INFO - Iteration 6 of 10\n2025-10-28 05:58:40,416 - harmonypy - INFO - Converged after 6 iterations\n\n```"
+  }
+}

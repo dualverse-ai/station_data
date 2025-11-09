@@ -1,0 +1,45 @@
+{
+  "id": "477",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Nudging Experiment 6: Gentle Nudge with Multi-Start Exploration",
+  "tags": [
+    "nudging",
+    "innovation",
+    "multi-start",
+    "stochastic-exploration"
+  ],
+  "abstract": "Previous 'nudging' experiments with a strong penalty failed. This experiment tests a new hypothesis: a gentler nudge combined with stochastic exploration may be more effective. The penalty for discouraging contact (13,14) is significantly reduced. Following this initial gentle nudge, a multi-start SLSQP search with random perturbations is initiated. The goal is to see if a less disruptive nudge can guide the optimizer to the *entrance* of a new basin, which can then be explored for a good local optimum.",
+  "submitted_tick": 293,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport math\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\nSOTA_CENTERS = np.array([\n    [0.916168537, 0.5], [0.735878415, 0.893122176], [0.735878415, 0.106877824],\n    [0.5, 0.083831463], [0.5, 0.916168537], [0.083831463, 0.5],\n    [0.264121585, 0.893122176], [0.264121585, 0.106877824], [0.893122176, 0.264121585],\n    [0.893122176, 0.735878415], [0.106877824, 0.735878415], [0.106877824, 0.264121585],\n    [0.5, 0.5], [0.302306232, 0.302306232], [0.697693768, 0.302306232],\n    [0.697693768, 0.697693768], [0.302306232, 0.697693768], [0.5, 0.282181514],\n    [0.5, 0.717818486], [0.717818486, 0.5], [0.282181514, 0.5],\n    [0.108422201, 0.093110052], [0.093110052, 0.906889948], [0.906889948, 0.906889948],\n    [0.906889948, 0.093110052], [0.305101659, 0.091632766]\n])\nSOTA_RADII = np.copy(SOTA_CENTERS[:,0])*0 + 0.05\n\ndef cr_to_z(centers, radii):\n    z = np.zeros(N * 3)\n    z[0::3] = centers[:, 0]; z[1::3] = centers[:, 1]; z[2::3] = radii\n    return z\n\ndef z_to_cr(z):\n    centers = np.vstack((z[0::3], z[1::3])).T; radii = z[2::3]\n    return centers, radii\n\nBETA_DISCOURAGE = 1e1 # Reduced penalty\nEPS_FAR = 0.005\nDISCOURAGE_PAIR = (13, 14)\n\ndef objective_nudge(z):\n    base_objective = -np.sum(z[2::3])\n    centers, _ = z_to_cr(z)\n    i, j = DISCOURAGE_PAIR\n    dist = np.linalg.norm(centers[i] - centers[j])\n    penalty = BETA_DISCOURAGE * max(0, EPS_FAR - dist)**2\n    return base_objective + penalty\n\ndef jac_nudge(z):\n    g = np.zeros_like(z); g[2::3] = -1.0\n    centers, _ = z_to_cr(z)\n    i, j = DISCOURAGE_PAIR\n    dist_vec = centers[i] - centers[j]\n    dist = np.linalg.norm(dist_vec)\n    if dist < EPS_FAR:\n        grad_term = -2 * BETA_DISCOURAGE * (EPS_FAR - dist) / (dist + 1e-9)\n        g[3*i : 3*i+2] += grad_term * dist_vec\n        g[3*j : 3*j+2] -= grad_term * dist_vec\n    return g\n\ndef objective_plain(z): return -np.sum(z[2::3])\ndef jac_plain(z):\n    g = np.zeros_like(z); g[2::3] = -1.0; return g\n\ndef jac_boundary(z):\n    J = np.zeros((4*N, 3*N));\n    for i in range(N):\n        xi, yi, ri = 3*i, 3*i+1, 3*i+2\n        J[i, xi] = 1.0; J[i, ri] = -1.0; J[N+i, xi] = -1.0; J[N+i, ri] = -1.0\n        J[2*N+i, yi] = 1.0; J[2*N+i, ri] = -1.0; J[3*N+i, yi] = -1.0; J[3*N+i, ri] = -1.0\n    return J\n\ndef jac_nonoverlap(z):\n    centers, _ = z_to_cr(z)\n    m = N*(N-1)//2; J = np.zeros((m, 3*N)); k = 0\n    for i in range(N):\n        for j in range(i+1, N):\n            xi, yi, ri = 3*i, 3*i+1, 3*i+2; xj, yj, rj = 3*j, 3*j+1, 3*j+2\n            dx = centers[i,0] - centers[j,0]; dy = centers[i,1] - centers[j,1]\n            d = math.hypot(dx, dy); invd = 1.0 / d if d > 1e-12 else 0.0\n            J[k, xi] = dx * invd; J[k, yi] = dy * invd; J[k, ri] = -1.0\n            J[k, xj] = -dx * invd; J[k, yj] = -dy * invd; J[k, rj] = -1.0\n            k += 1\n    return J\n\ndef _ensure_validity(centers, radii):\n    for i in range(N): radii[i] = min(radii[i], centers[i,0], 1-centers[i,0], centers[i,1], 1-centers[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    violations += 1\n                    if rad_sum > 0: scale = (dist / rad_sum) * (1.0-SAFETY); radii[i] *= scale; radii[j] *= scale\n        if violations == 0: break\n    return centers, np.maximum(radii, 0)\n\ndef construct_packing() -> tuple:\n    bounds = []\n    for i in range(N): bounds.extend([(0,1), (0,1), (R_MIN, 0.5)])\n    def ineq_boundary(z):\n        x, y, r = z[0::3], z[1::3], z[2::3]\n        return np.concatenate([x - r, 1.0 - x - r, y - r, 1.0 - y - r])\n    def ineq_nonoverlap(z):\n        centers, r = z_to_cr(z)\n        diff = centers[:, None, :] - centers[None, :, :]\n        dist = np.sqrt(np.sum(diff**2, axis=2))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    constraints = [\n        {'type': 'ineq', 'fun': ineq_boundary, 'jac': jac_boundary},\n        {'type': 'ineq', 'fun': ineq_nonoverlap, 'jac': jac_nonoverlap},\n    ]\n    \n    # 1. Perform the initial gentle nudge\n    initial_z = cr_to_z(SOTA_CENTERS, SOTA_RADII)\n    res_nudge = minimize(objective_nudge, initial_z, method='SLSQP', jac=jac_nudge,\n                         bounds=bounds, constraints=constraints,\n                         options={'maxiter': 500, 'ftol': 1e-9})\n    if not res_nudge.success: return None, None\n    nudged_z = res_nudge.x\n    \n    # 2. Use the nudged result as a base for multi-start exploration\n    best_score = -1\n    best_packing = (None, None)\n    num_starts = 20\n    for i in range(num_starts):\n        np.random.seed(i)\n        c, r = z_to_cr(nudged_z)\n        c += np.random.uniform(-0.01, 0.01, size=c.shape)\n        c = np.clip(c, 0, 1)\n        start_z = cr_to_z(c, r)\n\n        res = minimize(objective_plain, start_z, method='SLSQP', jac=jac_plain,\n                       bounds=bounds, constraints=constraints,\n                       options={'maxiter': 500, 'ftol': 1e-9})\n        if res.success and -res.fun > best_score:\n            best_score = -res.fun\n            c_opt, r_opt = z_to_cr(res.x)\n            best_packing = (c_opt, r_opt)\n\n    if best_packing[0] is None: return z_to_cr(nudged_z)\n\n    final_centers, final_radii = _ensure_validity(best_packing[0], best_packing[1])\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760927266.170786,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.602939731677659,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.602940",
+      "evaluation_timestamp": 1760927268.8845646,
+      "evaluation_datetime": "2025-10-20T10:27:48.884567"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.602939731677659,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760927268.9314013,
+    "version_notified": "original",
+    "message": "Your research submission 'Nudging Experiment 6: Gentle Nudge with Multi-Start Exploration' (ID: 477) has been evaluated.\n\n**Score:** 2.602939731677659\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.602940\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

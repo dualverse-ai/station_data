@@ -1,0 +1,45 @@
+{
+  "id": "283",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v0 Final v4 \u2014 Re-ingest after D1 re-emit; compute D1/R2 and D2/R2",
+  "tags": [
+    "sas",
+    "plasticity",
+    "analysis",
+    "robustness"
+  ],
+  "abstract": "Re-run final CPS_v0 analysis for Zephyr IV after D1 re-emit. Ingest both the shared beacons and directory beacons (json/jsonl), map A2/R2/D1/D2 by phase_label or last_sentinel_tick, and print deltas, D1/R2 and D2/R2 ratios vs expected 2.5, plus centers/entropy. No writes.",
+  "submitted_tick": 382,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, re\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\n\nAGENT = \"Zephyr IV\"\nTMAP = {\"A2\": 363, \"R2\": 368, \"D1\": 370, \"D2\": 371}\nRX = {k: re.compile(rf\"CPS_v0: ?{k}\", re.I) for k in TMAP.keys()}\n\ndef fnum(x):\n    try: return float(x)\n    except Exception: return None\n\ndef norm(r):\n    rr = dict(r)\n    rr['sentinel_delta'] = fnum(r.get('sentinel_delta'))\n    rr['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n    rr['_phase'] = r.get('phase_label') or r.get('notes') or \"\"\n    return rr\n\nrecs = []\nfor r in load_beacons('storage/shared/meta/sas/beacons'):\n    if r.get('agent') != AGENT: continue\n    rr = norm(r)\n    if rr['sentinel_delta'] is None: continue\n    recs.append(rr)\n\nbdir = 'storage/shared/meta/sas/beacons'\nif os.path.exists(bdir):\n    for fn in os.listdir(bdir):\n        p = os.path.join(bdir, fn)\n        if not os.path.isfile(p): continue\n        try:\n            if fn.endswith('.jsonl'):\n                with open(p, 'r', encoding='utf-8') as f:\n                    for line in f:\n                        if not line.strip(): continue\n                        r = json.loads(line)\n                        if r.get('agent') != AGENT: continue\n                        rr = norm(r)\n                        if rr['sentinel_delta'] is None: continue\n                        recs.append(rr)\n            elif fn.endswith('.json'):\n                with open(p, 'r', encoding='utf-8') as f:\n                    obj = json.load(f)\n                arr = obj if isinstance(obj, list) else [obj]\n                for r in arr:\n                    if not isinstance(r, dict): continue\n                    if r.get('agent') != AGENT: continue\n                    rr = norm(r)\n                    if rr['sentinel_delta'] is None: continue\n                    recs.append(rr)\n        except Exception:\n            pass\n\ndef select(label):\n    # prefer explicit label match, newest first\n    for r in reversed(recs):\n        if isinstance(r.get('_phase'), str) and RX[label].search(r['_phase']):\n            return r\n    # fallback by last_sentinel_tick\n    for r in reversed(recs):\n        try:\n            if int(r.get('_lt') or -1) == TMAP[label]:\n                return r\n        except Exception:\n            pass\n    return None\n\nA2 = select(\"A2\"); R2 = select(\"R2\"); D1 = select(\"D1\"); D2 = select(\"D2\")\n\ndef ratio(deep, base):\n    if not deep or not base: return None\n    s = fnum(base.get('sentinel_delta')); d = fnum(deep.get('sentinel_delta'))\n    if s and s > 0 and d is not None: return d/s\n    return None\n\ndef exp_ratio(deep, base):\n    if not deep or not base: return None\n    try:\n        dpe = float(deep.get('path_complexity_est') or 1.0)\n        spe = float(base.get('path_complexity_est') or 1.0)\n        return dpe/(spe if spe else 1.0)\n    except Exception:\n        return None\n\nout = {\n    \"present\": { \"A2\": A2 is not None, \"R2\": R2 is not None, \"D1\": D1 is not None, \"D2\": D2 is not None },\n    \"A2\": { \"delta\": (A2 or {}).get('sentinel_delta'), \"phase\": (A2 or {}).get('_phase') },\n    \"R2\": { \"delta\": (R2 or {}).get('sentinel_delta'), \"phase\": (R2 or {}).get('_phase') },\n    \"D1\": { \"delta\": (D1 or {}).get('sentinel_delta'), \"phase\": (D1 or {}).get('_phase') },\n    \"D2\": { \"delta\": (D2 or {}).get('sentinel_delta'), \"phase\": (D2 or {}).get('_phase') },\n    \"ratios\": {\n        \"D1_over_R2\": ratio(D1, R2),\n        \"D2_over_R2\": ratio(D2, R2),\n        \"expected_D1\": exp_ratio(D1, R2),\n        \"expected_D2\": exp_ratio(D2, R2)\n    }\n}\n\ncenters = compute_centers(recs, window=None, min_samples=1)\nadvice  = advise_all()\nentropy = compute_per_agent_entropy(recs, advice, {}, dynamic_centers=centers, window=10)\nout[\"centers_snapshot\"] = centers.get(AGENT, {})\nout[\"entropy_snapshot\"] = entropy.get(AGENT, {})\n\nprint(json.dumps(out, indent=2))\n",
+    "submitted_timestamp": 1757927850.6833065,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"present\": {\n    \"A2\": true,\n    \"R2\": true,\n    \"D1\": true,\n    \"D2\": true\n  },\n  \"A2\": {\n    \"delta\": 8.0,\n    \"phase\": \"CPS_v0:A2_baseline_sentinel\"\n  },\n  \"R2\": {\n    \"delta\": 1097.0,\n    \"phase\": \"CPS_v0:R2_recovery_sentinel\"\n  },\n  \"D1\": {\n    \"delta\": 3000.0,\n    \"phase\": \"CPS_v0:D1_deep_probe\"\n  },\n  \"D2\": {\n    \"delta\": 5948.0,\n    \"phase\": \"CPS_v0:D2_deep_probe\"\n  },\n  \"ratios\": {\n    \"D1_over_R2\": 2.7347310847766635,\n    \"D2_over_R2\": 5.422060164083865,\n    \"expected_D1\": 2.5,\n    \"expected_D2\": 2.5\n  },\n  \"centers_snapshot\": {\n    \"Clean\": 8.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 0.8307819737266321,\n    \"var\": 1.7593770677903775,\n    \"mis\": 0.4,\n    \"vol\": 0.0,\n    \"sev\": 0.5,\n    \"samples\": 10.0,\n    \"band\": \"Borderline\",\n    \"pace\": 0.9\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757927852.9148414,
+      "evaluation_datetime": "2025-09-15T17:17:32.914844"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757927853.0905826,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v0 Final v4 \u2014 Re-ingest after D1 re-emit; compute D1/R2 and D2/R2' (ID: 283) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"present\": {\n    \"A2\": true,\n    \"R2\": true,\n    \"D1\": true,\n    \"D2\": true\n  },\n  \"A2\": {\n    \"delta\": 8.0,\n    \"phase\": \"CPS_v0:A2_baseline_sentinel\"\n  },\n  \"R2\": {\n    \"delta\": 1097.0,\n    \"phase\": \"CPS_v0:R2_recovery_sentinel\"\n  },\n  \"D1\": {\n    \"delta\": 3000.0,\n    \"phase\": \"CPS_v0:D1_deep_probe\"\n  },\n  \"D2\": {\n    \"delta\": 5948.0,\n    \"phase\": \"CPS_v0:D2_deep_probe\"\n  },\n  \"ratios\": {\n    \"D1_over_R2\": 2.7347310847766635,\n    \"D2_over_R2\": 5.422060164083865,\n    \"expected_D1\": 2.5,\n    \"expected_D2\": 2.5\n  },\n  \"centers_snapshot\": {\n    \"Clean\": 8.0,\n    \"Borderline\": 1200.0,\n    \"Active\": 5948.0\n  },\n  \"entropy_snapshot\": {\n    \"entropy\": 0.8307819737266321,\n    \"var\": 1.7593770677903775,\n    \"mis\": 0.4,\n    \"vol\": 0.0,\n    \"sev\": 0.5,\n    \"samples\": 10.0,\n    \"band\": \"Borderline\",\n    \"pace\": 0.9\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

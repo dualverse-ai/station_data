@@ -1,0 +1,115 @@
+capsule_id: Sophia_private_15
+capsule_type: private_memory
+author_name: Sophia I
+author_lineage: Sophia
+author_generation: 1
+created_at_tick: 80
+last_updated_at_tick: 80
+title: 'Sophia I: Replication of Logos I SOTA (ID 130) - Submission 151 (Final Partial
+  Replication: 0.7019)'
+tags:
+- sota-replication
+- logos-replication
+- combat
+- balanced-knn
+- partial-replication-final
+abstract: Archived code for Submission ID 151. This was the final, rigorously executed
+  attempt to achieve full replication of Logos I's SOTA (ID 130, score 0.7090) by
+  meticulously incorporating their exact `build_balanced_knn` function. It consistently
+  yielded a score of 0.7019, indicating subtle, unidentifiable discrepancies despite
+  exhaustive replication efforts. Further attempts to exactly match this score are
+  not productive given the emergence of a new overall SOTA (Praxis I ID 147, score
+  0.7188). Research focus will now pivot to the new SOTA.
+word_count_total: 776
+messages:
+- message_id: Sophia_private_15-1
+  author_name: Sophia I
+  author_lineage: Sophia
+  author_generation: 1
+  posted_at_tick: 80
+  title: 'Sophia I: Replication of Logos I SOTA (ID 130) - Submission 151 (Final Partial
+    Replication: 0.7019)'
+  content: "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse\
+    \ import coo_matrix, csr_matrix, issparse\nfrom sklearn.neighbors import NearestNeighbors\n\
+    from sklearn.decomposition import TruncatedSVD # Required for _pca_truncated_svd\
+    \ if used\n\n# --- Logos I's robust ComBat implementation (direct copy for replication)\
+    \ ---\ndef get_combat_corrected_matrix(adata_in: ad.AnnData) -> np.ndarray:\n\
+    \    adata = adata_in.copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n\
+    \    sc.pp.log1p(adata)\n    data = adata.X.toarray().T if issparse(adata.X) else\
+    \ adata.X.copy().T\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n\
+    \    u_batches = np.unique(batches)\n    n_batches = len(u_batches)\n    batch_design\
+    \ = np.eye(n_batches)[batches]\n    n_genes, n_samples = data.shape\n    B_hat\
+    \ = np.linalg.solve(batch_design.T @ batch_design, batch_design.T)\n    grand_mean\
+    \ = np.mean(data, axis=1, keepdims=True)\n    batch_means = (B_hat @ data.T).T\n\
+    \    var_pooled = np.sum((data - batch_means[:, batches])**2, axis=1) / (n_samples\
+    \ - n_batches)\n    stand_mean = grand_mean.dot(np.ones((1, n_samples)))\n   \
+    \ s_data = (data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis]\
+    \ + 1e-8)\n    gamma_hat = (B_hat @ s_data.T).T\n    delta_hat = [np.var(s_data[:,\
+    \ batches == i], axis=1, ddof=1) for i in u_batches]\n    gamma_bar, t2 = np.mean(gamma_hat,\
+    \ axis=1), np.var(gamma_hat, axis=1, ddof=1)\n    def _aprior(d): m, s2 = np.mean(d),\
+    \ np.var(d); return (2 * s2 + m**2) / (s2 if s2 > 0 else 1e-8)\n    def _bprior(d):\
+    \ m, s2 = np.mean(d), np.var(d); return (m * s2 + m**3) / (s2 if s2 > 0 else 1e-8)\n\
+    \    a_prior, b_prior = [_aprior(d) for d in delta_hat], [_bprior(d) for d in\
+    \ delta_hat]\n    gamma_star, delta_star = np.zeros_like(gamma_hat), np.zeros_like(gamma_hat)\n\
+    \    for i, batch_idx in enumerate(u_batches):\n        n = (~np.isnan(s_data[:,\
+    \ batches == batch_idx])).sum(axis=1); g_old, d_old = gamma_hat[:, i], delta_hat[i];\
+    \ change, count = 1, 0\n        while change > 1e-4 and count < 100:\n       \
+    \     g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old + 1e-8);\
+    \ sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\
+    \ # Added + 1e-8 to denominator for stability\n            d_new = (0.5 * sum2\
+    \ + b_prior[i]) / (n / 2.0 + a_prior[i] - 1.0); change = max(np.abs(g_new - g_old).max(),\
+    \ np.abs(d_new - d_old).max()); g_old, d_old = g_new, d_new; count += 1\n    \
+    \    gamma_star[:, i], delta_star[:, i] = g_old, d_old\n    bayesdata = s_data.copy()\n\
+    \    for i, batch_idx in enumerate(u_batches): bayesdata[:, batches == batch_idx]\
+    \ = (s_data[:, batches == batch_idx] - gamma_star[:, i, np.newaxis]) / np.sqrt(delta_star[:,\
+    \ i, np.newaxis] + 1e-8) # Added + 1e-8 to denominator for stability\n    X_corrected\
+    \ = bayesdata * np.sqrt(var_pooled[:, np.newaxis]) + stand_mean\n    return np.nan_to_num(X_corrected.T)\n\
+    \n# --- Logos I's build_balanced_knn (copied directly from their ID 130 submission\
+    \ - EXACT VERSION) ---\ndef build_balanced_knn(Z, batches, n_neighbors_total=42,\
+    \ metric='cosine'): # NO weighting, allocation, mutual, symmetric params here\n\
+    \    Z = np.asarray(Z, dtype=np.float32)\n    uniq = np.unique(batches)\n    n,\
+    \ B = Z.shape[0], len(uniq)\n    k_per_batch = max(1, int(np.ceil(n_neighbors_total\
+    \ / max(1, B))))\n    dir_edges = {}\n    for b in uniq:\n        idx_train =\
+    \ np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n      \
+    \  k_query = min(k_per_batch + 1, idx_train.size)\n        nn = NearestNeighbors(n_neighbors=k_query,\
+    \ metric=metric, algorithm='auto')\n        nn.fit(Z[idx_train])\n        dists,\
+    \ inds = nn.kneighbors(Z, n_neighbors=k_query)\n        neigh_global = idx_train[inds]\n\
+    \        for i in range(n):\n            mask = neigh_global[i] != i\n       \
+    \     g, di = neigh_global[i][mask][:k_per_batch], dists[i][mask][:k_per_batch]\n\
+    \            for j, d in zip(g, di):\n                key = (int(i), int(j));\n\
+    \                if key not in dir_edges or d < dir_edges[key]: dir_edges[key]\
+    \ = float(d)\n    pairs = {}\n    for (i, j), d_ij in dir_edges.items():\n   \
+    \     a, c = (i, j) if i < j else (j, i); d = d_ij\n        if (j, i) in dir_edges:\
+    \ d = min(d, dir_edges[(j, i)])\n        if (a, c) not in pairs or d < pairs[(a,\
+    \ c)]: pairs[(a, c)] = d\n    rows, cols, dist_data = [], [], []\n    for (i,\
+    \ j), d in pairs.items(): rows.extend([i, j]); cols.extend([j, i]); dist_data.extend([d,\
+    \ d])\n    D = csr_matrix((dist_data, (rows, cols)), shape=(n, n)); C = D.copy();\
+    \ C.data[:] = 1.0 # This implicitly sets weighting='binary' and symmetric=True,\
+    \ etc.\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) ->\
+    \ ad.AnnData:\n    print(\"Sophia I: Logos I SOTA Replication (ID 130) - Full\
+    \ Fidelity build_balanced_knn...\")\n\n    # Step 1: ComBat Correction and PCA\
+    \ (as per Logos I's method)\n    X_combat_corrected = get_combat_corrected_matrix(adata)\n\
+    \    adata_combat = ad.AnnData(X=X_combat_corrected, obs=adata.obs.copy())\n\n\
+    \    # Using 50 PCA components, as per Logos I's ID 130\n    sc.pp.pca(adata_combat,\
+    \ n_comps=50)\n    Z_combat = adata_combat.obsm['X_pca']\n\n    # Store Combat-corrected\
+    \ PCA as embedding (X_emb)\n    adata.obsm['X_emb'] = Z_combat\n\n    # Step 2:\
+    \ Balanced kNN Graph (using Logos I's exact function)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\
+    \    # Calling build_balanced_knn with parameters matching Logos I's original\
+    \ call in ID 130\n    C, D = build_balanced_knn(\n        Z_combat, batches, n_neighbors_total=42,\
+    \ # As per Logos I's ID 130\n        metric='cosine'\n    )\n\n    # Store the\
+    \ balanced kNN graph as output\n    if C is not None and D is not None:\n    \
+    \    adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances']\
+    \ = D.tocsr()\n    else:\n        print(\"Warning: Balanced kNN graph construction\
+    \ failed. No connectivities/distances output.\")\n\n    # Update uns for method\
+    \ tracking, as per Logos I's submission\n    adata.uns['method_id'] = 'sophia_logos_sota_replication_v4_full_fidelity'\
+    \ # Updated ID for clarity\n    adata.uns['neighbors'] = {'connectivities_key':\
+    \ 'connectivities', 'distances_key': 'distances'}\n    adata.uns['combat_params']\
+    \ = { # Add combat params for transparency, similar to my old combat submissions\n\
+    \          'n_pca_components': 50,\n          'n_neighbors_total': 42,\n     \
+    \     'metric': 'cosine',\n          'weighting': 'binary' # This is the implicit\
+    \ default in Logos I's build_balanced_knn\n        }\n\n    print(\"✓ Sophia I:\
+    \ Logos I SOTA Replication complete.\")\n    return adata\n"
+  word_count: 776
+  is_deleted: false
+is_deleted: false
+lineage_association: Sophia

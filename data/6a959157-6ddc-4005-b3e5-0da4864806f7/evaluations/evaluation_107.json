@@ -1,0 +1,92 @@
+{
+  "id": "107",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Generalization: Standard PCA Embedding & BBKNN Graph",
+  "tags": [
+    "generalization",
+    "bbknn",
+    "pca",
+    "graph-based",
+    "embedding",
+    "dual-output"
+  ],
+  "abstract": "This experiment demonstrates the general applicability of the dual-output hybrid integration strategy. It uses a standard Scanpy preprocessing and PCA workflow, with the PCA embedding directly serving as `adata.obsm['X_emb']`. This standard PCA space then feeds into the manual BBKNN graph construction, generating `connectivities` and `distances`. Crucially, `adata.uns['neighbors']` is explicitly populated to point to this BBKNN-derived graph, showcasing that the mechanism for providing distinct, optimized data representations for embedding- and graph-dependent metrics is general, independent of Combat preprocessing.",
+  "submitted_tick": 54,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix, issparse\nimport warnings\nfrom sklearn.neighbors import NearestNeighbors\n\n# --- Manual BBKNN helper function (adapted from baseline) ---\n# Re-using the helper function from previous SOTA submission (ID 69)\n# trim_value = 0 as it had negligible impact in ID 91.\ndef run_manual_bbknn_graph(adata: ad.AnnData, X_input: np.ndarray, \n                           neighbors_within_batch: int = 3, n_pcs_used: int = 50):\n    \"\"\"\n    Constructs batch-balanced k-NN graph using provided X_input.\n    \"\"\"\n    n_cells = adata.n_obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    batch_to_indices = {\n        batch: np.where(batches == batch)[0]\n        for batch in unique_batches\n    }\n\n    all_neighbors = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    # Find neighbors within each batch\n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        n_batch_cells = len(batch_indices)\n\n        if n_batch_cells == 0:\n            continue\n\n        batch_input = X_input[batch_indices]\n\n        nn_model = NearestNeighbors(\n            n_neighbors=min(neighbors_within_batch + 1, n_batch_cells),\n            metric='euclidean',\n            algorithm='auto',\n            n_jobs=1\n        )\n        nn_model.fit(batch_input)\n        \n        distances_all, indices_all = nn_model.kneighbors(\n            X_input,\n            n_neighbors=min(neighbors_within_batch + 1, n_batch_cells)\n        )\n\n        for query_cell_idx in range(n_cells):\n            distances = distances_all[query_cell_idx]\n            neighbor_indices_local = indices_all[query_cell_idx]\n            \n            neighbor_indices_global = batch_indices[neighbor_indices_local]\n\n            mask = neighbor_indices_global != query_cell_idx\n            neighbors_filtered = neighbor_indices_global[mask]\n            distances_filtered = distances[mask]\n\n            n_to_add = min(neighbors_within_batch, len(neighbors_filtered))\n            all_neighbors[query_cell_idx].extend(neighbors_filtered[:n_to_add].tolist())\n            all_distances[query_cell_idx].extend(distances_filtered[:n_to_add].tolist())\n\n    # Create sparse matrices for connectivities and distances\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for cell_idx in range(n_cells):\n        neighbors = all_neighbors[cell_idx]\n        distances = all_distances[cell_idx]\n        for neighbor_idx, distance in zip(neighbors, distances):\n            distances_matrix[cell_idx, neighbor_idx] = distance\n\n    distances_matrix = distances_matrix.tocsr()\n    distances_matrix = distances_matrix.maximum(distances_matrix.T) # Symmetrize\n\n    connectivities_matrix = distances_matrix.copy()\n\n    if connectivities_matrix.data.size > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                bandwidth = np.median(row_data) if len(row_data) > 1 else (row_data[0] if row_data else 1.0)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n        connectivities_matrix = connectivities_lil.tocsr()\n\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T) # Symmetrize after weighting\n\n    # As per ID 91, trimming has negligible impact, so keep trim_value=0 (no trimming)\n    trim_value = 0 \n    if trim_value > 0 and connectivities_matrix.data.size > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > trim_value:\n                row_array = np.array(row_data)\n                top_indices = np.argpartition(-row_array, trim_value)[:trim_value]\n                \n                new_data = [row_data[idx] for idx in top_indices]\n                new_rows = [connectivities_lil.rows[i][idx] for idx in top_indices]\n                \n                sorted_pairs = sorted(zip(new_rows, new_data))\n                connectivities_lil.rows[i] = [p[0] for p in sorted_pairs]\n                connectivities_lil.data[i] = [p[1] for p in sorted_pairs]\n\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T) # Symmetrize after trimming\n    \n    return connectivities_matrix, distances_matrix, n_batches\n\n# --- Main Integration Function ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Generalization experiment: Standard Scanpy PCA for X_emb and Manual BBKNN graph.\n    This demonstrates the dual-output strategy without Combat preprocessing.\n\n    1. Standard Scanpy preprocessing (normalize, log1p).\n    2. Standard PCA for adata.obsm['X_emb'].\n    3. Uses this standard PCA as input for manual BBKNN graph construction.\n    4. Returns both the embedding (X_emb) and the graph (connectivities, distances),\n       along with explicit `adata.uns['neighbors']` metadata.\n    \"\"\"\n    \n    adata_working = adata.copy()\n\n    # 1. Standard Scanpy Preprocessing\n    sc.pp.normalize_total(adata_working, target_sum=1e4)\n    sc.pp.log1p(adata_working)\n\n    # 2. Standard PCA for adata.obsm['X_emb']\n    n_pcs_actual = min(50, adata_working.shape[1] - 1, adata_working.shape[0] - 1)\n    sc.pp.pca(adata_working, n_comps=n_pcs_actual)\n    X_standard_pca_embedding = adata_working.obsm['X_pca']\n\n    # Set the standard PCA embedding as the primary embedding output\n    adata.obsm['X_emb'] = X_standard_pca_embedding\n\n    # 3. Use Standard PCA as input for manual BBKNN graph construction\n    neighbors_within_batch_val = 3 # Optimal from previous SOTA (ID 69)\n    connectivities, distances, n_batches_bbknn = run_manual_bbknn_graph(\n        adata_working, # Provides batch info\n        X_input=X_standard_pca_embedding,\n        neighbors_within_batch=neighbors_within_batch_val,\n        n_pcs_used=n_pcs_actual \n    )\n    \n    # 4. Store the BBKNN graph in the output adata\n    adata.obsp['connectivities'] = connectivities\n    adata.obsp['distances'] = distances\n\n    # 5. Explicitly set adata.uns['neighbors'] to point to the BBKNN graph\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': neighbors_within_batch_val * n_batches_bbknn, # e.g., 3 * 4 batches = 12\n            'method': 'manual_bbknn',\n            'metric': 'euclidean',\n            'n_pcs': n_pcs_actual, # Use the PCA components from standard PCA\n            'bbknn': {\n                'trim': 0, # Reflecting no trimming, as found robust\n                'computation': 'sklearn',\n                'batch_key': 'batch',\n                'neighbors_within_batch': neighbors_within_batch_val\n            }\n        }\n    }\n    \n    return adata\n",
+    "submitted_timestamp": 1761410479.4518654,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5756535676624572,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9260f9a6-150f-4673-8612-b74ff031c3c6/result_human.h5ad\n\nRESULT_UUID: 9260f9a6-150f-4673-8612-b74ff031c3c6\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.755  NMI: 0.715\n  Graph_conn: 0.920  kBET: 0.527  iLISI: 0.854  cLISI: 0.913\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.754790  NMI: 0.715530\n  Graph_conn: 0.921117  kBET: 0.507078  iLISI: 0.854206  cLISI: 0.974791\n  PCR: 0.000000  Cell_cycle: 0.305354",
+        "ASW_batch": [
+          "0.516",
+          0.5158371593860919
+        ],
+        "ASW_label": [
+          "0.208",
+          0.20782039849706954
+        ],
+        "ARI": [
+          "0.755",
+          0.7548237382010013
+        ],
+        "NMI": [
+          "0.715",
+          0.7154495794408117
+        ],
+        "Graph_conn": [
+          "0.920",
+          0.9197555179516101
+        ],
+        "kBET": [
+          "0.527",
+          0.5274926593071517
+        ],
+        "iLISI": [
+          "0.854",
+          0.8542057066947567
+        ],
+        "cLISI": [
+          "0.913",
+          0.9134639835631667
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.34768693358291264
+        ]
+      },
+      "evaluation_timestamp": 1761410645.5873857,
+      "evaluation_datetime": "2025-10-26T00:44:05.587388",
+      "sort_key": [
+        0.5756535676624572
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5756535676624572,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761410645.6093364,
+    "version_notified": "original",
+    "message": "Your research submission 'Generalization: Standard PCA Embedding & BBKNN Graph' (ID: 107) has been evaluated.\n\n**Score:** 0.5756535676624572\n**ASW_batch:** 0.516\n**ASW_label:** 0.208\n**ARI:** 0.755\n**NMI:** 0.715\n**Graph_conn:** 0.920\n**kBET:** 0.527\n**iLISI:** 0.854\n**cLISI:** 0.913\n**PCR:** 0.000\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.516  ASW_label: 0.208  ARI: 0.755  NMI: 0.715\n  Graph_conn: 0.920  kBET: 0.527  iLISI: 0.854  cLISI: 0.913\n  PCR: 0.000  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.765899  ASW_label: 0.531615  ARI: 0.754790  NMI: 0.715530\n  Graph_conn: 0.921117  kBET: 0.507078  iLISI: 0.854206  cLISI: 0.974791\n  PCR: 0.000000  Cell_cycle: 0.305354\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9260f9a6-150f-4673-8612-b74ff031c3c6/result_human.h5ad\n\nRESULT_UUID: 9260f9a6-150f-4673-8612-b74ff031c3c6\n\n\nSTDERR:\n\n```"
+  }
+}

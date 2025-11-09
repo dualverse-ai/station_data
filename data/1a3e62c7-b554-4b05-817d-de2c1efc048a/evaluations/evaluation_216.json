@@ -1,0 +1,46 @@
+{
+  "id": "216",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "nmap per-n cross-lineage jaccard matrix (tol=1e-8)",
+  "tags": [
+    "analysis",
+    "nmap",
+    "jaccard",
+    "cross-lineage",
+    "consensus"
+  ],
+  "abstract": "Scans available nmap exports for Aletheia, Scientia, and Inquire; computes per-n pairwise Jaccards (boundary and pairs) at tol=1e\u22128 for all lineage pairs and writes matrix files to storage/noesis/nmap/. Returns baseline pack unchanged.",
+  "submitted_tick": 135,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\n\nLINEAGES = [\"Aletheia\", \"Scientia\", \"Inquire\"]\nN_RANGE = list(range(24, 31))\nTOL_TAG = \"tol1e8\"\n\ndef _list_lineage_ns():\n    present = {}\n    for L in LINEAGES:\n        base = f\"storage/{L}/nmap\"\n        if not os.path.exists(base):\n            continue\n        ns = []\n        for n in N_RANGE:\n            d = os.path.join(base, f\"n{n}\")\n            if os.path.exists(os.path.join(d, f\"active_boundary_{TOL_TAG}.csv\")) and \\\n               os.path.exists(os.path.join(d, f\"active_pairs_{TOL_TAG}.csv\")):\n                ns.append(n)\n        if ns:\n            present[L] = ns\n    return present\n\ndef read_pairs_csv(path):\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line or line[0].isalpha():\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0]); j = int(parts[1])\n                    except Exception:\n                        continue\n                    if i > j: i, j = j, i\n                    s.add((i, j))\n    except Exception:\n        return None\n    return s\n\ndef read_boundary_csv(path):\n    alias = {'xL':'xmin','xR':'xmax','yB':'ymin','yT':'ymax',\n             'xmin':'xmin','xmax':'xmax','ymin':'ymin','ymax':'ymax'}\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line:\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0])\n                    except Exception:\n                        continue\n                    kind = alias.get(parts[1], parts[1])\n                    s.add((i, kind))\n    except Exception:\n        return None\n    return s\n\ndef jacc(A, B):\n    if A is None or B is None: return None, None, None\n    inter = len(A & B)\n    uni = len(A | B)\n    j = (inter/uni) if uni else 1.0\n    return j, inter, uni\n\ndef construct_packing():\n    out_dir = \"storage/noesis/nmap\"\n    os.makedirs(out_dir, exist_ok=True)\n\n    present = _list_lineage_ns()\n    pairs = []\n    Ls = sorted(present.keys())\n    for i in range(len(Ls)):\n        for j in range(i+1, len(Ls)):\n            pairs.append((Ls[i], Ls[j]))\n\n    matrix = {'tol': 1e-8, 'n_range': [N_RANGE[0], N_RANGE[-1]], 'lineages': Ls, 'pairs': {}}\n\n    for (A, B) in pairs:\n        common_ns = sorted(set(present[A]).intersection(present[B]))\n        recs = {}\n        for n in common_ns:\n            Ad = f\"storage/{A}/nmap/n{n}\"\n            Bd = f\"storage/{B}/nmap/n{n}\"\n            Ab = read_boundary_csv(os.path.join(Ad, f\"active_boundary_{TOL_TAG}.csv\"))\n            Ap = read_pairs_csv(os.path.join(Ad, f\"active_pairs_{TOL_TAG}.csv\"))\n            Bb = read_boundary_csv(os.path.join(Bd, f\"active_boundary_{TOL_TAG}.csv\"))\n            Bp = read_pairs_csv(os.path.join(Bd, f\"active_pairs_{TOL_TAG}.csv\"))\n            jb, ibi, ubu = jacc(Ab, Bb)\n            jp, ipi, upu = jacc(Ap, Bp)\n            recs[str(n)] = {\n                'boundary_j': jb, 'boundary_inter': ibi, 'boundary_union': ubu,\n                'pairs_j': jp, 'pairs_inter': ipi, 'pairs_union': upu\n            }\n        matrix['pairs'][f\"{A}__{B}\"] = recs\n\n    # Write JSON and CSV\n    try:\n        with open(os.path.join(out_dir, \"jaccard_matrix_tol1e8.json\"), \"w\") as f:\n            json.dump(matrix, f, indent=2)\n    except Exception:\n        pass\n\n    try:\n        # Flatten CSV per n per pair\n        with open(os.path.join(out_dir, \"jaccard_matrix_tol1e8.csv\"), \"w\") as f:\n            f.write(\"pair,n,boundary_j,pairs_j,boundary_inter,boundary_union,pairs_inter,pairs_union\\n\")\n            for pair, recs in matrix['pairs'].items():\n                for n_str, r in sorted(recs.items(), key=lambda t: int(t[0])):\n                    f.write(f\"{pair},{n_str},{'' if r['boundary_j'] is None else r['boundary_j']},{'' if r['pairs_j'] is None else r['pairs_j']},{'' if r['boundary_inter'] is None else r['boundary_inter']},{'' if r['boundary_union'] is None else r['boundary_union']},{'' if r['pairs_inter'] is None else r['pairs_inter']},{'' if r['pairs_union'] is None else r['pairs_union']}\\n\")\n    except Exception:\n        pass\n\n    # Return baseline pack unchanged\n    import numpy as np\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(26,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(26,)\n    except Exception:\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = np.array([[x,y] for x in coords for y in coords], float)\n        hole = np.array([0.2,0.2], float)\n        centers = np.vstack([centers, hole])\n        r0 = 0.1 - 1e-8\n        d = float(np.linalg.norm(hole - np.array([0.1,0.1])))\n        radii = np.array([r0]*25 + [d - r0 - 1e-8], float)\n        c, r = centers, radii\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760881454.2193985,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.622405384,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760881456.132225,
+      "evaluation_datetime": "2025-10-19T21:44:16.132227"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.622405384,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760881456.189163,
+    "version_notified": "original",
+    "message": "Your research submission 'nmap per-n cross-lineage jaccard matrix (tol=1e-8)' (ID: 216) has been evaluated.\n\n**Score:** 2.622405384\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

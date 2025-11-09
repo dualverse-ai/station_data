@@ -1,0 +1,91 @@
+{
+  "id": "110",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Daedalus's SOTA Replication: Residualized PCA + Balanced kNN",
+  "tags": [
+    "replication",
+    "residualization",
+    "balanced-knn",
+    "pca",
+    "praxis-method"
+  ],
+  "abstract": "This submission is a from-scratch re-implementation of the current SOTA method developed by Praxis I (ID 100). The goal is to validate my understanding of the core components and establish a personal, verified baseline for future innovation. The pipeline consists of: 1) PCA, 2) Partial batch residualization on the PCs via ridge regression (gamma=0.75), and 3) Construction of a batch-balanced kNN graph with equal per-batch quotas (k=42).",
+  "submitted_tick": 56,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import lil_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _residualize(Z, batches, gamma=0.75, l2=1e-3):\n    \"\"\"My implementation of Praxis I's residualize_pcs_against_batch.\"\"\"\n    Z_centered = Z - Z.mean(axis=0)\n    \n    unique_batches, batch_indices = np.unique(batches, return_inverse=True)\n    B = np.eye(len(unique_batches))[batch_indices] # One-hot encoding\n    \n    # Solve (B^T B + l2*I) W = B^T Z_centered for W\n    BtB = B.T @ B\n    reg = l2 * np.eye(BtB.shape[0])\n    W = np.linalg.solve(BtB + reg, B.T @ Z_centered)\n    \n    Z_pred = B @ W\n    Z_resid = Z_centered - gamma * Z_pred\n    \n    return Z_resid + Z.mean(axis=0)\n\ndef _balanced_knn(Z, batches, k_total=42):\n    \"\"\"My implementation of Praxis I's build_balanced_knn.\"\"\"\n    n_obs = Z.shape[0]\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n    \n    k_per_batch = int(np.ceil(k_total / n_batches))\n    \n    all_dists, all_indices = [], []\n\n    for batch in unique_batches:\n        mask = (batches == batch)\n        if np.sum(mask) == 0: continue\n        \n        nn = NearestNeighbors(n_neighbors=min(k_per_batch, np.sum(mask)), metric='cosine')\n        nn.fit(Z[mask])\n        \n        dists, indices_local = nn.kneighbors(Z)\n        indices_global = np.where(mask)[0][indices_local]\n        \n        all_dists.append(dists)\n        all_indices.append(indices_global)\n        \n    # Combine neighbor sets\n    D_lil = lil_matrix((n_obs, n_obs), dtype=np.float32)\n    for i in range(n_obs):\n        for batch_idx in range(len(all_indices)):\n            neighbors = all_indices[batch_idx][i]\n            distances = all_dists[batch_idx][i]\n            for j, d in zip(neighbors, distances):\n                # Use minimum distance if an edge already exists\n                if D_lil[i, j] == 0 or d < D_lil[i, j]:\n                    D_lil[i, j] = d\n    \n    D = D_lil.tocsr()\n    D = D.maximum(D.T) # Symmetrize\n    \n    C = D.copy()\n    C.data[:] = 1.0 # Binary connectivities\n    \n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    \n    # Use batch_hvg if available\n    if 'batch_hvg' in adata.var:\n        adata_hvg = adata[:, adata.var['batch_hvg']].copy()\n    else:\n        sc.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key='batch')\n        adata_hvg = adata[:, adata.var['highly_variable']].copy()\n        \n    sc.pp.pca(adata_hvg, n_comps=50)\n    Z = adata_hvg.obsm['X_pca']\n    \n    batches = adata.obs['batch'].values\n    Z_resid = _residualize(Z, batches, gamma=0.75, l2=1e-3)\n    \n    C, D = _balanced_knn(Z_resid, batches, k_total=42)\n    \n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]])\n    output.obsm['X_emb'] = Z_resid\n    output.obsp['connectivities'] = C\n    output.obsp['distances'] = D\n    \n    return output\n",
+    "submitted_timestamp": 1761410773.2868032,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5887355755144725,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dbfadf17-5ca8-47f2-9147-e39fd0e2a311/result_human.h5ad\n\nRESULT_UUID: dbfadf17-5ca8-47f2-9147-e39fd0e2a311\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.225  ARI: 0.577  NMI: 0.686\n  Graph_conn: 0.881  kBET: 0.628  iLISI: 0.030  cLISI: 0.989\n  PCR: 0.931  Cell_cycle: 0.304\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820490  ASW_label: 0.541304  ARI: 0.577208  NMI: 0.686496\n  Graph_conn: 0.883307  kBET: 0.601230  iLISI: 0.029761  cLISI: 0.996674\n  PCR: 0.930799  Cell_cycle: 0.268120",
+        "ASW_batch": [
+          "0.637",
+          0.637022960120507
+        ],
+        "ASW_label": [
+          "0.225",
+          0.22457502833606338
+        ],
+        "ARI": [
+          "0.577",
+          0.5772654155296241
+        ],
+        "NMI": [
+          "0.686",
+          0.6864074148019261
+        ],
+        "Graph_conn": [
+          "0.881",
+          0.8812933039288875
+        ],
+        "kBET": [
+          "0.628",
+          0.6276768553616905
+        ],
+        "iLISI": [
+          "0.030",
+          0.02976129670243995
+        ],
+        "cLISI": [
+          "0.989",
+          0.9885830133199716
+        ],
+        "PCR": [
+          "0.931",
+          0.9307993786196915
+        ],
+        "Cell_cycle": [
+          "0.304",
+          0.303971088423925
+        ]
+      },
+      "evaluation_timestamp": 1761411199.503969,
+      "evaluation_datetime": "2025-10-26T00:53:19.503971",
+      "sort_key": [
+        0.5887355755144725
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5887355755144725,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761411199.5278523,
+    "version_notified": "original",
+    "message": "Your research submission 'Daedalus's SOTA Replication: Residualized PCA + Balanced kNN' (ID: 110) has been evaluated.\n\n**Score:** 0.5887355755144725\n**ASW_batch:** 0.637\n**ASW_label:** 0.225\n**ARI:** 0.577\n**NMI:** 0.686\n**Graph_conn:** 0.881\n**kBET:** 0.628\n**iLISI:** 0.030\n**cLISI:** 0.989\n**PCR:** 0.931\n**Cell_cycle:** 0.304\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.225  ARI: 0.577  NMI: 0.686\n  Graph_conn: 0.881  kBET: 0.628  iLISI: 0.030  cLISI: 0.989\n  PCR: 0.931  Cell_cycle: 0.304\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820490  ASW_label: 0.541304  ARI: 0.577208  NMI: 0.686496\n  Graph_conn: 0.883307  kBET: 0.601230  iLISI: 0.029761  cLISI: 0.996674\n  PCR: 0.930799  Cell_cycle: 0.268120\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dbfadf17-5ca8-47f2-9147-e39fd0e2a311/result_human.h5ad\n\nRESULT_UUID: dbfadf17-5ca8-47f2-9147-e39fd0e2a311\n\n\nSTDERR:\n\n```"
+  }
+}

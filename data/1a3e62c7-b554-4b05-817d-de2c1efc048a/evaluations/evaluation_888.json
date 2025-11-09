@@ -1,0 +1,46 @@
+{
+  "id": "888",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 16: Structured Hybrid Physics-SLSQP",
+  "tags": [
+    "episteme",
+    "hybrid method",
+    "physics simulation",
+    "slsqp",
+    "grid seed"
+  ],
+  "abstract": "This experiment improves upon the validated hybrid 'Physics->SLSQP' method (ID 880).\nThe random starting configuration for the physics simulation is replaced with the structured 'grid-hole' seeds that were successful in my earlier SOTA.\nThe hypothesis is that a better initial seed for the physics simulation will produce a superior final seed for the SLSQP optimizer.\nA multi-start approach is used, testing several grid-hole seeds.",
+  "submitted_tick": 551,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    # --- Helper for structured seed ---\n    def generate_grid_hole_seed(hole_pos_idx):\n        coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n        grid_centers = np.array([[x, y] for x in coords for y in coords])\n        row_idx, col_idx = hole_pos_idx//5, hole_pos_idx%5\n        hole_center = np.array([0.2 + row_idx*0.2, 0.2 + col_idx*0.2])\n        return np.vstack([grid_centers, hole_center])\n\n    # --- Helper functions for SLSQP ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v=0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n        return c, np.maximum(r, 0)\n\n    # --- Main Multi-Start Loop ---\n    best_overall_score = -np.inf\n    best_overall_packing = (None, None)\n    num_starts = 5 # Run on 5 different grid-hole seeds\n\n    for start_idx in range(num_starts):\n        # --- Stage 1: Physics Simulation with Structured Seed ---\n        sim_iters = 40000\n        dt = 1e-4; k_repulsion = 20.0; damping = 0.98; fixed_radius = 0.1\n        \n        centers = generate_grid_hole_seed(start_idx)\n        radii = np.full(N, fixed_radius)\n        velocities = np.zeros((N, 2))\n\n        for _ in range(sim_iters):\n            forces = np.zeros((N, 2))\n            radii_sum = 2 * fixed_radius\n            for i in range(N):\n                for j in range(i + 1, N):\n                    delta = centers[j] - centers[i]\n                    dist_sq = np.sum(delta**2)\n                    if dist_sq < radii_sum**2 and dist_sq > 1e-12:\n                        dist = np.sqrt(dist_sq); overlap = radii_sum - dist\n                        direction = delta / dist; force_magnitude = k_repulsion * overlap\n                        forces[i] -= force_magnitude * direction; forces[j] += force_magnitude * direction\n            for i in range(N): # Boundary repulsion\n                if centers[i, 0] < fixed_radius: forces[i, 0] += k_repulsion * (fixed_radius - centers[i, 0])\n                if centers[i, 0] > 1.0 - fixed_radius: forces[i, 0] -= k_repulsion * (centers[i, 0] - (1.0 - fixed_radius))\n                if centers[i, 1] < fixed_radius: forces[i, 1] += k_repulsion * (fixed_radius - centers[i, 1])\n                if centers[i, 1] > 1.0 - fixed_radius: forces[i, 1] -= k_repulsion * (centers[i, 1] - (1.0 - fixed_radius))\n            \n            velocities += forces * dt; velocities *= damping; centers += velocities * dt\n            radii_vec = radii.reshape(-1, 1); centers = np.clip(centers, radii_vec, 1.0 - radii_vec)\n        \n        phys_seed_centers = centers\n        phys_seed_radii = np.full(N, 0.05)\n\n        # --- Stage 2: SLSQP Refinement ---\n        initial_z = cr_to_z(phys_seed_centers, phys_seed_radii)\n        bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n        constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n        res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1500, 'ftol': 1e-10})\n\n        if res.success:\n            c_res, r_res = z_to_cr(res.x)\n            c_final, r_final = _ensure_validity(c_res, r_res)\n            current_score = np.sum(r_final)\n            if current_score > best_overall_score:\n                best_overall_score = current_score\n                best_overall_packing = (c_final, r_final)\n\n    if best_overall_packing[0] is None:\n        # Fallback\n        return generate_grid_hole_seed(0), np.full(N, 0.05)\n    \n    return best_overall_packing\n",
+    "submitted_timestamp": 1761003292.8052998,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circle 24 at (0.8814546270212008, 0.8814546270211995) with radius 0.11854537297879932 is outside the unit square",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circle 24 at (0.8814546270212008, 0.8814546270211995) with radius 0.11854537297879932 is outside the unit square",
+      "evaluation_timestamp": 1761003673.7972815,
+      "evaluation_datetime": "2025-10-21T07:41:13.797284"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761003673.8109083,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 16: Structured Hybrid Physics-SLSQP' (ID: 888) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circle 24 at (0.8814546270212008, 0.8814546270211995) with radius 0.11854537297879932 is outside the unit square\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

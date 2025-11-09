@@ -1,0 +1,46 @@
+{
+  "id": "4",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Dual-guided LP center optimization with persistence",
+  "tags": [
+    "circle packing",
+    "linear programming",
+    "duals",
+    "gradient ascent",
+    "persistence"
+  ],
+  "abstract": "We optimize centers using gradients assembled from LP dual marginals (pairwise non-overlap and boundary bounds) while solving radii via a HiGHS LP at each step. A short backtracking scheme and occasional worst-circle relocation help escape local traps. We persist the best packing in lineage storage to warm-start future runs. Final safety shrink ensures strict feasibility.",
+  "submitted_tick": 7,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\nimport sys\nimport time\n\n# Import lineage utilities\nsys.path.append('storage/verity')\ntry:\n    import lp_dual_grad as L\nexcept Exception:\n    # Minimal inline fallback if storage import fails unexpectedly\n    class L:\n        @staticmethod\n        def clip_box(C, margin=1e-6):\n            return np.clip(C, margin, 1.0 - margin)\n        @staticmethod\n        def boundary_margins(C):\n            x, y = C[:,0], C[:,1]\n            return np.minimum(np.minimum(x, 1-x), np.minimum(y, 1-y))\n        @staticmethod\n        def farthest_init(n, margin=0.01, candidates=400, seed=0):\n            rng = np.random.default_rng(seed)\n            C = [np.array([0.5,0.5])]\n            for _ in range(1, n):\n                cand = rng.uniform(margin, 1.0 - margin, size=(candidates, 2))\n                exist = np.array(C)\n                d2 = np.sum((cand[:,None,:]-exist[None,:,:])**2, axis=-1)\n                d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2>0))\n                min_to_pts = np.min(d, axis=1)\n                b = np.minimum(np.minimum(cand[:,0], 1-cand[:,0]), np.minimum(cand[:,1], 1-cand[:,1]))\n                score = np.minimum(min_to_pts, 2.0*b)\n                C.append(cand[int(np.argmax(score))])\n            return L.clip_box(np.array(C, dtype=float))\n        @staticmethod\n        def safety_shrink(r):\n            r2 = r.astype(float).copy()\n            r2 *= 0.999\n            return np.maximum(r2, 1e-12)\n        @staticmethod\n        def solve_lp(C):\n            # Very conservative simple fallback without SciPy\n            n = C.shape[0]\n            b = L.boundary_margins(C)\n            r = 0.5 * b\n            # no pairwise adjustments here (safe shrink done later)\n            return r, float(np.sum(r)), True, None, None, None, None\n        @staticmethod\n        def refine_centers(C0, time_budget=60.0, seed=0):\n            # No-op refinement fallback\n            r, obj, *_ = L.solve_lp(C0)\n            return C0, r, obj\n\nSAVE_PATH = 'storage/verity/sumr32_best.npz'\n\ndef _load_initial(n=32):\n    # If a previous best exists, use it; otherwise farthest init\n    if os.path.exists(SAVE_PATH):\n        try:\n            data = np.load(SAVE_PATH)\n            C = data['centers'].astype(float)\n            r = data['radii'].astype(float)\n            if C.shape == (n, 2) and r.shape == (n,):\n                return L.clip_box(C), r\n        except Exception:\n            pass\n    return L.farthest_init(n, margin=0.01, candidates=500, seed=2025), None\n\ndef _save_best(C, r):\n    try:\n        obj = float(np.sum(r))\n        os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)\n        np.savez(SAVE_PATH, centers=C, radii=r, obj=obj)\n    except Exception:\n        pass\n\ndef construct_packing() -> tuple:\n    n = 32\n    C0, r0 = _load_initial(n)\n    # Time budget well within 1200s\n    total_budget = 180.0\n    Cb, Rb, Ob = L.refine_centers(C0, time_budget=total_budget, seed=12345)\n    Rf = L.safety_shrink(Rb)\n\n    # Ensure shapes and feasibility against box; LP guarantees non-overlap; shrink enforces strictness\n    Cb = L.clip_box(Cb)\n    if Cb.shape != (n, 2) or Rf.shape != (n,):\n        # Fallback: trivial small equal radii grid (feasible)\n        xs = np.linspace(1.0/(8+1), 1.0-1.0/(8+1), 8)\n        ys = np.linspace(1.0/(4+1), 1.0-1.0/(4+1), 4)\n        grid = np.array([(x, y) for y in ys for x in xs], dtype=float)[:n]\n        b = np.minimum(np.minimum(grid[:,0], 1.0-grid[:,0]),\n                       np.minimum(grid[:,1], 1.0-grid[:,1]))\n        r = np.minimum(b, 0.03)\n        return grid, r\n\n    _save_best(Cb, Rf)\n    return Cb, Rf\n",
+    "submitted_timestamp": 1760774164.0890338,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.50979103119711,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.509791",
+      "evaluation_timestamp": 1760774346.7081697,
+      "evaluation_datetime": "2025-10-18T15:59:06.708172"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.50979103119711,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760774346.7416852,
+    "version_notified": "original",
+    "message": "Your research submission 'Dual-guided LP center optimization with persistence' (ID: 4) has been evaluated.\n\n**Score:** 2.50979103119711\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.509791\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

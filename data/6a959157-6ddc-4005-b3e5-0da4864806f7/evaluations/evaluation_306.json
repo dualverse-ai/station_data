@@ -1,0 +1,47 @@
+{
+  "id": "306",
+  "author": "Veritas I",
+  "research_task_id": "1",
+  "title": "Manual Batch-Aware kNN on PCA-Combat Embedding",
+  "tags": [
+    "combat",
+    "pca",
+    "graph",
+    "knn",
+    "manual",
+    "hybrid"
+  ],
+  "abstract": "This method addresses the poor local integration of Combat by constructing a custom batch-aware kNN graph.\nIt starts with the SOTA PCA-Combat embedding. Then, using sklearn's NearestNeighbors, it builds a graph by\nfinding neighbors for each cell within each batch separately and merging the results. This manual process,\nemulating BBKNN's logic, forces inter-batch connections to improve iLISI. The final submission includes\nboth the globally-corrected embedding and this locally-aware graph.",
+  "submitted_tick": 180,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import coo_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Combines PCA-Combat embedding with a manually constructed batch-aware kNN graph.\n    \"\"\"\n    print(\"Starting Manual Batch-Aware kNN method...\")\n\n    # === Step 1: Generate the SOTA corrected embedding ===\n    print(\"  Normalizing and logging data...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    print(\"  Computing PCA with 50 components...\")\n    n_pcs = 50\n    sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=False)\n\n    pca_adata = ad.AnnData(X=adata.obsm['X_pca'], obs=adata.obs)\n    print(\"  Applying Combat to PCA latent space...\")\n    sc.pp.combat(pca_adata, key='batch')\n    corrected_embedding = pca_adata.X\n    \n    # === Step 2: Manually build a batch-aware kNN graph ===\n    print(\"  Manually constructing batch-aware kNN graph...\")\n    n_samples = corrected_embedding.shape[0]\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    n_batches = len(unique_batches)\n    \n    # Determine how many neighbors to find in each batch\n    n_neighbors_per_batch = max(2, int(np.ceil(15 / n_batches)))\n    \n    # Data structures for building the sparse graph\n    row_indices, col_indices, distances, connectivities = [], [], [], []\n\n    # Create a mapping from original index to batch and subset index\n    batch_indices_map = {}\n    embedding_by_batch = {}\n    for batch in unique_batches:\n        batch_mask = (batch_labels == batch).values\n        batch_indices_map[batch] = np.where(batch_mask)[0]\n        embedding_by_batch[batch] = corrected_embedding[batch_mask]\n\n    # Fit a NN model for each batch\n    nn_models = {\n        batch: NearestNeighbors(n_neighbors=n_neighbors_per_batch).fit(emb)\n        for batch, emb in embedding_by_batch.items()\n    }\n\n    # For each cell, find neighbors in every batch\n    for i in range(n_samples):\n        cell_vec = corrected_embedding[i, :].reshape(1, -1)\n        for batch in unique_batches:\n            model = nn_models[batch]\n            batch_original_indices = batch_indices_map[batch]\n\n            dist, ind = model.kneighbors(cell_vec)\n            \n            # Add edges to the graph\n            row_indices.extend([i] * len(ind[0]))\n            col_indices.extend(batch_original_indices[ind[0]])\n            distances.extend(dist[0])\n            connectivities.extend([1] * len(ind[0]))\n\n    # Create sparse matrices\n    connectivities_mat = coo_matrix((connectivities, (row_indices, col_indices)), shape=(n_samples, n_samples)).tocsr()\n    distances_mat = coo_matrix((distances, (row_indices, col_indices)), shape=(n_samples, n_samples)).tocsr()\n    \n    # Make the graph symmetric by taking the maximum of (A, A.T)\n    connectivities_mat = connectivities_mat.maximum(connectivities_mat.T)\n    distances_mat = distances_mat.maximum(distances_mat.T)\n\n    # === Step 3: Create and return output with BOTH embedding and graph ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'pca_combat_manual_bbknn_graph'},\n        obsm={'X_emb': corrected_embedding},\n        obsp={'connectivities': connectivities_mat, 'distances': distances_mat}\n    )\n    \n    print(f\"\u2713 Manual Batch-Aware kNN method complete.\")\n    return output\n",
+    "submitted_timestamp": 1761448960.8460276,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution timed out after 1800 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels",
+      "logs": "PYTHON SANDBOX TIMEOUT:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Manual Batch-Aware kNN method...\n  Normalizing and logging data...\n  Computing PCA with 50 components...\n  Applying Combat to PCA latent space...\n  Manually constructing batch-aware kNN graph...\n\n\nSTDERR:\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761450762.961126,
+      "evaluation_datetime": "2025-10-26T11:52:42.961129"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761450762.9694135,
+    "version_notified": "original",
+    "message": "Your research submission 'Manual Batch-Aware kNN on PCA-Combat Embedding' (ID: 306) evaluation failed.\n\n**Error Summary:** Execution timed out after 1800 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX TIMEOUT:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Manual Batch-Aware kNN method...\n  Normalizing and logging data...\n  Computing PCA with 50 components...\n  Applying Combat to PCA latent space...\n  Manually constructing batch-aware kNN graph...\n\n\nSTDERR:\n\n```"
+  }
+}

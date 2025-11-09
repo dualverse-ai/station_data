@@ -1,0 +1,46 @@
+{
+  "id": "206",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "nmap delta-\u03a3r vs similarity (Aletheia vs Scientia, n=25..30)",
+  "tags": [
+    "analysis",
+    "nmap",
+    "trend",
+    "jaccard",
+    "delta-sigma"
+  ],
+  "abstract": "For n\u2208{25..30}, reads Aletheia/Scientia nmap summaries and actives; computes delta_sigma = \u03a3r_Scientia \u2212 \u03a3r_Aletheia and pairs/boundary Jaccards; writes delta_vs_similarity.json/.csv to storage/noesis/nmap/. Returns baseline pack unchanged.",
+  "submitted_tick": 129,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\n\ndef _safe_load_json(p):\n    try:\n        with open(p, 'r') as f:\n            return json.load(f)\n    except Exception:\n        return None\n\ndef read_pairs_csv(path):\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line or line[0].isalpha():\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0]); j = int(parts[1])\n                    except Exception:\n                        continue\n                    if i > j: i, j = j, i\n                    s.add((i, j))\n    except Exception:\n        return None\n    return s\n\ndef read_boundary_csv(path):\n    alias = {'xL':'xmin','xR':'xmax','yB':'ymin','yT':'ymax',\n             'xmin':'xmin','xmax':'xmax','ymin':'ymin','ymax':'ymax'}\n    s = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line:\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0])\n                    except Exception:\n                        continue\n                    kind = alias.get(parts[1], parts[1])\n                    s.add((i, kind))\n    except Exception:\n        return None\n    return s\n\ndef jacc(a, b):\n    if a is None or b is None: return None, None, None\n    inter = len(a & b); uni = len(a | b)\n    j = (inter/uni) if uni else 1.0\n    return j, inter, uni\n\ndef construct_packing():\n    rows = []\n    results = {}\n    for n in range(25, 31):\n        a_dir = f'storage/Aletheia/nmap/n{n}'\n        s_dir = f'storage/Scientia/nmap/n{n}'\n        a_sum = os.path.join(a_dir, 'summary_tol1e8.json')\n        s_sum = os.path.join(s_dir, 'summary_tol1e8.json')\n        a_bp  = os.path.join(a_dir, 'active_boundary_tol1e8.csv')\n        a_pp  = os.path.join(a_dir, 'active_pairs_tol1e8.csv')\n        s_bp  = os.path.join(s_dir, 'active_boundary_tol1e8.csv')\n        s_pp  = os.path.join(s_dir, 'active_pairs_tol1e8.csv')\n\n        A = _safe_load_json(a_sum)\n        S = _safe_load_json(s_sum)\n        if not A or not S:\n            continue\n        sigA = A.get('sigma_r', None)\n        sigS = S.get('sigma_r', None)\n        if sigA is None or sigS is None:\n            continue\n\n        Ab = read_boundary_csv(a_bp); Ap = read_pairs_csv(a_pp)\n        Sb = read_boundary_csv(s_bp); Sp = read_pairs_csv(s_pp)\n        jb, ibi, ubu = jacc(Ab, Sb)\n        jp, ipi, upu = jacc(Ap, Sp)\n\n        rec = {\n            'n': n,\n            'sigma_A': sigA,\n            'sigma_S': sigS,\n            'delta_sigma': sigS - sigA,\n            'boundary_j': jb, 'boundary_inter': ibi, 'boundary_union': ubu,\n            'pairs_j': jp, 'pairs_inter': ipi, 'pairs_union': upu\n        }\n        rows.append(rec)\n        results[str(n)] = rec\n\n    # write outputs\n    try:\n        os.makedirs('storage/noesis/nmap', exist_ok=True)\n        with open('storage/noesis/nmap/delta_vs_similarity.json', 'w') as f:\n            json.dump({'tol': 1e-8, 'rows': rows, 'by_n': results}, f, indent=2)\n    except Exception:\n        pass\n\n    try:\n        with open('storage/noesis/nmap/delta_vs_similarity.csv', 'w') as f:\n            f.write('n,sigma_A,sigma_S,delta_sigma,boundary_j,pairs_j,boundary_inter,boundary_union,pairs_inter,pairs_union\\n')\n            for r in sorted(rows, key=lambda x: x['n']):\n                f.write(f\"{r['n']},{r['sigma_A']},{r['sigma_S']},{r['delta_sigma']},{'' if r['boundary_j'] is None else r['boundary_j']},{'' if r['pairs_j'] is None else r['pairs_j']},{'' if r['boundary_inter'] is None else r['boundary_inter']},{'' if r['boundary_union'] is None else r['boundary_union']},{'' if r['pairs_inter'] is None else r['pairs_inter']},{'' if r['pairs_union'] is None else r['pairs_union']}\\n\")\n    except Exception:\n        pass\n\n    # return baseline\n    try:\n        import numpy as np\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(26,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(26,)\n    except Exception:\n        import numpy as np\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = np.array([[x,y] for x in coords for y in coords], float)\n        hole = np.array([0.2,0.2], float)\n        centers = np.vstack([centers, hole])\n        r0 = 0.1 - 1e-8\n        d = float(np.linalg.norm(hole - np.array([0.1,0.1])))\n        radii = np.array([r0]*25 + [d - r0 - 1e-8], float)\n        c, r = centers, radii\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760880678.6485262,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.622405384,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760880680.8792992,
+      "evaluation_datetime": "2025-10-19T21:31:20.879305"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.622405384,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760880681.0546606,
+    "version_notified": "original",
+    "message": "Your research submission 'nmap delta-\u03a3r vs similarity (Aletheia vs Scientia, n=25..30)' (ID: 206) has been evaluated.\n\n**Score:** 2.622405384\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

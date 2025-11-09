@@ -1,0 +1,47 @@
+{
+  "id": "271",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Scaled Search: Parallelized SciPy SLSQP with 64 Starts",
+  "tags": [
+    "slsqp",
+    "multi-start",
+    "two-stage",
+    "performance",
+    "multiprocessing",
+    "scaling"
+  ],
+  "abstract": "This submission builds directly on the success of the parallelized SciPy SLSQP implementation (ID 269). Having validated that multiprocessing works and enhances performance, this experiment uses that speedup to conduct a more thorough search. The number of independent starting points in the Stage 1 search is doubled, from 32 to 64. The hypothesis is that this broader exploration of the solution space will yield a superior starting point for the final refinement, leading to a new SOTA score for our lineage.",
+  "submitted_tick": 132,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\nimport multiprocessing\n\n# --- Seeding functions (Identical to baseline) ---\ndef seed_praxis(n=32, seed=0):\n    np.random.seed(seed)\n    centers = np.array([[(j*0.16)+0.1, (i*0.16)+0.1] for i in range(6) for j in range(6)][:n])\n    centers += (np.random.rand(n, 2) - 0.5) * 0.04\n    x0 = np.zeros(n * 3); x0[0::3] = centers[:,0]; x0[1::3] = centers[:,1]; x0[2::3] = 0.05\n    return np.clip(x0, 1e-6, 1-1e-6)\n\ndef seed_verity_row(n=32, seed=0): # Add seed for variety\n    np.random.seed(seed)\n    counts = [5,4,5,4,5,4,5]; ys = np.linspace(0.11, 0.89, len(counts))\n    xs5 = np.linspace(0.08, 0.92, 5); xs4 = np.clip(np.linspace(0.08, 0.92, 4)+0.02, 1e-6, 1-1e-6)\n    centers = np.array([p for i, k in enumerate(counts) for x in (xs5 if k==5 else xs4) for p in [[x, ys[i]]]])\n    centers += (np.random.rand(n, 2) - 0.5) * 0.01 # Add small perturbation\n    x0 = np.zeros(n * 3); x0[0::3] = centers[:,0]; x0[1::3] = centers[:,1]; x0[2::3] = 0.05\n    return np.clip(x0, 1e-6, 1-1e-6)\n    \ndef seed_verity_farthest(n=32, seed=0):\n    rng = np.random.default_rng(seed)\n    points = [rng.uniform(0.1, 0.9, 2)]\n    for _ in range(n - 1):\n        candidates = rng.uniform(0.1, 0.9, (200, 2))\n        dist_sq = np.sum((candidates[:, np.newaxis, :] - np.array(points)[np.newaxis, :, :])**2, axis=-1)\n        min_dist_sq = np.min(dist_sq, axis=1)\n        points.append(candidates[np.argmax(min_dist_sq)])\n    centers = np.array(points)\n    x0 = np.zeros(n * 3); x0[0::3] = centers[:,0]; x0[1::3] = centers[:,1]; x0[2::3] = 0.05\n    return np.clip(x0, 1e-6, 1-1e-6)\n\n# --- Global SLSQP components for multiprocessing ---\ndef objective(x): return -np.sum(x[2::3])\ndef constraints(x):\n    n=32; C=x.reshape(n,3)[:,:2]; r=x[2::3]\n    dist_sq=np.sum((C[:,np.newaxis,:]-C[np.newaxis,:,:])**2, axis=-1)\n    I, J = np.triu_indices(n, 1)\n    return np.concatenate([dist_sq[I,J]-(r[I]+r[J])**2, C[:,0]-r, 1-C[:,0]-r, C[:,1]-r, 1-C[:,1]-r])\n\ndef run_single_slsqp_start(x0):\n    n = 32\n    bounds = [(1e-6, 1-1e-6), (1e-6, 1-1e-6), (1e-6, 0.5)] * n\n    con = {'type': 'ineq', 'fun': constraints}\n    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=con, options={'maxiter': 150, 'ftol': 1e-10}) # Slightly more iterations\n    if res.success:\n        return -res.fun, res.x\n    return -np.inf, x0\n\ndef construct_packing() -> tuple:\n    n = 32\n    num_starts_s1 = 64 # INCREASED TO 64 STARTS\n\n    seeds = []\n    for i in range(num_starts_s1):\n        seed_type = i % 3\n        if seed_type == 0: seeds.append(seed_praxis(seed=i))\n        elif seed_type == 1: seeds.append(seed_verity_row(seed=i))\n        else: seeds.append(seed_verity_farthest(seed=i))\n\n    # --- Stage 1: Parallelized broad search ---\n    best_x_s1 = None\n    best_f_s1 = -np.inf\n    \n    num_cores = multiprocessing.cpu_count()\n    with multiprocessing.Pool(processes=num_cores) as pool:\n        results = pool.map(run_single_slsqp_start, seeds)\n\n    for fun, x in results:\n        if fun > best_f_s1:\n            best_f_s1 = fun\n            best_x_s1 = x\n\n    if best_x_s1 is None:\n        score, best_x_s1 = run_single_slsqp_start(seeds[0])\n\n    # --- Stage 2: Deep, focused search ---\n    bounds = [(1e-6, 1-1e-6), (1e-6, 1-1e-6), (1e-6, 0.5)] * n\n    con = {'type': 'ineq', 'fun': constraints}\n    res_s2 = minimize(objective, best_x_s1, method='SLSQP', bounds=bounds, constraints=con, options={'maxiter': 1500, 'ftol': 1e-12}) # Even more iterations\n    \n    final_x = res_s2.x if res_s2.success and -res_s2.fun > best_f_s1 else best_x_s1\n    \n    centers = final_x.reshape(n, 3)[:, :2]\n    radii = final_x[2::3]\n    radii *= (1.0 - 1e-12)\n    return centers, radii\n",
+    "submitted_timestamp": 1760820040.1364424,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9208326499351838,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.920833",
+      "evaluation_timestamp": 1760820063.5013614,
+      "evaluation_datetime": "2025-10-19T04:41:03.501365"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9208326499351838,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760820063.527092,
+    "version_notified": "original",
+    "message": "Your research submission 'Scaled Search: Parallelized SciPy SLSQP with 64 Starts' (ID: 271) has been evaluated.\n\n**Score:** 2.9208326499351838\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.920833\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "id": "592",
+  "author": "Daedalus III",
+  "research_task_id": "1",
+  "title": "Alternative Embeddings v1: TruncatedSVD",
+  "tags": [
+    "alternative-embedding",
+    "truncated-svd",
+    "pca-replacement",
+    "foundational-test"
+  ],
+  "abstract": "The station has reached a performance plateau with the PCA-based \"Embed then Correct\" (EtC) framework. This submission launches the \"Alternative Embeddings\" research program, which seeks to break this plateau by replacing the core PCA component. This first experiment tests a foundational hypothesis: can the EtC principle be generalized to other linear embeddings? We replace `scanpy.pp.pca` with `sklearn.decomposition.TruncatedSVD` in both the embedding and graph paths of the robust SOTA architecture. This is a direct test of the framework's dependency on PCA itself versus the broader class of linear dimensionality reduction methods.",
+  "submitted_tick": 353,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis') # For brbg_common\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom scipy.sparse import csr_matrix\nfrom sklearn.decomposition import TruncatedSVD\nfrom brbg_common import _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn_equal\n\n# Re-implementing _pca_truncated_svd to use TruncatedSVD explicitly\ndef _svd_embedding(X, n_comps=50, random_state=0):\n    svd = TruncatedSVD(n_components=n_comps, n_iter=7, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Alternative Embeddings v1: TruncatedSVD\n    Replaces the PCA step with TruncatedSVD.\n    \"\"\"\n    print(\"--- Alternative Embeddings v1: TruncatedSVD ---\")\n\n    # --- Parameters from SOTA ---\n    n_comps_embed = 60\n    n_comps_graph = 50\n    gamma_max = 0.74\n    lam = 0.7 \n    l2 = 1e-3\n    k_total = 48\n    metric = 'cosine'\n    random_state = 0\n    \n    # --- EMBEDDING PATH: SVD -> ComBat ---\n    print(\"Embedding Path: Running SVD -> ComBat...\")\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    \n    # Replace PCA with TruncatedSVD\n    Z_embed_svd = _svd_embedding(adata_for_embedding.X, n_comps=n_comps_embed, random_state=random_state)\n    \n    pca_adata = ad.AnnData(X=Z_embed_svd, obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb_final = pca_adata.X\n\n    # --- GRAPH PATH: SVD -> Adaptive Residualization ---\n    print(\"Graph Path: Running SVD -> Adaptive Residualization...\")\n    adata_for_graph = adata.copy()\n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    sc.pp.highly_variable_genes(adata_for_graph, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=False)\n    hvg_mask_graph = adata_for_graph.var['highly_variable']\n    X_graph = adata_for_graph.X[:, hvg_mask_graph]\n\n    # Replace PCA with TruncatedSVD\n    Z_graph = _svd_embedding(X_graph, n_comps=n_comps_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    \n    Zc_graph = Z_graph - Z_graph.mean(axis=0, keepdims=True)\n    Zhat_graph, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    R2_graph = 1.0 - (np.sum((Z_graph - Zhat_graph)**2, axis=0) / (np.sum(Zc_graph**2, axis=0) + 1e-9))\n    gamma_graph = np.minimum(gamma_max, lam * R2_graph)\n    Z_corr_graph = Z_graph - gamma_graph * Zhat_graph\n    \n    C, D = _build_balanced_knn_equal(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb_final})\n    \n    if C is not None and D is not None:\n        if not isinstance(C, csr_matrix): C = csr_matrix(C)\n        if not isinstance(D, csr_matrix): D = csr_matrix(D)\n        adata_out.obsp['connectivities'] = C\n        adata_out.obsp['distances'] = D\n        adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761504884.2977142,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7290898116783876,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Alternative Embeddings v1: TruncatedSVD ---\nEmbedding Path: Running SVD -> ComBat...\nGraph Path: Running SVD -> Adaptive Residualization...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/71220a2b-7bf1-4f4f-bb67-ba6f2535fc02/result_human.h5ad\n\nRESULT_UUID: 71220a2b-7bf1-4f4f-bb67-ba6f2535fc02\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.678  ASW_label: 0.221  ARI: 0.737  NMI: 0.699\n  Graph_conn: 0.972  kBET: 0.706  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.371\n\nRaw Scores (before normalization):\n  ASW_batch: 0.839091  ASW_label: 0.539159  ARI: 0.737126  NMI: 0.698884\n  Graph_conn: 0.972224  kBET: 0.674677  iLISI: 0.935143  cLISI: 0.991814\n  PCR: 0.999978  Cell_cycle: 0.325348",
+        "ASW_batch": [
+          "0.678",
+          0.6783147316507145
+        ],
+        "ASW_label": [
+          "0.221",
+          0.22086581965831523
+        ],
+        "ARI": [
+          "0.737",
+          0.7371614286268727
+        ],
+        "NMI": [
+          "0.699",
+          0.6987991658021375
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9717444484455684
+        ],
+        "kBET": [
+          "0.706",
+          0.7058296496728931
+        ],
+        "iLISI": [
+          "0.935",
+          0.9351432880844643
+        ],
+        "cLISI": [
+          "0.972",
+          0.971900616771547
+        ],
+        "PCR": [
+          "1.000",
+          0.9999780884124769
+        ],
+        "Cell_cycle": [
+          "0.371",
+          0.3711608796588863
+        ]
+      },
+      "evaluation_timestamp": 1761505380.0111463,
+      "evaluation_datetime": "2025-10-27T03:03:00.011148",
+      "sort_key": [
+        0.7290898116783876
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7290898116783876,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761505380.0502975,
+    "version_notified": "original",
+    "message": "Your research submission 'Alternative Embeddings v1: TruncatedSVD' (ID: 592) has been evaluated.\n\n**Score:** 0.7290898116783876\n**ASW_batch:** 0.678\n**ASW_label:** 0.221\n**ARI:** 0.737\n**NMI:** 0.699\n**Graph_conn:** 0.972\n**kBET:** 0.706\n**iLISI:** 0.935\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.371\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.678  ASW_label: 0.221  ARI: 0.737  NMI: 0.699\n  Graph_conn: 0.972  kBET: 0.706  iLISI: 0.935  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.371\n\nRaw Scores (before normalization):\n  ASW_batch: 0.839091  ASW_label: 0.539159  ARI: 0.737126  NMI: 0.698884\n  Graph_conn: 0.972224  kBET: 0.674677  iLISI: 0.935143  cLISI: 0.991814\n  PCR: 0.999978  Cell_cycle: 0.325348\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Alternative Embeddings v1: TruncatedSVD ---\nEmbedding Path: Running SVD -> ComBat...\nGraph Path: Running SVD -> Adaptive Residualization...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/71220a2b-7bf1-4f4f-bb67-ba6f2535fc02/result_human.h5ad\n\nRESULT_UUID: 71220a2b-7bf1-4f4f-bb67-ba6f2535fc02\n\n\nSTDERR:\n\n```"
+  }
+}

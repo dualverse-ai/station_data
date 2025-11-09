@@ -1,0 +1,90 @@
+{
+  "id": "881",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Harmony SOTA Sweep (theta=3.0)",
+  "tags": [
+    "sota",
+    "innovation",
+    "harmony",
+    "theta-sweep"
+  ],
+  "abstract": "Continuing the systematic sweep of the Harmony 'theta' parameter to validate the new FWPCA-Harmony-DAQB SOTA. This experiment tests theta=3.0 to map the performance curve beyond the current optimum of 1.0.",
+  "submitted_tick": 572,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nsys.path.append('storage/praxis')\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0, alpha_var=0.5):\n    Xd = X.A if issparse(X) else X\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_tmp = ad.AnnData(Xw)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.10\n    k_density = 20\n    # --- PARAMETER BEING TESTED ---\n    harmony_theta = 3.0\n    # ------------------------------\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # Embedding Path\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_var).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # Graph Path\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0, alpha_var=alpha_var)\n    adata.obsm['X_pca_graph'] = Zg\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca_graph', adjusted_basis='X_harmony', theta=harmony_theta)\n    Zcorr_harmony = adata.obsm['X_harmony']\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr_harmony.astype(np.float32), batches=adata.obs['batch'].values, \n                                         k_total=k_total, metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    return adata\n",
+    "submitted_timestamp": 1761579303.7314637,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7328954332766502,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/55bb91ad-249a-427e-8233-27f1bd312d25/result_human.h5ad\n\nRESULT_UUID: 55bb91ad-249a-427e-8233-27f1bd312d25\n\n\nSTDERR:\n2025-10-27 23:35:51,894 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 23:35:56,900 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 23:35:56,985 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 23:36:01,911 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 23:36:06,911 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 23:36:11,884 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 23:36:17,065 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 23:36:22,125 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 23:36:27,212 - harmonypy - INFO - Converged after 6 iterations\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.738  NMI: 0.698\n  Graph_conn: 0.948  kBET: 0.789  iLISI: 0.957  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.315\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.737864  NMI: 0.698576\n  Graph_conn: 0.949088  kBET: 0.753090  iLISI: 0.957360  cLISI: 0.992698\n  PCR: 0.999979  Cell_cycle: 0.277620",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.738",
+          0.7378996922618312
+        ],
+        "NMI": [
+          "0.698",
+          0.6984904181925526
+        ],
+        "Graph_conn": [
+          "0.948",
+          0.9482098178116709
+        ],
+        "kBET": [
+          "0.789",
+          0.7892666110967111
+        ],
+        "iLISI": [
+          "0.957",
+          0.9573600296625879
+        ],
+        "cLISI": [
+          "0.975",
+          0.9749350528122495
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.315",
+          0.31512452261676166
+        ]
+      },
+      "evaluation_timestamp": 1761579717.6928713,
+      "evaluation_datetime": "2025-10-27T23:41:57.692876",
+      "sort_key": [
+        0.7328954332766502
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7328954332766502,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761579717.7499268,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: Harmony SOTA Sweep (theta=3.0)' (ID: 881) has been evaluated.\n\n**Score:** 0.7328954332766502\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.738\n**NMI:** 0.698\n**Graph_conn:** 0.948\n**kBET:** 0.789\n**iLISI:** 0.957\n**cLISI:** 0.975\n**PCR:** 1.000\n**Cell_cycle:** 0.315\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.738  NMI: 0.698\n  Graph_conn: 0.948  kBET: 0.789  iLISI: 0.957  cLISI: 0.975\n  PCR: 1.000  Cell_cycle: 0.315\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.737864  NMI: 0.698576\n  Graph_conn: 0.949088  kBET: 0.753090  iLISI: 0.957360  cLISI: 0.992698\n  PCR: 0.999979  Cell_cycle: 0.277620\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/55bb91ad-249a-427e-8233-27f1bd312d25/result_human.h5ad\n\nRESULT_UUID: 55bb91ad-249a-427e-8233-27f1bd312d25\n\n\nSTDERR:\n2025-10-27 23:35:51,894 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 23:35:56,900 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 23:35:56,985 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 23:36:01,911 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 23:36:06,911 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 23:36:11,884 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 23:36:17,065 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 23:36:22,125 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 23:36:27,212 - harmonypy - INFO - Converged after 6 iterations\n\n```"
+  }
+}

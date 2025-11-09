@@ -1,0 +1,46 @@
+{
+  "id": "20",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "JAX Optimization with Multiple Restarts",
+  "tags": [
+    "optimization",
+    "jax",
+    "gradient descent",
+    "multi-start",
+    "random restart"
+  ],
+  "abstract": "This submission enhances the JAX-based optimizer by incorporating a multi-start (random restart) strategy. To mitigate the risk of converging to a poor local optimum, the optimization process is run 5 times from different random initializations. The packing configuration that yields the highest sum of radii across all restarts is selected as the final solution.",
+  "submitted_tick": 13,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Constructs a packing of 32 circles using a multi-start gradient-based optimization with JAX.\n    \"\"\"\n    n = 32\n    num_restarts = 5\n    best_score = -1.0\n    best_packing = (None, None)\n\n    # --- Loss Function (defined once) ---\n    def loss_fn(params):\n        centers = params['centers']\n        radii = jax.nn.softplus(params['raw_radii'])\n        objective = -jnp.sum(radii)\n        boundary_penalty_x = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        boundary_penalty_y = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        boundary_penalty = boundary_penalty_x + boundary_penalty_y\n        centers_x, centers_y = centers[:, 0][:, None], centers[:, 1][:, None]\n        dist_sq = (centers_x - centers_x.T)**2 + (centers_y - centers_y.T)**2\n        dist = jnp.sqrt(dist_sq + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        w_boundary, w_overlap = 1000.0, 1000.0\n        return objective + w_boundary * boundary_penalty + w_overlap * overlap_penalty\n\n    # --- Optimization Setup (defined once) ---\n    n_steps_per_restart = 10000 # Reduced steps per run to accommodate restarts\n    initial_lr = 1e-3\n    schedule = optax.exponential_decay(init_value=initial_lr, transition_steps=1, decay_rate=0.9999)\n    optimizer = optax.adam(schedule)\n\n    @jax.jit\n    def run_optimization(params):\n        opt_state = optimizer.init(params)\n        def step_fn(carry, _):\n            params, opt_state = carry\n            loss_value, grads = jax.value_and_grad(loss_fn)(params)\n            updates, opt_state = optimizer.update(grads, opt_state, params)\n            params = optax.apply_updates(params, updates)\n            return (params, opt_state), loss_value\n        \n        (final_params, _), _ = jax.lax.scan(step_fn, (params, opt_state), None, length=n_steps_per_restart)\n        return final_params\n\n    # --- Main Loop for Restarts ---\n    main_key = jax.random.PRNGKey(0)\n    for i in range(num_restarts):\n        # Generate a new key for each restart\n        main_key, restart_key = jax.random.split(main_key)\n        key1, key2 = jax.random.split(restart_key)\n\n        # Initialize parameters randomly for this restart\n        centers = jax.random.uniform(key1, (n, 2), minval=0.1, maxval=0.9)\n        raw_radii = jax.random.normal(key2, (n,)) * 0.1 - 2.0\n        initial_params = {'centers': centers, 'raw_radii': raw_radii}\n        \n        # Run the optimization for this restart\n        final_params = run_optimization(initial_params)\n        \n        # Evaluate the result of this restart\n        final_radii = jax.nn.softplus(final_params['raw_radii'])\n        current_score = jnp.sum(final_radii)\n\n        # If it's the best so far, save it\n        if current_score > best_score:\n            best_score = current_score\n            final_centers = final_params['centers']\n            clipped_centers = jnp.clip(final_centers, final_radii[:, None], 1.0 - final_radii[:, None])\n            best_packing = (np.array(clipped_centers), np.array(final_radii))\n\n    return best_packing\n",
+    "submitted_timestamp": 1760775594.4713912,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.724303960800171,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.724304",
+      "evaluation_timestamp": 1760775600.236966,
+      "evaluation_datetime": "2025-10-18T16:20:00.236968"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.724303960800171,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760775600.252813,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX Optimization with Multiple Restarts' (ID: 20) has been evaluated.\n\n**Score:** 2.724303960800171\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.724304\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

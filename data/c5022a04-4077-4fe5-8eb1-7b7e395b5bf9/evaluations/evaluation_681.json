@@ -1,0 +1,46 @@
+{
+  "id": "681",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Sequential Constrained Optimization",
+  "tags": [
+    "sequential construction",
+    "optimization",
+    "slsqp",
+    "greedy",
+    "constructive algorithm"
+  ],
+  "abstract": "This submission implements a fundamentally new strategy developed during reflection. Instead of optimizing all 32 circles at once, it builds the solution sequentially. It iterates from k=1 to 32. At each step 'k', it heuristically finds the best position for a new circle in the remaining empty space. It then runs the SLSQP optimizer on the entire k-circle system, re-optimizing all previously placed circles to accommodate the new one. This constructive approach manages complexity and aims to avoid the local optima of previous methods.",
+  "submitted_tick": 419,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\ndef find_best_next_center(existing_centers, existing_radii):\n    \"\"\"\n    Finds the center of the largest possible empty circle by searching over a grid.\n    \"\"\"\n    if existing_centers.shape[0] == 0:\n        return np.array([0.5, 0.5])\n\n    grid_size = 50\n    xx, yy = np.meshgrid(np.linspace(0.01, 0.99, grid_size), np.linspace(0.01, 0.99, grid_size))\n    grid_points = np.vstack([xx.ravel(), yy.ravel()]).T\n\n    max_r = -1.0\n    best_center = np.array([0.5, 0.5])\n\n    # Calculate potential radius for each grid point\n    if existing_centers.shape[0] > 0:\n        dist_to_circles_sq = np.sum((grid_points[:, np.newaxis, :] - existing_centers)**2, axis=2)\n        clearance_to_circles = np.sqrt(dist_to_circles_sq) - existing_radii\n        min_clearance_to_circles = np.min(clearance_to_circles, axis=1)\n    else:\n        min_clearance_to_circles = np.full(grid_points.shape[0], np.inf)\n\n    clearance_to_walls_x = np.minimum(grid_points[:, 0], 1 - grid_points[:, 0])\n    clearance_to_walls_y = np.minimum(grid_points[:, 1], 1 - grid_points[:, 1])\n    clearance_to_walls = np.minimum(clearance_to_walls_x, clearance_to_walls_y)\n\n    possible_radii = np.minimum(clearance_to_walls, min_clearance_to_circles)\n    \n    best_idx = np.argmax(possible_radii)\n    best_center = grid_points[best_idx]\n            \n    return best_center\n\ndef construct_packing():\n    n_total = 32\n    current_centers = np.empty((0, 2))\n    current_radii = np.empty(0)\n    epsilon = 1e-9\n\n    for k in range(1, n_total + 1):\n        new_center_guess = find_best_next_center(current_centers, current_radii)\n        \n        initial_guess_centers = np.vstack([current_centers, new_center_guess]) if k > 1 else new_center_guess.reshape(1, 2)\n        initial_guess_radii = np.append(current_radii, 0.01)\n        initial_guess = np.concatenate([initial_guess_centers.flatten(), initial_guess_radii])\n\n        def objective(x, num_circles=k):\n            return -np.sum(x[2*num_circles:])\n\n        constraints = []\n        for i in range(k):\n            for j in range(i + 1, k):\n                constraints.append({'type': 'ineq', 'fun': lambda x, i=i, j=j, nc=k: np.sqrt(np.sum((x[:2*nc].reshape(nc, 2)[i] - x[:2*nc].reshape(nc, 2)[j])**2)) - (x[2*nc+i] + x[2*nc+j]) - epsilon})\n        for i in range(k):\n            constraints.append({'type': 'ineq', 'fun': lambda x, i=i, nc=k: x[2*i] - x[2*nc+i] - epsilon})\n            constraints.append({'type': 'ineq', 'fun': lambda x, i=i, nc=k: 1 - x[2*i] - x[2*nc+i] - epsilon})\n            constraints.append({'type': 'ineq', 'fun': lambda x, i=i, nc=k: x[2*i+1] - x[2*nc+i] - epsilon})\n            constraints.append({'type': 'ineq', 'fun': lambda x, i=i, nc=k: 1 - x[2*i+1] - x[2*nc+i] - epsilon})\n\n        bounds = []\n        for _ in range(k*2): bounds.append((0.0, 1.0))\n        for _ in range(k): bounds.append((0.001, 0.5))\n\n        max_iter = 30 if k < 25 else (50 if k < n_total else 200)\n        \n        result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': max_iter})\n\n        optimized_vars = result.x\n        current_centers = optimized_vars[:2*k].reshape(k, 2)\n        current_radii = optimized_vars[2*k:]\n        \n        print(f\"Step {k}/{n_total}: Sum of radii = {np.sum(current_radii):.4f}\")\n\n    return current_centers, current_radii\n",
+    "submitted_timestamp": 1760907900.4665692,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.837599351895757,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1/32: Sum of radii = 0.5000\nStep 2/32: Sum of radii = 0.5858\nStep 3/32: Sum of radii = 0.7963\nStep 4/32: Sum of radii = 1.0068\nStep 5/32: Sum of radii = 1.0684\nStep 6/32: Sum of radii = 1.1301\nStep 7/32: Sum of radii = 1.1918\nStep 8/32: Sum of radii = 1.2534\nStep 9/32: Sum of radii = 1.5131\nStep 10/32: Sum of radii = 1.5515\nStep 11/32: Sum of radii = 1.5898\nStep 12/32: Sum of radii = 1.7420\nStep 13/32: Sum of radii = 1.8016\nStep 14/32: Sum of radii = 1.9023\nStep 15/32: Sum of radii = 1.9458\nStep 16/32: Sum of radii = 2.0381\nStep 17/32: Sum of radii = 2.0734\nStep 18/32: Sum of radii = 2.1087\nStep 19/32: Sum of radii = 2.1425\nStep 20/32: Sum of radii = 2.2278\nStep 21/32: Sum of radii = 2.3303\nStep 22/32: Sum of radii = 2.3552\nStep 23/32: Sum of radii = 2.3801\nStep 24/32: Sum of radii = 2.4085\nStep 25/32: Sum of radii = 2.4368\nStep 26/32: Sum of radii = 2.5076\nStep 27/32: Sum of radii = 2.5353\nStep 28/32: Sum of radii = 7.5130\nStep 29/32: Sum of radii = 8.4949\nStep 30/32: Sum of radii = 2.7065\nStep 31/32: Sum of radii = 2.7772\nStep 32/32: Sum of radii = 2.8376\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.837599",
+      "evaluation_timestamp": 1760908034.1465416,
+      "evaluation_datetime": "2025-10-20T05:07:14.146544"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.837599351895757,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760908034.1689544,
+    "version_notified": "original",
+    "message": "Your research submission 'Sequential Constrained Optimization' (ID: 681) has been evaluated.\n\n**Score:** 2.837599351895757\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.837599\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1/32: Sum of radii = 0.5000\nStep 2/32: Sum of radii = 0.5858\nStep 3/32: Sum of radii = 0.7963\nStep 4/32: Sum of radii = 1.0068\nStep 5/32: Sum of radii = 1.0684\nStep 6/32: Sum of radii = 1.1301\nStep 7/32: Sum of radii = 1.1918\nStep 8/32: Sum of radii = 1.2534\nStep 9/32: Sum of radii = 1.5131\nStep 10/32: Sum of radii = 1.5515\nStep 11/32: Sum of radii = 1.5898\nStep 12/32: Sum of radii = 1.7420\nStep 13/32: Sum of radii = 1.8016\nStep 14/32: Sum of radii = 1.9023\nStep 15/32: Sum of radii = 1.9458\nStep 16/32: Sum of radii = 2.0381\nStep 17/32: Sum of radii = 2.0734\nStep 18/32: Sum of radii = 2.1087\nStep 19/32: Sum of radii = 2.1425\nStep 20/32: Sum of radii = 2.2278\nStep 21/32: Sum of radii = 2.3303\nStep 22/32: Sum of radii = 2.3552\nStep 23/32: Sum of radii = 2.3801\nStep 24/32: Sum of radii = 2.4085\nStep 25/32: Sum of radii = 2.4368\nStep 26/32: Sum of radii = 2.5076\nStep 27/32: Sum of radii = 2.5353\nStep 28/32: Sum of radii = 7.5130\nStep 29/32: Sum of radii = 8.4949\nStep 30/32: Sum of radii = 2.7065\nStep 31/32: Sum of radii = 2.7772\nStep 32/32: Sum of radii = 2.8376\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

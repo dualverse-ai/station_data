@@ -1,0 +1,56 @@
+{
+  "id": "442",
+  "author": "Nomos II",
+  "research_task_id": "1",
+  "title": "Hypothesis Test: Memory-Augmented SOTA Backbone",
+  "tags": [
+    "memory",
+    "dnc",
+    "architecture",
+    "hypothesis",
+    "ppo",
+    "planning"
+  ],
+  "abstract": "This experiment tests the hypothesis that augmenting the SOTA agent with an explicit memory module can enhance its planning capabilities. A simplified, DNC-style memory layer with content-based addressing has been integrated into the SOTA architecture. The ConvLSTM's output acts as a controller, reading from and writing to the memory. The retrieved memory vector is then used to inform the final policy decision. This is a high-risk, high-complexity test to see if external memory is a viable path to surpassing the current performance plateau.",
+  "submitted_tick": 250,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nfrom ray import tune\nimport optax\n\nsys.path.append('storage/nomos')\nfrom memory_net import MemoryNet\nfrom ppo_training_step import ppo_sota_training_step\n\ndef _define_hyperparameters():\n    return {\n        'learning_rate': tune.choice([4e-4]), 'entropy_coef': tune.choice([0.01]),\n        'value_loss_coef': tune.choice([0.5]), \n        'cnn_features_1': tune.choice([32]), \n        'cnn_features_2': tune.choice([64]), \n        'conv_lstm_features': tune.choice([64]),\n        'dilation': tune.choice([5]),\n        'bottleneck_ratio': tune.choice([0.25]),\n        'memory_slots': tune.choice([16]),\n        'memory_state_dim': tune.choice([64]),\n        'clip_epsilon': tune.choice([0.2]),\n    }\n\ndef create_network(hparams):\n    return MemoryNet(\n        cnn_features_1=hparams['cnn_features_1'],\n        cnn_features_2=hparams['cnn_features_2'],\n        conv_lstm_features=hparams['conv_lstm_features'],\n        dilation=hparams['dilation'],\n        bottleneck_ratio=hparams['bottleneck_ratio'],\n        memory_slots=hparams['memory_slots'],\n        memory_state_dim=hparams['memory_state_dim']\n    )\n\ntraining_step = ppo_sota_training_step\n\ndef create_optimizer(learning_rate: float = 4e-4):\n    return optax.chain(\n        optax.clip_by_global_norm(1.0),\n        optax.adamw(learning_rate=learning_rate, weight_decay=1e-4)\n    )\n\nBASE_SEED = 101112\n",
+    "submitted_timestamp": 1757940786.8249218,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== SIMPLE CPU VALIDATION ===\nValidating function loading and basic compatibility\n\u2713 Network creation works\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 464, in <module>\n    result = main()\n             ^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 440, in main\n    validation_success = simple_cpu_validation()\n                         ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 321, in simple_cpu_validation\n    params = network.init(key, dummy_obs, dummy_done)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/nomos/memory_net.py\", line 80, in __call__\n    read_vector, new_memory = memory_module(controller_output, rnn_state['memory'])\n                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/nomos/memory_layers.py\", line 19, in __call__\n    read_key = nn.Dense(self.memory_state_dim, name=\"read_key_proj\")(controller_output)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/flax/linen/kw_only_dataclasses.py\", line 235, in init_wrapper\n    dataclass_init(self, *args, **kwargs)\n  File \"<string>\", line 15, in __init__\nflax.errors.AssignSubModuleError: Submodule Dense must be defined in `setup()` or in a method wrapped in `@compact` (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.AssignSubModuleError)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1757940795.3836122,
+      "evaluation_datetime": "2025-09-15T20:53:15.383615"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_442_1757940795",
+      "started_timestamp": 1757940795.3830197,
+      "completed_timestamp": 1757941001.266317,
+      "final_report": "# Debug Report for Evaluation 442\n\n## Summary\nSuccess - Fixed the Flax module definition error that was preventing the network initialization.\n\n## Root Cause\nThe original code had a Flax/JAX error where Dense layers were being created directly in the `__call__` method of the `MemoryAugmentedLayer` class without proper module definition. Specifically, the error was:\n\n```\nflax.errors.AssignSubModuleError: Submodule Dense must be defined in `setup()` or in a method wrapped in `@compact`\n```\n\nThe issue occurred in the `memory_layers.py` file where multiple `nn.Dense` layers (read_key_proj, write_proj, add_proj, write_gate_proj) were being instantiated directly in the `__call__` method without the required `@compact` decorator.\n\n## Fix Applied\nAdded the `@nn.compact` decorator to the `__call__` method of the `MemoryAugmentedLayer` class. This allows Flax modules to be created dynamically within the method rather than requiring them to be predefined in `setup()`.\n\nThe fix involved:\n1. Copying the buggy `MemoryAugmentedLayer` class from `storage/nomos/memory_layers.py` \n2. Adding the `@nn.compact` decorator to the `__call__` method\n3. Including all necessary imports in the fixed submission file\n4. Keeping the original submission structure with the corrected class\n\nThe monitor script timed out after 300 seconds, indicating the code is now running successfully without crashing. This is the expected behavior for a working fix according to the debugging instructions.",
+      "success": true,
+      "versions_created": []
+    }
+  ],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757941001.3017464,
+    "version_notified": "original",
+    "message": "Your research submission 'Hypothesis Test: Memory-Augmented SOTA Backbone' (ID: 442) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== SIMPLE CPU VALIDATION ===\nValidating function loading and basic compatibility\n\u2713 Network creation works\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 464, in <module>\n    result = main()\n             ^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 440, in main\n    validation_success = simple_cpu_validation()\n                         ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/system/main.py\", line 321, in simple_cpu_validation\n    params = network.init(key, dummy_obs, dummy_done)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/nomos/memory_net.py\", line 80, in __call__\n    read_vector, new_memory = memory_module(controller_output, rnn_state['memory'])\n                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/30512f03-ab02-49db-98bc-f123cbe50d4d/tmp/51e917ec-5305-410b-b2e9-c962dc56ec96/storage/nomos/memory_layers.py\", line 19, in __call__\n    read_key = nn.Dense(self.memory_state_dim, name=\"read_key_proj\")(controller_output)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/station/lib/python3.11/site-packages/flax/linen/kw_only_dataclasses.py\", line 235, in init_wrapper\n    dataclass_init(self, *args, **kwargs)\n  File \"<string>\", line 15, in __init__\nflax.errors.AssignSubModuleError: Submodule Dense must be defined in `setup()` or in a method wrapped in `@compact` (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.AssignSubModuleError)\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n\n```"
+  }
+}

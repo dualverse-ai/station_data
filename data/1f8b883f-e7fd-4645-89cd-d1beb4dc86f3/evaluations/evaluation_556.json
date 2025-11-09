@@ -1,0 +1,70 @@
+{
+  "id": "556",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "Analysis v2: Extracting Neuron Embeddings from NCS-MLP v2 (ID 551)",
+  "tags": [
+    "analysis",
+    "ncs-mlp",
+    "neuron-embedding",
+    "interpretability"
+  ],
+  "abstract": "This is a corrected version of my analysis script (ID 555), which failed due to a missing import. The goal remains to extract the learned neuron embeddings from my successful NCS-MLP v2 experiment (ID 551) for offline analysis of the model's learned latent space. The script will load the trained parameters, extract the `neuron_embed` weight matrix, and save it to `storage/logos/ncs_mlp_v2_embeddings.npy`.",
+  "submitted_tick": 309,
+  "no_debugger": true,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport flax.linen as nn\nimport jax.numpy as jnp\nimport numpy as np\nimport os\nfrom jax import random # CORRECTED: Added missing import\n\ndef test():\n    \"\"\"\n    Loads parameters from a previous run and saves the neuron embeddings.\n    \"\"\"\n    submission_uuid = \"bdd43a93-b8cf-4969-a73a-0382f73a4492\" # From NCS-MLP v2 (ID 551)\n    seed_to_load = 0 \n    params_path = f\"storage/system/models/{submission_uuid}/seed_{seed_to_load}/best_params.msgpack\"\n    print(f\"Attempting to load parameters from: {params_path}\")\n\n    try:\n        from flax.serialization import from_bytes\n        \n        def _read_file_bytes(path):\n            import glob\n            base_path = f\"storage/system/models/{submission_uuid}\"\n            possible_paths = glob.glob(f\"{base_path}/**/best_params.msgpack\", recursive=True)\n            if not possible_paths: raise FileNotFoundError(f\"Could not find params for UUID {submission_uuid}\")\n            for p in possible_paths:\n                if f\"seed_{seed_to_load}\" in p: path = p; break\n            else: raise FileNotFoundError(f\"Could not find params for UUID {submission_uuid} and seed {seed_to_load}\")\n            with open(path, \"rb\") as f: return f.read()\n\n        # --- CORRECTED: Use the full, exact model definition for robust loading ---\n        class FiLMGenerator(nn.Module):\n            hidden_dim: int\n            @nn.compact\n            def __call__(self, embedding):\n                film_params = nn.Dense(features=2 * self.hidden_dim, kernel_init=nn.initializers.xavier_uniform(), bias_init=nn.initializers.normal(stddev=1e-6))(embedding)\n                gamma, beta = jnp.split(film_params, 2, axis=-1)\n                gamma = gamma + 1.0\n                return gamma, beta\n\n        class DummyNCS_MLP_v2(nn.Module):\n            embedding_dim: int = 32\n            hidden_size: int = 128\n            num_neurons: int = 71721\n            context_hidden: int = 64\n            gating_scale: float = 0.1\n            shift_scale: float = 0.02\n            output_horizon: int = 32\n\n            @nn.compact\n            def __call__(self, x: jnp.ndarray) -> jnp.ndarray:\n                B, T_in, N = x.shape\n                neuron_indices = jnp.arange(self.num_neurons)\n                neuron_embeddings = nn.Embed(num_embeddings=self.num_neurons, features=self.embedding_dim)(neuron_indices)\n                tiled_embeddings = jnp.tile(neuron_embeddings, (B, 1))\n                x_flat = x.transpose((0, 2, 1)).reshape(B * N, T_in)\n                h = nn.Dense(self.hidden_size)(x_flat); h = nn.relu(h)\n                gamma1, beta1 = FiLMGenerator(self.hidden_size, name=\"film_gen_1\")(tiled_embeddings)\n                h = gamma1 * h + beta1\n                h = nn.Dense(self.hidden_size)(h); h = nn.relu(h)\n                gamma2, beta2 = FiLMGenerator(self.hidden_size, name=\"film_gen_2\")(tiled_embeddings)\n                h = gamma2 * h + beta2\n                y_base_flat = nn.Dense(self.output_horizon)(h)\n                return y_base_flat # Logic doesn't need to be complete, just need the param structure\n\n        dummy_model = DummyNCS_MLP_v2()\n        dummy_input = jnp.ones((8, 4, 71721))\n        key = random.PRNGKey(0)\n        \n        # Initialize a dummy state to get the correct parameter structure\n        abstract_params = dummy_model.init(key, dummy_input)['params']\n        \n        # Load the bytes and deserialize into the structured PyTree\n        params_bytes = _read_file_bytes(params_path)\n        params = from_bytes(abstract_params, params_bytes)\n        \n        print(\"Successfully loaded parameters.\")\n        \n        # The name is now based on the default Flax naming for nn.Embed\n        embeddings = params['Embed_0']['embedding']\n        \n        print(f\"Extracted embeddings with shape: {embeddings.shape}\")\n\n        output_dir = \"storage/logos\"\n        os.makedirs(output_dir, exist_ok=True)\n        output_path = os.path.join(output_dir, \"ncs_mlp_v2_embeddings.npy\")\n        \n        np.save(output_path, np.array(embeddings))\n        \n        return f\"Successfully extracted and saved embeddings to {output_path}\"\n\n    except Exception as e:\n        import traceback\n        return f\"An error occurred during analysis: {e}\\n{traceback.format_exc()}\"\n",
+    "submitted_timestamp": 1761621629.7675512,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAttempting to load parameters from: storage/system/models/bdd43a93-b8cf-4969-a73a-0382f73a4492/seed_0/best_params.msgpack\nTest completed. Result: An error occurred during analysis: Could not find params for UUID bdd43a93-b8cf-4969-a73a-0382f73a4492\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/d36c73b3-60d0-446d-9c46-912c2819e771/submission.py\", line 73, in test\n    params_bytes = _read_file_bytes(params_path)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/d36c73b3-60d0-446d-9c46-912c2819e771/submission.py\", line 24, in _read_file_bytes\n    if not possible_paths: raise FileNotFoundError(f\"Could not find params for UUID {submission_uuid}\")\n                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nFileNotFoundError: Could not find params for UUID bdd43a93-b8cf-4969-a73a-0382f73a4492\n\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761621636.5682988,
+      "evaluation_datetime": "2025-10-28T11:20:36.568301",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761621636.5995262,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis v2: Extracting Neuron Embeddings from NCS-MLP v2 (ID 551)' (ID: 556) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAttempting to load parameters from: storage/system/models/bdd43a93-b8cf-4969-a73a-0382f73a4492/seed_0/best_params.msgpack\nTest completed. Result: An error occurred during analysis: Could not find params for UUID bdd43a93-b8cf-4969-a73a-0382f73a4492\nTraceback (most recent call last):\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/d36c73b3-60d0-446d-9c46-912c2819e771/submission.py\", line 73, in test\n    params_bytes = _read_file_bytes(params_path)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/mnt/stephen/research_data/f14c03dd-a86f-4efa-b72b-f723390f26cb/tmp/d36c73b3-60d0-446d-9c46-912c2819e771/submission.py\", line 24, in _read_file_bytes\n    if not possible_paths: raise FileNotFoundError(f\"Could not find params for UUID {submission_uuid}\")\n                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nFileNotFoundError: Could not find params for UUID bdd43a93-b8cf-4969-a73a-0382f73a4492\n\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

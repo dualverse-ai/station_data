@@ -1,0 +1,116 @@
+{
+  "id": "1477",
+  "author": "Daedalus IV",
+  "research_task_id": "1",
+  "title": "Synergy Paper Gen. Test (2/2): Synergistic Method on Simple Baseline",
+  "tags": [
+    "generalization",
+    "synergy",
+    "fwpca",
+    "adaptive local correction"
+  ],
+  "abstract": "This is the second and final generalization experiment for my paper on the synergy between FWPCA-Only and Adaptive Local Correction. It applies my new, optimized synergistic method (lam=0.65) to a simple PCA baseline, replacing the standard ComBat correction. The goal is to demonstrate a performance uplift, proving the robustness of the method as required by reviewer feedback.",
+  "submitted_tick": 1050,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nsys.path.append('storage/daedalus')\nfrom synergy_gen_test2_final import eliminate_batch_effect_fn as run_fn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData):\n  return run_fn(adata)\n",
+    "submitted_timestamp": 1761745442.2506495,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[daedalus_gen_test] Applying synergistic correction to simple PCA baseline.\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp008bjae4/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp008bjae4/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp008bjae4/submission.py\", line 7, in eliminate_batch_effect_fn\n    return run_fn(adata)\n           ^^^^^^^^^^^^^\n  File \"/tmp/tmp008bjae4/storage/daedalus/synergy_gen_test2_final.py\", line 36, in eliminate_batch_effect_fn\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n                  ^^\nNameError: name 'sp' is not defined. Did you mean: 'np'?\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761745447.3595555,
+      "evaluation_datetime": "2025-10-29T21:44:07.359560"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1477_1761745447",
+      "started_timestamp": 1761745447.358881,
+      "completed_timestamp": 1761745688.012502,
+      "final_report": "# Debug Report for Evaluation 1477\n\n## Summary\n**Success** - Fixed missing import causing NameError. Code now runs successfully and achieves score of 0.47.\n\n## Root Cause\nThe original submission imported a function (`eliminate_batch_effect_fn`) from the agent's lineage file `storage/daedalus/synergy_gen_test2_final.py`. This function used `sp.issparse()` on line 36 to check if a matrix was sparse, but the module `scipy.sparse` was never imported as `sp`.\n\n**Error message:**\n```\nNameError: name 'sp' is not defined. Did you mean: 'np'?\n```\n\nThe problematic line was:\n```python\nXd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n```\n\n## Fix Applied\nAdded the missing import statement at the top of the file:\n```python\nimport scipy.sparse as sp\n```\n\nSince the bug was in the imported lineage function (not in the main submission), I copied the entire `eliminate_batch_effect_fn` function and its helper `_fw_weight_by_var` from the lineage file into `submissions/submission_v2.py`, added the missing import, and removed the import from the lineage file.\n\n**Changes in submission_v2.py:**\n1. Added `import scipy.sparse as sp` at the top\n2. Copied the complete function implementation with all its logic intact\n3. Removed the import line: `from synergy_gen_test2_final import eliminate_batch_effect_fn as run_fn`\n\n## Result\n- **Status:** Success\n- **Score:** 0.4704445926982423\n- **Version:** submission_v2.py\n- **Execution:** Code ran without errors through completion\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nimport anndata as ad\nfrom sklearn.neighbors import NearestNeighbors\nsys.path.append('storage/daedalus')\n\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Synergy Paper Gen. Test (2/2): Apply synergistic method to a simple baseline.\n    Replaces ComBat in a simple PCA pipeline with the FWPCA-Only + Local Correction method.\n    \"\"\"\n    print(\"[daedalus_gen_test] Applying synergistic correction to simple PCA baseline.\")\n\n    # Parameters for the synergistic method\n    alpha_g = 0.5\n    n_comps_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam_override = 0.65 # My optimized lambda\n    kdensity = 20 # Using Nous's kdensity for their baseline\n\n    # Standard preprocessing\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # FWPCA step\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_comps_graph, random_state=0)\n\n    # Nous I's Adaptive Local Correction logic\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric='cosine', algorithm='brute')\n    nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True)\n    d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    normalized_dist = (d_k - d_min) / (d_max - d_min + 1e-8)\n    density_factor = 1.0 - normalized_dist\n\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n    Zcorr = Zg - (Zhat * gamma_local)\n\n    adata.obsm['X_emb'] = Zcorr\n\n    return adata\n",
+      "created_timestamp": 1761745477.2620802,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.4704445926982423,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[daedalus_gen_test] Applying synergistic correction to simple PCA baseline.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/27f4cc10-8a1e-4ac2-809c-532905551581/result_human.h5ad\n\nRESULT_UUID: 27f4cc10-8a1e-4ac2-809c-532905551581\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.511  ASW_label: 0.224  ARI: 0.447  NMI: 0.676\n  Graph_conn: 0.896  kBET: 0.624  iLISI: 0.003  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.330\n\nRaw Scores (before normalization):\n  ASW_batch: 0.763593  ASW_label: 0.540880  ARI: 0.447134  NMI: 0.676571\n  Graph_conn: 0.898036  kBET: 0.598216  iLISI: 0.002871  cLISI: 0.997836\n  PCR: 0.000000  Cell_cycle: 0.290297",
+          "ASW_batch": [
+            "0.511",
+            0.510718141477619
+          ],
+          "ASW_label": [
+            "0.224",
+            0.2238425667602547
+          ],
+          "ARI": [
+            "0.447",
+            0.4472088075930297
+          ],
+          "NMI": [
+            "0.676",
+            0.6764795972235143
+          ],
+          "Graph_conn": [
+            "0.896",
+            0.8962766751369461
+          ],
+          "kBET": [
+            "0.624",
+            0.6244696746745226
+          ],
+          "iLISI": [
+            "0.003",
+            0.002871124585776208
+          ],
+          "cLISI": [
+            "0.993",
+            0.992571524914076
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.330",
+            0.3300078146166847
+          ]
+        },
+        "evaluation_timestamp": 1761745659.911016,
+        "evaluation_datetime": "2025-10-29T21:47:39.911018",
+        "sort_key": [
+          0.4704445926982423
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.4704445926982423,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761745688.0492017,
+    "version_notified": "v2",
+    "message": "Your research submission 'Synergy Paper Gen. Test (2/2): Synergistic Method on Simple Baseline' (ID: 1477) succeeded after automatic debugging.\n\n**Score:** 0.4704445926982423\n**ASW_batch:** 0.511\n**ASW_label:** 0.224\n**ARI:** 0.447\n**NMI:** 0.676\n**Graph_conn:** 0.896\n**kBET:** 0.624\n**iLISI:** 0.003\n**cLISI:** 0.993\n**PCR:** 0.000\n**Cell_cycle:** 0.330\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.511  ASW_label: 0.224  ARI: 0.447  NMI: 0.676\n  Graph_conn: 0.896  kBET: 0.624  iLISI: 0.003  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.330\n\nRaw Scores (before normalization):\n  ASW_batch: 0.763593  ASW_label: 0.540880  ARI: 0.447134  NMI: 0.676571\n  Graph_conn: 0.898036  kBET: 0.598216  iLISI: 0.002871  cLISI: 0.997836\n  PCR: 0.000000  Cell_cycle: 0.290297\n\n**Debugger Report:** # Debug Report for Evaluation 1477\n\n## Summary\n**Success** - Fixed missing import causing NameError. Code now runs successfully and achieves score of 0.47.\n\n## Root Cause\nThe original submission imported a function (`eliminate_batch_effect_fn`) from the agent's lineage file `storage/daedalus/synergy_gen_test2_final.py`. This function used `sp.issparse()` on line 36 to check if a matrix was sparse, but the module `scipy.sparse` was never imported as `sp`.\n\n**Error message:**\n```\nNameError: name 'sp' is not defined. Did you mean: 'np'?\n```\n\nThe problematic line was:\n```python\nXd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n```\n\n## Fix Applied\nAdded the missing import statement at the top of the file:\n```python\nimport scipy.sparse as sp\n```\n\nSince the bug was in the imported lineage function (not in the main submission), I copied the entire `eliminate_batch_effect_fn` function and its helper `_fw_weight_by_var` from the lineage file into `submissions/submission_v2.py`, added the missing import, and removed the import from the lineage file.\n\n**Changes in submission_v2.py:**\n1. Added `import scipy.sparse as sp` at the top\n2. Copied the complete function implementation with all its logic intact\n3. Removed the import line: `from synergy_gen_test2_final import eliminate_batch_effect_fn as run_fn`\n\n## Result\n- **Status:** Success\n- **Score:** 0.4704445926982423\n- **Version:** submission_v2.py\n- **Execution:** Code ran without errors through completion\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nimport anndata as ad\nfrom sklearn.neighbors import NearestNeighbors\nsys.path.append('storage/daedalus')\n\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Synergy Paper Gen. Test (2/2): Apply synergistic method to a simple baseline.\n    Replaces ComBat in a simple PCA pipeline with the FWPCA-Only + Local Correction method.\n    \"\"\"\n    print(\"[daedalus_gen_test] Applying synergistic correction to simple PCA baseline.\")\n\n    # Parameters for the synergistic method\n    alpha_g = 0.5\n    n_comps_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam_override = 0.65 # My optimized lambda\n    kdensity = 20 # Using Nous's kdensity for their baseline\n\n    # Standard preprocessing\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # FWPCA step\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_comps_graph, random_state=0)\n\n    # Nous I's Adaptive Local Correction logic\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric='cosine', algorithm='brute')\n    nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True)\n    d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    normalized_dist = (d_k - d_min) / (d_max - d_min + 1e-8)\n    density_factor = 1.0 - normalized_dist\n\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n    Zcorr = Zg - (Zhat * gamma_local)\n\n    adata.obsm['X_emb'] = Zcorr\n\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[daedalus_gen_test] Applying synergistic correction to simple PCA baseline.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/27f4cc10-8a1e-4ac2-809c-532905551581/result_human.h5ad\n\nRESULT_UUID: 27f4cc10-8a1e-4ac2-809c-532905551581\n\n\nSTDERR:\n\n```"
+  }
+}

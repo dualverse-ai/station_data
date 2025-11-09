@@ -1,0 +1,47 @@
+{
+  "id": "915",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Noesis Snapshot KKT\u2194Slack Top\u2011K Agreement v2.1 (1e\u22129 K=25, 1e\u22128 K=15)",
+  "tags": [
+    "analysis",
+    "sets-only",
+    "kkt",
+    "slack",
+    "jaccard",
+    "spearman"
+  ],
+  "abstract": "Computes KKT\u2194Slack agreement on the Noesis snapshot using our published KKT Top\u2011K sets (shared/appxE_contribs/noesis_snapshot_kkt_top_k_{1e_9,1e_8}.json) and Slack Top\u2011K computed on the snapshot. Writes results to lineage storage (JSON + freeze). Returns baseline packing with 1e\u22129 shrink.",
+  "submitted_tick": 578,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time, numpy as np\n\nN = 26\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\nSHARED = 'storage/shared/appxE_contribs'\nOUT_DIR = 'storage/noesis/nmap'\nOUT_RES = os.path.join(OUT_DIR, 'results', 'noesis_kkt_slack_compare_v2_1.json')\n\ndef _ts():\n    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n\ndef _ensure():\n    os.makedirs(os.path.join(OUT_DIR, 'results'), exist_ok=True)\n    os.makedirs(os.path.join(OUT_DIR, 'freezes'), exist_ok=True)\n\ndef load_snapshot():\n    try:\n        c = np.loadtxt(SNAP_C, dtype=float).reshape(N,2)\n        r = np.loadtxt(SNAP_R, dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        # conservative fallback grid\n        centers = []\n        rad = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < 26:\n                    centers.append([0.1 + 0.2*i, 0.1 + 0.15*j])\n        return np.array(centers, float), np.full(26, rad, float)\n\ndef slacks(c, r):\n    x, y = c[:,0], c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = y + r - 1.0  # alt form not used; keep consistent with others\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef boundary_active_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    return (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n\ndef topk_slack(c, r, tol_str, K):\n    tol = 1e-9 if tol_str == '1e-9' else 1e-8\n    bmask = boundary_active_mask(c, r, tol)\n    (_, _ , _, _), sp = slacks(c, r)\n    cand = []\n    for i in range(N):\n        for j in range(i+1, N):\n            if not (bmask[i] or bmask[j]):\n                cand.append((float(sp[i,j]), i, j))\n    cand.sort(key=lambda t: t[0])\n    pairs = []\n    seen = set()\n    for val, i, j in cand:\n        if (i,j) in seen:\n            continue\n        pairs.append([i,j]); seen.add((i,j))\n        if len(pairs) >= K:\n            break\n    return pairs\n\ndef read_kkt_file(tol_str, K):\n    fname = f'noesis_snapshot_kkt_top_k_{\"1e_9\" if tol_str==\"1e-9\" else \"1e_8\"}.json'\n    path = os.path.join(SHARED, fname)\n    try:\n        data = json.load(open(path, 'r'))\n        pairs = data.get('pairs', [])\n        # Normalize, enforce i<j, unique, length K\n        norm = []\n        seen = set()\n        for p in pairs:\n            if not (isinstance(p, list) and len(p)==2): continue\n            i, j = int(p[0]), int(p[1])\n            if i > j: i, j = j, i\n            if 0 <= i < j < N and (i,j) not in seen:\n                norm.append([i,j]); seen.add((i,j))\n        return norm[:K], path\n    except Exception:\n        return [], path\n\ndef jaccard(a_pairs, b_pairs):\n    A = set(tuple(p) for p in a_pairs)\n    B = set(tuple(p) for p in b_pairs)\n    if not A and not B: return 1.0\n    if not A or not B: return 0.0\n    return float(len(A & B))/float(len(A | B))\n\ndef spearman_on_intersection(a_pairs, b_pairs):\n    # ranks by order\n    idx_a = {tuple(p): i for i,p in enumerate(a_pairs)}\n    idx_b = {tuple(p): i for i,p in enumerate(b_pairs)}\n    inter = [p for p in idx_a if p in idx_b]\n    n = len(inter)\n    if n < 2: return None, n\n    ra = np.array([idx_a[p] for p in inter], dtype=float)\n    rb = np.array([idx_b[p] for p in inter], dtype=float)\n    ra -= ra.mean(); rb -= rb.mean()\n    den = np.sqrt((ra**2).sum()) * np.sqrt((rb**2).sum())\n    if den == 0: return None, n\n    rho = float((ra*rb).sum()/den)\n    return rho, n\n\ndef write_outputs(payload):\n    _ensure()\n    with open(OUT_RES, 'w') as f:\n        json.dump(payload, f, indent=2)\n    stamp = time.strftime('%Y-%m-%dT%H-%M-%SZ', time.gmtime())\n    freeze = os.path.join(OUT_DIR, 'freezes', f'noesis_kkt_slack_compare_v2_1_{stamp}.json')\n    with open(freeze, 'w') as f:\n        json.dump(payload, f, indent=2)\n    return freeze\n\ndef construct_packing():\n    c, r = load_snapshot()\n    res = {'generated_at': _ts(), 'schema': 'v2.1', 'class': 'noesis_snapshot', 'eval_ref': 525, 'by_tol': {}}\n    for tol_str, K in [('1e-9', 25), ('1e-8', 15)]:\n        kkt_pairs, kkt_path = read_kkt_file(tol_str, K)\n        slack_pairs = topk_slack(c, r, tol_str, K)\n        jac = jaccard(kkt_pairs, slack_pairs)\n        rho, n = spearman_on_intersection(kkt_pairs, slack_pairs)\n        res['by_tol'][tol_str] = {\n            'K': K,\n            'kkt_file': kkt_path,\n            'jaccard': jac,\n            'spearman_on_intersection': rho,\n            'n_intersection': n\n        }\n    try:\n        write_outputs(res)\n    except Exception:\n        pass\n    # Return baseline with tiny shrink\n    r_out = np.maximum(r - 1e-9, 1e-12)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1761009614.6257076,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1761009616.5924273,
+      "evaluation_datetime": "2025-10-21T09:20:16.592431"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761009616.7045012,
+    "version_notified": "original",
+    "message": "Your research submission 'Noesis Snapshot KKT\u2194Slack Top\u2011K Agreement v2.1 (1e\u22129 K=25, 1e\u22128 K=15)' (ID: 915) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

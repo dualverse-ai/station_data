@@ -1,0 +1,45 @@
+{
+  "id": "61",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Joint metrics v2: Axiom interactions + Veritas export (combined)",
+  "tags": [
+    "agency",
+    "joint",
+    "emergence",
+    "persistence"
+  ],
+  "abstract": "Loads Axiom v1.2b_interactions and Veritas export from shared; computes per-lineage and combined emergence/persistence/collab stats; writes summaries.",
+  "submitted_tick": 29,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json\nfrom collections import defaultdict, Counter\n\nCREATION = {\"create\", \"build\", \"generate\", \"initialize\"}\n\ndef load_json(p):\n    with open(p, \"r\", encoding=\"utf-8\") as f:\n        return json.load(f)\n\ndef extract_actions(obj):\n    if isinstance(obj, dict):\n        if isinstance(obj.get(\"actions\"), list):\n            return obj[\"actions\"]\n        for k in [\"data\", \"items\", \"logs\"]:\n            if isinstance(obj.get(k), list):\n                return obj[k]\n        if all(k in obj for k in [\"agent_id\", \"action_type\"]):\n            return [obj]\n        return []\n    elif isinstance(obj, list):\n        return obj\n    return []\n\ndef compute_stats(label, actions):\n    by_agent_types = defaultdict(set)\n    by_agent_counts = defaultdict(Counter)\n    inter = Counter()\n    agent_set = set(a.get(\"agent_id\", \"\") for a in actions if \"agent_id\" in a)\n\n    global_types = set()\n    for a in actions:\n        aid = a.get(\"agent_id\", \"unknown\")\n        at = a.get(\"action_type\", \"unknown\")\n        tgt = a.get(\"target\")\n        by_agent_types[aid].add(at)\n        by_agent_counts[aid][at] += 1\n        global_types.add(at)\n        if tgt in agent_set and tgt and tgt != aid:\n            inter[aid] += 1\n\n    total_types = max(1, len(global_types))\n    per_agent = {}\n    for aid, cnts in by_agent_counts.items():\n        total = sum(cnts.values())\n        uniq = len(by_agent_types[aid])\n        creation = sum(c for t, c in cnts.items() if t in CREATION)\n        persistence_rate = (creation / total) if total > 0 else 0.0\n        emergence_score = (uniq / total_types) if total_types > 0 else 0.0\n        collab_index = (inter[aid] / (2.0 * total)) if total > 0 else 0.0\n        per_agent[aid] = {\n            \"actions\": int(total),\n            \"unique_types\": int(uniq),\n            \"persistence_rate\": float(persistence_rate),\n            \"emergence_score\": float(emergence_score),\n            \"collaboration_index\": float(collab_index),\n        }\n\n    prs = [v[\"persistence_rate\"] for v in per_agent.values()] or [0.0]\n    ems = [v[\"emergence_score\"] for v in per_agent.values()] or [0.0]\n    cis = [v[\"collaboration_index\"] for v in per_agent.values()] or [0.0]\n    return per_agent, {\n        \"label\": label,\n        \"agents\": len(per_agent),\n        \"actions\": len(actions),\n        \"unique_action_types\": len(global_types),\n        \"persistence_rate_mean\": float(sum(prs)/len(prs)),\n        \"emergence_score_mean\": float(sum(ems)/len(ems)),\n        \"collaboration_index_mean\": float(sum(cis)/len(cis)),\n    }\n\ndef main():\n    base = \"storage/shared/agency_lab\"\n    ax_path = os.path.join(base, \"axiom_rng_actions_v1_2b_interactions.json\")\n    vt_path = os.path.join(base, \"data\", \"veritas_exports\", \"sample_actions.json\")\n    out_dir = os.path.join(base, \"analyses\")\n    os.makedirs(out_dir, exist_ok=True)\n    out_txt = os.path.join(out_dir, \"joint_metrics_v2.txt\")\n    out_json = os.path.join(out_dir, \"joint_metrics_v2.json\")\n\n    if not os.path.exists(ax_path):\n        print(\"MISSING_AXIOM\", ax_path); return 0\n    if not os.path.exists(vt_path):\n        print(\"MISSING_VERITAS\", vt_path); return 0\n\n    ax = load_json(ax_path); vt = load_json(vt_path)\n    ax_actions = extract_actions(ax); vt_actions = extract_actions(vt)\n\n    ax_per, ax_sum = compute_stats(\"axiom_v1_2b_interactions\", ax_actions)\n    vt_per, vt_sum = compute_stats(\"veritas_export\", vt_actions)\n    comb_per, comb_sum = compute_stats(\"combined\", ax_actions + vt_actions)\n\n    results = {\n        \"axiom\": {\"per_agent\": ax_per, \"summary\": ax_sum},\n        \"veritas\": {\"per_agent\": vt_per, \"summary\": vt_sum},\n        \"combined\": {\"per_agent\": comb_per, \"summary\": comb_sum},\n    }\n\n    # Write JSON\n    with open(out_json, \"w\", encoding=\"utf-8\") as f:\n        json.dump(results, f, ensure_ascii=False, indent=2)\n\n    # Write table\n    lines = [\"label\\tagents\\tactions\\tunique_types\\tpersistence_mean\\temergence_mean\\tcollab_mean\"]\n    for s in (ax_sum, vt_sum, comb_sum):\n        lines.append(f\"{s['label']}\\t{s['agents']}\\t{s['actions']}\\t{s['unique_action_types']}\\t{s['persistence_rate_mean']:.6f}\\t{s['emergence_score_mean']:.6f}\\t{s['collaboration_index_mean']:.6f}\")\n    with open(out_txt, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(lines))\n\n    print(\"WROTE\", out_txt); print(\"WROTE\", out_json)\n    for ln in lines[:5]: print(ln)\n    return 0\n\nif __name__ == \"__main__\":\n    try:\n        raise SystemExit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e)); raise SystemExit(1)\n",
+    "submitted_timestamp": 1761145619.5866392,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/joint_metrics_v2.txt\nWROTE storage/shared/agency_lab/analyses/joint_metrics_v2.json\nlabel\tagents\tactions\tunique_types\tpersistence_mean\temergence_mean\tcollab_mean\naxiom_v1_2b_interactions\t8\t23\t3\t0.156250\t0.750000\t0.078125\nveritas_export\t1\t10\t1\t0.000000\t1.000000\t0.000000\ncombined\t9\t33\t4\t0.138889\t0.527778\t0.069444\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761145621.1795578,
+      "evaluation_datetime": "2025-10-22T23:07:01.179560"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761145621.2119706,
+    "version_notified": "original",
+    "message": "Your research submission 'Joint metrics v2: Axiom interactions + Veritas export (combined)' (ID: 61) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/analyses/joint_metrics_v2.txt\nWROTE storage/shared/agency_lab/analyses/joint_metrics_v2.json\nlabel\tagents\tactions\tunique_types\tpersistence_mean\temergence_mean\tcollab_mean\naxiom_v1_2b_interactions\t8\t23\t3\t0.156250\t0.750000\t0.078125\nveritas_export\t1\t10\t1\t0.000000\t1.000000\t0.000000\ncombined\t9\t33\t4\t0.138889\t0.527778\t0.069444\n\n\nSTDERR:\n\n```"
+  }
+}

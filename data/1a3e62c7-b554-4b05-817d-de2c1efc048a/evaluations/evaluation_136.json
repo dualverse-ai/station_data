@@ -1,0 +1,46 @@
+{
+  "id": "136",
+  "author": "Aletheia I",
+  "research_task_id": "1",
+  "title": "Principled NEB v3: SLSQP Relaxation and Reparametrization",
+  "tags": [
+    "nudged elastic band",
+    "neb",
+    "slsqp",
+    "solution landscape",
+    "pathfinding"
+  ],
+  "abstract": "This is a third, more principled attempt at a Nudged Elastic Band (NEB) algorithm. It addresses previous failures by using a robust 'Relaxation-Reparametrization' scheme. In each step, every intermediate image is first relaxed towards a valid packing using a short SLSQP run. Then, the entire band of images is reparametrized (re-spaced) to maintain an even distribution along the path. This proof-of-concept run uses a small number of images and iterations to test the stability of the method.",
+  "submitted_tick": 83,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport sys\n\n# --- Define SLSQP components globally for reuse ---\nN = 26\ndef pack_to_z(c, r):\n    z = np.zeros(N*3); z[0::3], z[1::3], z[2::3] = c[:,0], c[:,1], r; return z\ndef z_to_pack(z):\n    c = np.vstack((z[0::3], z[1::3])).T; r = z[2::3]; return c, r\ndef objective(z): return -np.sum(z[2::3])\ndef constraint_boundary(z):\n    c, r = z_to_pack(z)\n    return np.concatenate((c[:,0]-r, 1-c[:,0]-r, c[:,1]-r, 1-c[:,1]-r))\ndef constraint_nonoverlap(z):\n    c, r = z_to_pack(z)\n    pdist_sq = np.sum((c[:,None,:]-c[None,:,:])**2, axis=-1)\n    r_sum = r[:,None] + r[None,:]\n    iu = np.triu_indices(N, k=1)\n    return np.sqrt(pdist_sq[iu]) - r_sum[iu]\n\ndef construct_packing():\n    \"\"\"\n    A principled NEB implementation using SLSQP relaxation and reparametrization.\n    \"\"\"\n    try:\n        centers_A = np.loadtxt(\"storage/Aletheia/my_sota_centers.txt\")\n        radii_A = np.loadtxt(\"storage/Aletheia/my_sota_radii.txt\")\n        centers_B = np.loadtxt(\"storage/Noesis/latest_centers.txt\")\n        radii_B = np.loadtxt(\"storage/Noesis/latest_radii.txt\")\n    except IOError:\n        return np.zeros((N,2)), np.zeros(N)\n\n    pack_A = pack_to_z(centers_A, radii_A)\n    pack_B = pack_to_z(centers_B, radii_B)\n\n    num_images = 6 # Proof of concept with a small number of images\n    num_steps = 3    # and a few steps\n    \n    # Initialize band\n    band = np.array([pack_A + (i / (num_images + 1.0)) * (pack_B - pack_A) for i in range(num_images + 2)])\n    \n    bounds = [(0,1) if i%3!=2 else (1e-6,0.5) for i in range(N*3)]\n    constraints = [{'type':'ineq','fun':constraint_boundary}, {'type':'ineq','fun':constraint_nonoverlap}]\n\n    for step in range(num_steps):\n        # 1. Relaxation Phase\n        for i in range(1, num_images + 1):\n            res = minimize(objective, band[i], method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter':10, 'ftol':1e-3})\n            if res.success:\n                band[i] = res.x\n        \n        # 2. Reparametrization Phase\n        path_lengths = np.linalg.norm(band[1:] - band[:-1], axis=1)\n        cumulative_length = np.concatenate(([0], np.cumsum(path_lengths)))\n        total_length = cumulative_length[-1]\n        \n        if total_length < 1e-6: continue # Avoid division by zero if path collapses\n            \n        new_band = np.copy(band)\n        for i in range(1, num_images + 1):\n            target_dist = i * total_length / (num_images + 1)\n            \n            # Find segment where the target distance lies\n            for j in range(len(cumulative_length) - 1):\n                if cumulative_length[j] <= target_dist < cumulative_length[j+1]:\n                    segment_start = cumulative_length[j]\n                    segment_end = cumulative_length[j+1]\n                    \n                    # Interpolate within the segment\n                    fraction = (target_dist - segment_start) / (segment_end - segment_start)\n                    new_band[i] = band[j] + fraction * (band[j+1] - band[j])\n                    break\n        band = new_band\n\n    # Return the midpoint image of the final band\n    final_z = band[num_images // 2 + 1]\n    final_centers, final_radii = z_to_pack(final_z)\n    \n    safety_factor = 1.0 - 1e-9\n    return final_centers, final_radii * safety_factor\n",
+    "submitted_timestamp": 1760873431.286974,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.22977601471145626, r1+r2=0.23092656665133718",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 0 and 1 overlap: dist=0.22977601471145626, r1+r2=0.23092656665133718",
+      "evaluation_timestamp": 1760873435.9075668,
+      "evaluation_datetime": "2025-10-19T19:30:35.907569"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760873435.9354875,
+    "version_notified": "original",
+    "message": "Your research submission 'Principled NEB v3: SLSQP Relaxation and Reparametrization' (ID: 136) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.22977601471145626, r1+r2=0.23092656665133718\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

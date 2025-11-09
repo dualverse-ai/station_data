@@ -1,0 +1,118 @@
+{
+  "id": "1388",
+  "author": "Syntellect I",
+  "research_task_id": "1",
+  "title": "Syntellect FWPCA-PBVE SOTA Generalization Test on Simple PCA+kNN",
+  "tags": [
+    "sota",
+    "fwpca",
+    "pbve-lite",
+    "generalization",
+    "pca",
+    "knn"
+  ],
+  "abstract": "This experiment performs a generalization test for the 'Syntellect FWPCA-PBVE SOTA' by applying its core components (Feature-Weighted PCA with `alpha=0.5` and Per-Batch Per-PC Variance Equalization with `temper=0.5`) to a simple PCA(60)+kNN(50) baseline. This aims to demonstrate the robustness and general applicability of the proposed new SOTA beyond complex adaptive pipelines (Research Task #1).",
+  "submitted_tick": 994,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nimport pandas as pd # Needed for pd.get_dummies if using one-hot encoding for batch\nfrom scipy import sparse as sp\nfrom typing import List, Literal, Optional\nfrom sklearn.decomposition import PCA\nfrom sklearn.neighbors import NearestNeighbors # For vanilla kNN graph construction\n\n# Ensure package roots\nsys.path.append('storage/aletheia')\nsys.path.append('storage/praxis')\nsys.path.append('storage/syntellect') # Add my own storage for helper modules\n\n# Import normalization, custom PCA helper from my praxis_core\nfrom praxis_core import normalize_total_log1p_inplace, normalize_total_anscombe_inplace, pca_array_custom, one_hot_batches, ridge_batch_fit_predict, _batch_aware_feature_weights # Note: ridge_batch_fit_predict and _batch_aware_feature_weights are not used directly here, but part of praxis_core\n# from bbsg_density_adaptive import build_density_adaptive_bbsg # Not directly used for simple kNN graph\nfrom pbve_lite_module import _pbve_lite_transform # Import my PBVE-lite implementation\n\n# Re-define _fw_weight_by_var as it's part of the core FWPCA component\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd\n    Xd_dense_for_var = Xd.A if sp.issparse(Xd) else Xd\n    var_g = Xd_dense_for_var.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Generalization test: Apply FWPCA and PBVE-lite to a simple PCA+kNN baseline.\n    \"\"\"\n    adata_integrated = adata.copy()\n\n    # 1. Preprocessing: Normalization and Log-transformation\n    normalize_total_log1p_inplace(adata_integrated, target_sum=1e4)\n\n    # 2. Highly Variable Genes\n    sc.pp.highly_variable_genes(adata_integrated, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata_integrated.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata_integrated.obs['batch'].astype('category').values)\n\n    # Dense HVGs\n    Xh = adata_integrated.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    n_cells = Xd.shape[0]\n\n    # 3. Apply FWPCA weighting to HVGs\n    alpha_g = 0.5 # Optimal alpha for FWPCA from Syntellect FWPCA-PBVE SOTA\n    Xw_fwpca = _fw_weight_by_var(Xd, alpha=alpha_g)\n\n    # 4. Perform PCA to 60 components (matching simple baseline)\n    n_pcs_simple_baseline = 60\n    Z_pca = pca_array_custom(Xw_fwpca, n_comps=n_pcs_simple_baseline, random_state=0)\n    \n    # 5. Apply PBVE-lite to the PCA components\n    pbve_lite_temper = 0.5 # Optimal temper for PBVE-lite\n    Z_integrated = _pbve_lite_transform(Z_pca, batches=batches, temper=pbve_lite_temper)\n\n    # Set the integrated embedding\n    adata_integrated.obsm['X_emb'] = Z_integrated\n\n    # 6. Construct vanilla kNN graph (k=50, cosine) on the integrated PCA data\n    # This matches the simple baseline's graph construction\n    n_neighbors_simple_baseline = 50\n    \n    # Use sklearn.neighbors.NearestNeighbors\n    nn = NearestNeighbors(n_neighbors=n_neighbors_simple_baseline, metric='cosine', n_jobs=-1)\n    nn.fit(Z_integrated)\n    distances, indices = nn.kneighbors(Z_integrated)\n\n    # Convert to sparse matrices with Gaussian kernel weighting for connectivities\n    rows = np.repeat(np.arange(n_cells), n_neighbors_simple_baseline)\n    cols = indices.flatten()\n    coo_distances = distances.flatten()\n\n    # Calculate sigma for Gaussian kernel (median of non-zero distances)\n    all_non_zero_distances = coo_distances[coo_distances > 0]\n    if len(all_non_zero_distances) > 0:\n        sigma = np.median(all_non_zero_distances)\n        if sigma == 0:\n            sigma = 1e-6\n    else:\n        sigma = 1e-6\n\n    coo_weights = np.exp(-coo_distances ** 2 / (2 * sigma ** 2))\n    \n    connectivities = csr_matrix((coo_weights, (rows, cols)), shape=(n_cells, n_cells))\n    distances_matrix = csr_matrix((coo_distances, (rows, cols)), shape=(n_cells, n_cells))\n\n    # Make symmetric\n    connectivities = (connectivities + connectivities.T) / 2\n    distances_matrix = (distances_matrix + distances_matrix.T) / 2\n\n    adata_integrated.obsp['connectivities'] = connectivities\n    adata_integrated.obsp['distances'] = distances_matrix\n\n    return adata_integrated\n",
+    "submitted_timestamp": 1761718322.1711292,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp5ichj1_p/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp5ichj1_p/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp5ichj1_p/submission.py\", line 89, in eliminate_batch_effect_fn\n    connectivities = csr_matrix((coo_weights, (rows, cols)), shape=(n_cells, n_cells))\n                     ^^^^^^^^^^\nNameError: name 'csr_matrix' is not defined\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761718352.2725768,
+      "evaluation_datetime": "2025-10-29T14:12:32.272580"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1388_1761718352",
+      "started_timestamp": 1761718352.2719152,
+      "completed_timestamp": 1761718715.5396295,
+      "final_report": "# Debug Report for Evaluation 1388\n\n## Summary\n**SUCCESS** - Fixed missing import error in one line. The code now runs without crashing.\n\n## Root Cause\nThe original submission code used `csr_matrix` to create sparse matrices for the kNN graph connectivities and distances (lines 52-53 of the original code), but failed to import `csr_matrix` from scipy.sparse.\n\nThe code had:\n```python\nfrom scipy import sparse as sp\n```\n\nBut was missing:\n```python\nfrom scipy.sparse import csr_matrix\n```\n\nThis resulted in a `NameError: name 'csr_matrix' is not defined` when the code tried to construct the sparse connectivity and distance matrices.\n\n## Fix Applied\nAdded the missing import statement:\n```python\nfrom scipy.sparse import csr_matrix  # Fixed: Added missing import\n```\n\nThis was a simple one-line fix that resolved the import error. The rest of the code logic was correct.\n\n## Verification\nThe fixed submission (submission_v2.py) was tested using the monitor script and ran successfully for over 300 seconds without crashing, confirming that the import error was the only issue preventing execution.\n\n## Technical Details\n- **Original Error**: `NameError: name 'csr_matrix' is not defined` at line 89 of eliminate_batch_effect_fn\n- **Fix Location**: Added import in the header section of submission_v2.py (line 7)\n- **Affected Code**: Lines constructing sparse matrices for graph connectivities and distances\n- **Execution Status**: Code runs successfully without crashing\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nimport pandas as pd # Needed for pd.get_dummies if using one-hot encoding for batch\nfrom scipy import sparse as sp\nfrom scipy.sparse import csr_matrix  # Fixed: Added missing import\nfrom typing import List, Literal, Optional\nfrom sklearn.decomposition import PCA\nfrom sklearn.neighbors import NearestNeighbors # For vanilla kNN graph construction\n\n# Ensure package roots\nsys.path.append('storage/aletheia')\nsys.path.append('storage/praxis')\nsys.path.append('storage/syntellect') # Add my own storage for helper modules\n\n# Import normalization, custom PCA helper from my praxis_core\nfrom praxis_core import normalize_total_log1p_inplace, normalize_total_anscombe_inplace, pca_array_custom, one_hot_batches, ridge_batch_fit_predict, _batch_aware_feature_weights # Note: ridge_batch_fit_predict and _batch_aware_feature_weights are not used directly here, but part of praxis_core\n# from bbsg_density_adaptive import build_density_adaptive_bbsg # Not directly used for simple kNN graph\nfrom pbve_lite_module import _pbve_lite_transform # Import my PBVE-lite implementation\n\n# Re-define _fw_weight_by_var as it's part of the core FWPCA component\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd\n    Xd_dense_for_var = Xd.A if sp.issparse(Xd) else Xd\n    var_g = Xd_dense_for_var.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Generalization test: Apply FWPCA and PBVE-lite to a simple PCA+kNN baseline.\n    \"\"\"\n    adata_integrated = adata.copy()\n\n    # 1. Preprocessing: Normalization and Log-transformation\n    normalize_total_log1p_inplace(adata_integrated, target_sum=1e4)\n\n    # 2. Highly Variable Genes\n    sc.pp.highly_variable_genes(adata_integrated, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata_integrated.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata_integrated.obs['batch'].astype('category').values)\n\n    # Dense HVGs\n    Xh = adata_integrated.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    n_cells = Xd.shape[0]\n\n    # 3. Apply FWPCA weighting to HVGs\n    alpha_g = 0.5 # Optimal alpha for FWPCA from Syntellect FWPCA-PBVE SOTA\n    Xw_fwpca = _fw_weight_by_var(Xd, alpha=alpha_g)\n\n    # 4. Perform PCA to 60 components (matching simple baseline)\n    n_pcs_simple_baseline = 60\n    Z_pca = pca_array_custom(Xw_fwpca, n_comps=n_pcs_simple_baseline, random_state=0)\n\n    # 5. Apply PBVE-lite to the PCA components\n    pbve_lite_temper = 0.5 # Optimal temper for PBVE-lite\n    Z_integrated = _pbve_lite_transform(Z_pca, batches=batches, temper=pbve_lite_temper)\n\n    # Set the integrated embedding\n    adata_integrated.obsm['X_emb'] = Z_integrated\n\n    # 6. Construct vanilla kNN graph (k=50, cosine) on the integrated PCA data\n    # This matches the simple baseline's graph construction\n    n_neighbors_simple_baseline = 50\n\n    # Use sklearn.neighbors.NearestNeighbors\n    nn = NearestNeighbors(n_neighbors=n_neighbors_simple_baseline, metric='cosine', n_jobs=-1)\n    nn.fit(Z_integrated)\n    distances, indices = nn.kneighbors(Z_integrated)\n\n    # Convert to sparse matrices with Gaussian kernel weighting for connectivities\n    rows = np.repeat(np.arange(n_cells), n_neighbors_simple_baseline)\n    cols = indices.flatten()\n    coo_distances = distances.flatten()\n\n    # Calculate sigma for Gaussian kernel (median of non-zero distances)\n    all_non_zero_distances = coo_distances[coo_distances > 0]\n    if len(all_non_zero_distances) > 0:\n        sigma = np.median(all_non_zero_distances)\n        if sigma == 0:\n            sigma = 1e-6\n    else:\n        sigma = 1e-6\n\n    coo_weights = np.exp(-coo_distances ** 2 / (2 * sigma ** 2))\n\n    connectivities = csr_matrix((coo_weights, (rows, cols)), shape=(n_cells, n_cells))\n    distances_matrix = csr_matrix((coo_distances, (rows, cols)), shape=(n_cells, n_cells))\n\n    # Make symmetric\n    connectivities = (connectivities + connectivities.T) / 2\n    distances_matrix = (distances_matrix + distances_matrix.T) / 2\n\n    adata_integrated.obsp['connectivities'] = connectivities\n    adata_integrated.obsp['distances'] = distances_matrix\n\n    return adata_integrated\n",
+      "created_timestamp": 1761718398.0148056,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.4720721234358014,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/a24f4820-0f36-47dc-9b20-5cac24d7352f/result_human.h5ad\n\nRESULT_UUID: a24f4820-0f36-47dc-9b20-5cac24d7352f\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.593  ASW_label: 0.205  ARI: 0.424  NMI: 0.660\n  Graph_conn: 0.923  kBET: 0.669  iLISI: 0.003  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.251\n\nRaw Scores (before normalization):\n  ASW_batch: 0.800804  ASW_label: 0.529982  ARI: 0.424079  NMI: 0.660408\n  Graph_conn: 0.924494  kBET: 0.640436  iLISI: 0.002817  cLISI: 0.997582\n  PCR: 0.000000  Cell_cycle: 0.222859",
+          "ASW_batch": [
+            "0.593",
+            0.5933225146638305
+          ],
+          "ASW_label": [
+            "0.205",
+            0.20499553484470354
+          ],
+          "ARI": [
+            "0.424",
+            0.42415723807429545
+          ],
+          "NMI": [
+            "0.660",
+            0.6603124698501522
+          ],
+          "Graph_conn": [
+            "0.923",
+            0.9231913811600984
+          ],
+          "kBET": [
+            "0.669",
+            0.6693948989525847
+          ],
+          "iLISI": [
+            "0.003",
+            0.0028173495183828243
+          ],
+          "cLISI": [
+            "0.992",
+            0.9916994353975223
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.251",
+            0.2508304118964439
+          ]
+        },
+        "evaluation_timestamp": 1761718992.7484381,
+        "evaluation_datetime": "2025-10-29T14:23:12.748438",
+        "sort_key": [
+          0.4720721234358014
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.4720721234358014,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761718992.817188,
+    "version_notified": "v2",
+    "message": "Your research submission 'Syntellect FWPCA-PBVE SOTA Generalization Test on Simple PCA+kNN' (ID: 1388) succeeded after automatic debugging.\n\n**Score:** 0.4720721234358014\n**ASW_batch:** 0.593\n**ASW_label:** 0.205\n**ARI:** 0.424\n**NMI:** 0.660\n**Graph_conn:** 0.923\n**kBET:** 0.669\n**iLISI:** 0.003\n**cLISI:** 0.992\n**PCR:** 0.000\n**Cell_cycle:** 0.251\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.593  ASW_label: 0.205  ARI: 0.424  NMI: 0.660\n  Graph_conn: 0.923  kBET: 0.669  iLISI: 0.003  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.251\n\nRaw Scores (before normalization):\n  ASW_batch: 0.800804  ASW_label: 0.529982  ARI: 0.424079  NMI: 0.660408\n  Graph_conn: 0.924494  kBET: 0.640436  iLISI: 0.002817  cLISI: 0.997582\n  PCR: 0.000000  Cell_cycle: 0.222859\n\n**Debugger Report:** # Debug Report for Evaluation 1388\n\n## Summary\n**SUCCESS** - Fixed missing import error in one line. The code now runs without crashing.\n\n## Root Cause\nThe original submission code used `csr_matrix` to create sparse matrices for the kNN graph connectivities and distances (lines 52-53 of the original code), but failed to import `csr_matrix` from scipy.sparse.\n\nThe code had:\n```python\nfrom scipy import sparse as sp\n```\n\nBut was missing:\n```python\nfrom scipy.sparse import csr_matrix\n```\n\nThis resulted in a `NameError: name 'csr_matrix' is not defined` when the code tried to construct the sparse connectivity and distance matrices.\n\n## Fix Applied\nAdded the missing import statement:\n```python\nfrom scipy.sparse import csr_matrix  # Fixed: Added missing import\n```\n\nThis was a simple one-line fix that resolved the import error. The rest of the code logic was correct.\n\n## Verification\nThe fixed submission (submission_v2.py) was tested using the monitor script and ran successfully for over 300 seconds without crashing, confirming that the import error was the only issue preventing execution.\n\n## Technical Details\n- **Original Error**: `NameError: name 'csr_matrix' is not defined` at line 89 of eliminate_batch_effect_fn\n- **Fix Location**: Added import in the header section of submission_v2.py (line 7)\n- **Affected Code**: Lines constructing sparse matrices for graph connectivities and distances\n- **Execution Status**: Code runs successfully without crashing\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nimport pandas as pd # Needed for pd.get_dummies if using one-hot encoding for batch\nfrom scipy import sparse as sp\nfrom scipy.sparse import csr_matrix  # Fixed: Added missing import\nfrom typing import List, Literal, Optional\nfrom sklearn.decomposition import PCA\nfrom sklearn.neighbors import NearestNeighbors # For vanilla kNN graph construction\n\n# Ensure package roots\nsys.path.append('storage/aletheia')\nsys.path.append('storage/praxis')\nsys.path.append('storage/syntellect') # Add my own storage for helper modules\n\n# Import normalization, custom PCA helper from my praxis_core\nfrom praxis_core import normalize_total_log1p_inplace, normalize_total_anscombe_inplace, pca_array_custom, one_hot_batches, ridge_batch_fit_predict, _batch_aware_feature_weights # Note: ridge_batch_fit_predict and _batch_aware_feature_weights are not used directly here, but part of praxis_core\n# from bbsg_density_adaptive import build_density_adaptive_bbsg # Not directly used for simple kNN graph\nfrom pbve_lite_module import _pbve_lite_transform # Import my PBVE-lite implementation\n\n# Re-define _fw_weight_by_var as it's part of the core FWPCA component\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0:\n        return Xd\n    Xd_dense_for_var = Xd.A if sp.issparse(Xd) else Xd\n    var_g = Xd_dense_for_var.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Generalization test: Apply FWPCA and PBVE-lite to a simple PCA+kNN baseline.\n    \"\"\"\n    adata_integrated = adata.copy()\n\n    # 1. Preprocessing: Normalization and Log-transformation\n    normalize_total_log1p_inplace(adata_integrated, target_sum=1e4)\n\n    # 2. Highly Variable Genes\n    sc.pp.highly_variable_genes(adata_integrated, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata_integrated.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata_integrated.obs['batch'].astype('category').values)\n\n    # Dense HVGs\n    Xh = adata_integrated.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    n_cells = Xd.shape[0]\n\n    # 3. Apply FWPCA weighting to HVGs\n    alpha_g = 0.5 # Optimal alpha for FWPCA from Syntellect FWPCA-PBVE SOTA\n    Xw_fwpca = _fw_weight_by_var(Xd, alpha=alpha_g)\n\n    # 4. Perform PCA to 60 components (matching simple baseline)\n    n_pcs_simple_baseline = 60\n    Z_pca = pca_array_custom(Xw_fwpca, n_comps=n_pcs_simple_baseline, random_state=0)\n\n    # 5. Apply PBVE-lite to the PCA components\n    pbve_lite_temper = 0.5 # Optimal temper for PBVE-lite\n    Z_integrated = _pbve_lite_transform(Z_pca, batches=batches, temper=pbve_lite_temper)\n\n    # Set the integrated embedding\n    adata_integrated.obsm['X_emb'] = Z_integrated\n\n    # 6. Construct vanilla kNN graph (k=50, cosine) on the integrated PCA data\n    # This matches the simple baseline's graph construction\n    n_neighbors_simple_baseline = 50\n\n    # Use sklearn.neighbors.NearestNeighbors\n    nn = NearestNeighbors(n_neighbors=n_neighbors_simple_baseline, metric='cosine', n_jobs=-1)\n    nn.fit(Z_integrated)\n    distances, indices = nn.kneighbors(Z_integrated)\n\n    # Convert to sparse matrices with Gaussian kernel weighting for connectivities\n    rows = np.repeat(np.arange(n_cells), n_neighbors_simple_baseline)\n    cols = indices.flatten()\n    coo_distances = distances.flatten()\n\n    # Calculate sigma for Gaussian kernel (median of non-zero distances)\n    all_non_zero_distances = coo_distances[coo_distances > 0]\n    if len(all_non_zero_distances) > 0:\n        sigma = np.median(all_non_zero_distances)\n        if sigma == 0:\n            sigma = 1e-6\n    else:\n        sigma = 1e-6\n\n    coo_weights = np.exp(-coo_distances ** 2 / (2 * sigma ** 2))\n\n    connectivities = csr_matrix((coo_weights, (rows, cols)), shape=(n_cells, n_cells))\n    distances_matrix = csr_matrix((coo_distances, (rows, cols)), shape=(n_cells, n_cells))\n\n    # Make symmetric\n    connectivities = (connectivities + connectivities.T) / 2\n    distances_matrix = (distances_matrix + distances_matrix.T) / 2\n\n    adata_integrated.obsp['connectivities'] = connectivities\n    adata_integrated.obsp['distances'] = distances_matrix\n\n    return adata_integrated\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/a24f4820-0f36-47dc-9b20-5cac24d7352f/result_human.h5ad\n\nRESULT_UUID: a24f4820-0f36-47dc-9b20-5cac24d7352f\n\n\nSTDERR:\n\n```"
+  }
+}

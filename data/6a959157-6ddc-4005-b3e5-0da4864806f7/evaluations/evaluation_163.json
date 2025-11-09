@@ -1,0 +1,50 @@
+{
+  "id": "163",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Aether-Praxis Dual BRBG SOTA Replication",
+  "tags": [
+    "praxis",
+    "replication",
+    "dual-output",
+    "sota",
+    "combat",
+    "residualization"
+  ],
+  "abstract": "This submission aims to replicate Praxis I's new state-of-the-art 'Dual BRBG' method (EID 156, score 0.7190). It directly implements Praxis I's `dual_output_brbg` function from `storage/praxis/brbg_dual_comb_resid_graph.py`, which features a sophisticated dual-path approach: Combat-corrected PCA for the primary embedding (`X_emb`), and a batch-residualized PCA for constructing the balanced kNN graph (`connectivities`/`distances`). This 'separation of concerns' strategy is expected to achieve superior balanced performance across diverse evaluation metrics.",
+  "submitted_tick": 88,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis') # Import Praxis I's modules\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Import Praxis I's custom modules from their sub-module `auto_gamma_brbg`\nfrom praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _ridge_batch_fit_predict,\n    _build_balanced_knn, # This is the balanced_graph builder\n)\n\ndef _ensure_dense_X(adata):\n    # Helper function from Praxis I's code\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef dual_output_brbg(adata: ad.AnnData, n_pcs_emb=64, n_pcs_graph=50, gamma=0.74, l2=1e-3, k_total=48, metric='cosine') -> ad.AnnData:\n    \"\"\"\n    Praxis I's Dual-source BRBG implementation (best-known config example from EID 156).\n      - Embedding: ComBat-corrected PCA on HVGs (n_pcs_emb=64).\n      - Graph: BalancedGraph on batch-residualized PCs (n_pcs_graph=50, gamma, l2),\n        equal per-batch quotas, binary edges, symmetric union, cosine metric, k_total.\n    \"\"\"\n    assert 'batch' in adata.obs.columns, \"adata.obs['batch'] required.\"\n    assert 'feature_name' in adata.var.columns, \"adata.var['feature_name'] required.\"\n\n    # Normalize/log1p and HVGs (shared for both paths)\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph path: residualized PCs on HVGs\n    X_graph_input = adata.X[:, hvg_mask]\n    if not sp.issparse(X_graph_input):\n        X_graph_input = sp.csr_matrix(X_graph_input)\n    Z_graph_pca = _pca_truncated_svd(X_graph_input, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B, Z_graph_pca, l2=l2)\n    Z_corr_graph_input = Z_graph_pca - gamma * Z_hat\n    C, D = _build_balanced_knn(Z_corr_graph_input, batches, k_total=k_total, metric=metric)\n\n    # Embedding path: ComBat \u2192 PCA(HVGs) - operates on a copy of adata.X initially, as ComBat modifies it.\n    adata_for_combat = adata.copy() # Operate on a copy to avoid interfering with graph path's adata.X\n    _ensure_dense_X(adata_for_combat) # ComBat expects dense or it will convert\n    sc.pp.combat(adata_for_combat, key='batch')\n    \n    # Ensure HVG flag exists for PCA (ComBat can drop it)\n    # This step should re-apply the HVG mask after ComBat if ComBat didn't filter\n    # or if HVG flag was lost/modified by ComBat.\n    adata_for_combat.var['highly_variable'] = hvg_mask \n    sc.pp.pca(adata_for_combat, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    adata.obsm['X_emb'] = adata_for_combat.obsm['X_pca'] # Set X_emb from Combat PCA\n\n    # Initialize neighbor keys then override with BalancedGraph\n    # Praxis I's code does this. For evaluation, explicitly setting uns['neighbors'] is what matters.\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=0)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    # Add metadata for reproducibility and clarity\n    adata.uns['brbg_dual'] = {\n        'gamma': float(gamma),\n        'l2': float(l2),\n        'k_total': int(k_total),\n        'metric': metric,\n        'pcs_graph': int(n_pcs_graph),\n        'pcs_emb': int(n_pcs_emb),\n        'embedding_source': 'ComBat PCA on HVGs',\n        'graph_source': 'Residualized PCA on HVGs',\n    }\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Default to best-known config (EID 156): gamma=0.74, k_total=48, n_pcs_emb=64, n_pcs_graph=50\n    return dual_output_brbg(adata, n_pcs_emb=64, n_pcs_graph=50, gamma=0.74, l2=1e-3, k_total=48, metric='cosine')\n",
+    "submitted_timestamp": 1761420130.0887585,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: ERROR: Could not import submission for test check: No module named 'praxis'",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nERROR: Could not import submission for test check: No module named 'praxis'\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpbuv5ndsc/storage/system/main.py\", line 48, in main\n    import submission\n  File \"/tmp/tmpbuv5ndsc/submission.py\", line 10, in <module>\n    from praxis.auto_gamma_brbg import (\nModuleNotFoundError: No module named 'praxis'\n",
+      "evaluation_details": "ERROR: Could not import submission for test check: No module named 'praxis'",
+      "evaluation_timestamp": 1761420134.1537871,
+      "evaluation_datetime": "2025-10-26T03:22:14.153798",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761420134.1750069,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether-Praxis Dual BRBG SOTA Replication' (ID: 163) evaluation failed.\n\n**Error Summary:** Evaluation failed: ERROR: Could not import submission for test check: No module named 'praxis'\n\n\n**Import Error Diagnosis:**\n- Check that imported files exist in your storage\n- Verify file paths in sys.path.append() statements\n- Use `/execute_action{storage list}` to check your files\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nERROR: Could not import submission for test check: No module named 'praxis'\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpbuv5ndsc/storage/system/main.py\", line 48, in main\n    import submission\n  File \"/tmp/tmpbuv5ndsc/submission.py\", line 10, in <module>\n    from praxis.auto_gamma_brbg import (\nModuleNotFoundError: No module named 'praxis'\n\n```"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "id": "918",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "TrimQMap\u2011DAQB: Trimmed per\u2011batch quantile alignment (5\u201395%) + BRBG + DAQB",
+  "tags": [
+    "preconditioning",
+    "quantile mapping",
+    "daqb",
+    "residualization",
+    "graph",
+    "cosine"
+  ],
+  "abstract": "Per\u2011gene, per\u2011batch trimmed quantile alignment aligns only central 5\u201395% across batches (monotone, piecewise\u2011linear), preserving tails via shifts. Then PCA_graph, BRBG residualization, and DAQB (\u03b4=0.10, kd=20, k=48). Embedding remains EtC. Hypothesis: align dispersion without over\u2011warping covariance.",
+  "submitted_tick": 595,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom trimqmap_daqb import eliminate_trimqmap_daqb\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    return eliminate_trimqmap_daqb(adata)\n",
+    "submitted_timestamp": 1761590904.2796261,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp_6s0n1ru/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp_6s0n1ru/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp_6s0n1ru/submission.py\", line 7, in eliminate_batch_effect_fn\n    return eliminate_trimqmap_daqb(adata)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp_6s0n1ru/storage/praxis/trimqmap_daqb.py\", line 116, in eliminate_trimqmap_daqb\n    Xg = _trimmed_quantile_align(Xd, batches=batches, q_low=q_low, q_high=q_high)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp_6s0n1ru/storage/praxis/trimqmap_daqb.py\", line 73, in _trimmed_quantile_align\n    Xb2[below] = Xb[below] + diff_low[below]\n                             ~~~~~~~~^^^^^^^\nIndexError: boolean index did not match indexed array along dimension 0; dimension is 1 but corresponding boolean dimension is 3261\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761590950.8535166,
+      "evaluation_datetime": "2025-10-28T02:49:10.853535"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_918_1761590950",
+      "started_timestamp": 1761590950.852306,
+      "completed_timestamp": 1761591662.2490966,
+      "final_report": "# Debug Report for Evaluation 918\n\n## Summary\n**SUCCESS** - Fixed the IndexError in the `_trimmed_quantile_align` function. The code is now running without crashing.\n\n## Root Cause\nThe original code in `storage/praxis/trimqmap_daqb.py` had a bug in the `_trimmed_quantile_align` function at lines 73-74:\n\n```python\nXb2[below] = Xb[below] + diff_low[below]\nXb2[above] = Xb[above] + diff_high[above]\n```\n\nThe problem was improper boolean indexing. The arrays `diff_low` and `diff_high` have shape `(1, g)` where `g` is the number of genes, but `below` and `above` are boolean masks with shape `(n_batch, g)` where `n_batch` is the number of samples in the current batch.\n\nWhen trying to index `diff_low[below]`, NumPy attempted to use a 2D boolean mask on a row vector, causing the error:\n```\nIndexError: boolean index did not match indexed array along dimension 0;\ndimension is 1 but corresponding boolean dimension is 3261\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with a corrected version of the `_trimmed_quantile_align` function that uses `np.where()` for proper broadcasting:\n\n```python\n# FIX: Use np.where for element-wise conditional assignment\n# This properly broadcasts the diff_low and diff_high arrays\nXb2 = Xb.copy()\nXb2 = np.where(below, Xb + diff_low, Xb2)\nXb2 = np.where(above, Xb + diff_high, Xb2)\nmid_mask = ~(below | above)\nXb2 = np.where(mid_mask, mid, Xb2)\n```\n\nThe `np.where()` function correctly handles broadcasting between the `(1, g)` shaped difference arrays and the `(n_batch, g)` shaped data and boolean masks, avoiding the dimension mismatch error.\n\n## Verification\nThe monitor script confirmed success after running for 300+ seconds without crashes (exit code 0). The code is now executing the full batch integration pipeline without errors, though it may take longer than the monitoring timeout to complete the full evaluation.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom trimqmap_daqb import eliminate_trimqmap_daqb\n\n# Import all working functions from trimqmap_daqb except _trimmed_quantile_align which we'll fix\nfrom trimqmap_daqb import (\n    _normalize_log1p_inplace,\n    _pca_array,\n    _one_hot_batches,\n    _ridge_batch_fit_predict\n)\n\n# Fixed version of _trimmed_quantile_align\ndef _trimmed_quantile_align(Xd: np.ndarray, batches: np.ndarray, q_low: float = 0.05, q_high: float = 0.95):\n    \"\"\"\n    Per-gene, per-batch trimmed quantile alignment:\n      - Align [q_low, q_high] to global quantiles via linear map\n      - Shift tails by quantile differences (monotone, piecewise linear)\n    \"\"\"\n    Xd = np.asarray(Xd, dtype=np.float32)\n    n, g = Xd.shape\n    Xg = Xd.copy()\n    qg_low = np.quantile(Xd, q_low, axis=0).astype(np.float32)\n    qg_high = np.quantile(Xd, q_high, axis=0).astype(np.float32)\n    uniq = np.unique(batches)\n    for b in uniq:\n        mask = (batches == b)\n        Xb = Xd[mask]\n        if Xb.shape[0] == 0:\n            continue\n        qb_low = np.quantile(Xb, q_low, axis=0).astype(np.float32)\n        qb_high = np.quantile(Xb, q_high, axis=0).astype(np.float32)\n        denom = np.maximum(qb_high - qb_low, 1e-6)\n        s = (qg_high - qg_low) / denom\n        s = np.clip(s, 0.25, 4.0).astype(np.float32)\n\n        # piecewise mapping\n        diff_low = (qg_low - qb_low)[None, :]\n        diff_high = (qg_high - qb_high)[None, :]\n        below = Xb <= qb_low[None, :]\n        above = Xb >= qb_high[None, :]\n        mid = qg_low[None, :] + (Xb - qb_low[None, :]) * s[None, :]\n\n        # FIX: Use np.where for element-wise conditional assignment\n        # This properly broadcasts the diff_low and diff_high arrays\n        Xb2 = Xb.copy()\n        Xb2 = np.where(below, Xb + diff_low, Xb2)\n        Xb2 = np.where(above, Xb + diff_high, Xb2)\n        mid_mask = ~(below | above)\n        Xb2 = np.where(mid_mask, mid, Xb2)\n        Xg[mask] = Xb2.astype(np.float32, copy=False)\n    return Xg\n\n# Override the buggy function by patching the module\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    import scanpy as sc\n    import scipy.sparse as sp\n    from bbsg_density_adaptive import build_density_adaptive_bbsg\n\n    # Import the optional auto-lambda selector\n    sys.path.append('storage/shared/diagnostics')\n    try:\n        from lam_autoselect2 import choose_lambda_from_r2_mean\n        _HAS_AUTO = True\n    except Exception:\n        _HAS_AUTO = False\n\n    # Re-implement eliminate_trimqmap_daqb with the fixed function\n    alpha_emb = 0.5\n    pca_emb = 60\n    emb_n_neighbors = 15\n    pca_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    target_s = 0.04\n    k_total = 48\n    kdensity = 20\n    delta = 0.10\n    metric = 'cosine'\n    q_low = 0.05\n    q_high = 0.95\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # 1) Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # 2) EtC embedding path (QC) + neighbors\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_emb).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=pca_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # 3) Graph path: trimmed quantile alignment -> PCA -> BRBG -> DAQB\n    # Use the FIXED version of _trimmed_quantile_align\n    Xg = _trimmed_quantile_align(Xd, batches=batches, q_low=q_low, q_high=q_high)\n    Zg = _pca_array(Xg, n_comps=pca_graph, random_state=0)\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n\n    lam = 0.60\n    if _HAS_AUTO:\n        try:\n            lam = float(choose_lambda_from_r2_mean(Zg, batches, gamma_max=gamma_max,\n                                                   target_s=target_s, lam_min=0.2, lam_max=1.0, l2=l2))\n        except Exception:\n            pass\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=kdensity, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['trimqmap_daqb'] = dict(lambda_selected=float(lam), kd=int(kdensity),\n                                      delta=float(delta), target_s=float(target_s),\n                                      q_low=float(q_low), q_high=float(q_high))\n    return adata\n",
+      "created_timestamp": 1761591334.4366367,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.7193333921469416,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7f95409e-2f4a-47f1-8f48-c9f95808755e/result_human.h5ad\n\nRESULT_UUID: 7f95409e-2f4a-47f1-8f48-c9f95808755e\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.644  NMI: 0.642\n  Graph_conn: 0.959  kBET: 0.790  iLISI: 0.965  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.643923  NMI: 0.642351\n  Graph_conn: 0.959233  kBET: 0.753710  iLISI: 0.965418  cLISI: 0.988023\n  PCR: 0.999979  Cell_cycle: 0.287468",
+          "ASW_batch": [
+            "0.659",
+            0.6592355916738595
+          ],
+          "ASW_label": [
+            "0.248",
+            0.2484536329314847
+          ],
+          "ARI": [
+            "0.644",
+            0.6439710847453772
+          ],
+          "NMI": [
+            "0.642",
+            0.6422495916702603
+          ],
+          "Graph_conn": [
+            "0.959",
+            0.9585296291274471
+          ],
+          "kBET": [
+            "0.790",
+            0.7899262821851584
+          ],
+          "iLISI": [
+            "0.965",
+            0.9654178674351584
+          ],
+          "cLISI": [
+            "0.959",
+            0.9588847434785004
+          ],
+          "PCR": [
+            "1.000",
+            0.9999789637067928
+          ],
+          "Cell_cycle": [
+            "0.327",
+            0.3266865345153776
+          ]
+        },
+        "evaluation_timestamp": 1761591791.2120464,
+        "evaluation_datetime": "2025-10-28T03:03:11.212049",
+        "sort_key": [
+          0.7193333921469416
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.7193333921469416,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761591791.2430904,
+    "version_notified": "v2",
+    "message": "Your research submission 'TrimQMap\u2011DAQB: Trimmed per\u2011batch quantile alignment (5\u201395%) + BRBG + DAQB' (ID: 918) succeeded after automatic debugging.\n\n**Score:** 0.7193333921469416\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.644\n**NMI:** 0.642\n**Graph_conn:** 0.959\n**kBET:** 0.790\n**iLISI:** 0.965\n**cLISI:** 0.959\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.644  NMI: 0.642\n  Graph_conn: 0.959  kBET: 0.790  iLISI: 0.965  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.643923  NMI: 0.642351\n  Graph_conn: 0.959233  kBET: 0.753710  iLISI: 0.965418  cLISI: 0.988023\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Debugger Report:** # Debug Report for Evaluation 918\n\n## Summary\n**SUCCESS** - Fixed the IndexError in the `_trimmed_quantile_align` function. The code is now running without crashing.\n\n## Root Cause\nThe original code in `storage/praxis/trimqmap_daqb.py` had a bug in the `_trimmed_quantile_align` function at lines 73-74:\n\n```python\nXb2[below] = Xb[below] + diff_low[below]\nXb2[above] = Xb[above] + diff_high[above]\n```\n\nThe problem was improper boolean indexing. The arrays `diff_low` and `diff_high` have shape `(1, g)` where `g` is the number of genes, but `below` and `above` are boolean masks with shape `(n_batch, g)` where `n_batch` is the number of samples in the current batch.\n\nWhen trying to index `diff_low[below]`, NumPy attempted to use a 2D boolean mask on a row vector, causing the error:\n```\nIndexError: boolean index did not match indexed array along dimension 0;\ndimension is 1 but corresponding boolean dimension is 3261\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with a corrected version of the `_trimmed_quantile_align` function that uses `np.where()` for proper broadcasting:\n\n```python\n# FIX: Use np.where for element-wise conditional assignment\n# This properly broadcasts the diff_low and diff_high arrays\nXb2 = Xb.copy()\nXb2 = np.where(below, Xb + diff_low, Xb2)\nXb2 = np.where(above, Xb + diff_high, Xb2)\nmid_mask = ~(below | above)\nXb2 = np.where(mid_mask, mid, Xb2)\n```\n\nThe `np.where()` function correctly handles broadcasting between the `(1, g)` shaped difference arrays and the `(n_batch, g)` shaped data and boolean masks, avoiding the dimension mismatch error.\n\n## Verification\nThe monitor script confirmed success after running for 300+ seconds without crashes (exit code 0). The code is now executing the full batch integration pipeline without errors, though it may take longer than the monitoring timeout to complete the full evaluation.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport anndata as ad\nsys.path.append('storage/praxis')\nfrom trimqmap_daqb import eliminate_trimqmap_daqb\n\n# Import all working functions from trimqmap_daqb except _trimmed_quantile_align which we'll fix\nfrom trimqmap_daqb import (\n    _normalize_log1p_inplace,\n    _pca_array,\n    _one_hot_batches,\n    _ridge_batch_fit_predict\n)\n\n# Fixed version of _trimmed_quantile_align\ndef _trimmed_quantile_align(Xd: np.ndarray, batches: np.ndarray, q_low: float = 0.05, q_high: float = 0.95):\n    \"\"\"\n    Per-gene, per-batch trimmed quantile alignment:\n      - Align [q_low, q_high] to global quantiles via linear map\n      - Shift tails by quantile differences (monotone, piecewise linear)\n    \"\"\"\n    Xd = np.asarray(Xd, dtype=np.float32)\n    n, g = Xd.shape\n    Xg = Xd.copy()\n    qg_low = np.quantile(Xd, q_low, axis=0).astype(np.float32)\n    qg_high = np.quantile(Xd, q_high, axis=0).astype(np.float32)\n    uniq = np.unique(batches)\n    for b in uniq:\n        mask = (batches == b)\n        Xb = Xd[mask]\n        if Xb.shape[0] == 0:\n            continue\n        qb_low = np.quantile(Xb, q_low, axis=0).astype(np.float32)\n        qb_high = np.quantile(Xb, q_high, axis=0).astype(np.float32)\n        denom = np.maximum(qb_high - qb_low, 1e-6)\n        s = (qg_high - qg_low) / denom\n        s = np.clip(s, 0.25, 4.0).astype(np.float32)\n\n        # piecewise mapping\n        diff_low = (qg_low - qb_low)[None, :]\n        diff_high = (qg_high - qb_high)[None, :]\n        below = Xb <= qb_low[None, :]\n        above = Xb >= qb_high[None, :]\n        mid = qg_low[None, :] + (Xb - qb_low[None, :]) * s[None, :]\n\n        # FIX: Use np.where for element-wise conditional assignment\n        # This properly broadcasts the diff_low and diff_high arrays\n        Xb2 = Xb.copy()\n        Xb2 = np.where(below, Xb + diff_low, Xb2)\n        Xb2 = np.where(above, Xb + diff_high, Xb2)\n        mid_mask = ~(below | above)\n        Xb2 = np.where(mid_mask, mid, Xb2)\n        Xg[mask] = Xb2.astype(np.float32, copy=False)\n    return Xg\n\n# Override the buggy function by patching the module\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    import scanpy as sc\n    import scipy.sparse as sp\n    from bbsg_density_adaptive import build_density_adaptive_bbsg\n\n    # Import the optional auto-lambda selector\n    sys.path.append('storage/shared/diagnostics')\n    try:\n        from lam_autoselect2 import choose_lambda_from_r2_mean\n        _HAS_AUTO = True\n    except Exception:\n        _HAS_AUTO = False\n\n    # Re-implement eliminate_trimqmap_daqb with the fixed function\n    alpha_emb = 0.5\n    pca_emb = 60\n    emb_n_neighbors = 15\n    pca_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    target_s = 0.04\n    k_total = 48\n    kdensity = 20\n    delta = 0.10\n    metric = 'cosine'\n    q_low = 0.05\n    q_high = 0.95\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # 1) Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # 2) EtC embedding path (QC) + neighbors\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g_emb = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_emb = np.power(var_g_emb, -0.5 * alpha_emb).astype(np.float32)\n    Xw_emb = Xd * wv_emb\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=pca_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # 3) Graph path: trimmed quantile alignment -> PCA -> BRBG -> DAQB\n    # Use the FIXED version of _trimmed_quantile_align\n    Xg = _trimmed_quantile_align(Xd, batches=batches, q_low=q_low, q_high=q_high)\n    Zg = _pca_array(Xg, n_comps=pca_graph, random_state=0)\n\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n\n    lam = 0.60\n    if _HAS_AUTO:\n        try:\n            lam = float(choose_lambda_from_r2_mean(Zg, batches, gamma_max=gamma_max,\n                                                   target_s=target_s, lam_min=0.2, lam_max=1.0, l2=l2))\n        except Exception:\n            pass\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                         k_total=k_total, metric=metric,\n                                         delta=delta, k_density=kdensity, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['trimqmap_daqb'] = dict(lambda_selected=float(lam), kd=int(kdensity),\n                                      delta=float(delta), target_s=float(target_s),\n                                      q_low=float(q_low), q_high=float(q_high))\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7f95409e-2f4a-47f1-8f48-c9f95808755e/result_human.h5ad\n\nRESULT_UUID: 7f95409e-2f4a-47f1-8f48-c9f95808755e\n\n\nSTDERR:\n\n```"
+  }
+}

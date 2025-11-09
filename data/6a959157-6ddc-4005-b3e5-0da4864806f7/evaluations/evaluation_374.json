@@ -1,0 +1,92 @@
+{
+  "id": "374",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Idea 4 \u2014 QMAP(\u03bb=1.0): Batchwise Quantile Mapping to Global (HVG) + ComBat \u2192 PCA50 \u2192 kNN15",
+  "tags": [
+    "baseline",
+    "qmap",
+    "combat",
+    "hvg",
+    "pca",
+    "knn"
+  ],
+  "abstract": "Per-gene, per-batch quantile mapping to the pooled global distribution on HVGs (\u03bb=1.0) before ComBat, then PCA(50) and kNN(15, cosine). Hypothesis: stabilize ComBat/PCA with less distortion than rank-to-normal.",
+  "submitted_tick": 211,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom praxis.simple_batch_transforms import apply_qmap_global_inplace\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs = 50\n    n_neighbors = 15\n    metric = 'cosine'\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Normalize/log1p\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # HVGs\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    # QMAP to pooled global distribution on HVGs, \u03bb=1.0\n    if sp.issparse(adata.X):\n        Xd = adata.X.A\n    else:\n        Xd = adata.X\n    apply_qmap_global_inplace(Xd, batches=batches, gene_mask=hv, lam=1.0)\n    adata.X = Xd\n\n    # ComBat\n    sc.pp.combat(adata, key='batch')\n\n    # PCA on HVGs\n    sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n\n    # kNN graph\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors, metric=metric)\n    return adata\n",
+    "submitted_timestamp": 1761463991.1963048,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.11353555834873978,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 1999 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f8fc6687-7d33-48fd-bd5a-70d271827963/result_human.h5ad\n\nRESULT_UUID: f8fc6687-7d33-48fd-bd5a-70d271827963\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.043  NMI: 0.075\n  Graph_conn: 0.117  kBET: 0.327  iLISI: 0.294  cLISI: 0.136\n  PCR: 0.000  Cell_cycle: 0.143\n\nRaw Scores (before normalization):\n  ASW_batch: 0.038065  ASW_label: 0.240413  ARI: 0.042381  NMI: 0.075596\n  Graph_conn: 0.131985  kBET: 0.318669  iLISI: 0.294231  cLISI: 0.748375\n  PCR: 0.000000  Cell_cycle: 0.131050",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.043",
+          0.042511129007044554
+        ],
+        "NMI": [
+          "0.075",
+          0.07533469510748303
+        ],
+        "Graph_conn": [
+          "0.117",
+          0.11700756432979648
+        ],
+        "kBET": [
+          "0.327",
+          0.3270119059801235
+        ],
+        "iLISI": [
+          "0.294",
+          0.29423070667092216
+        ],
+        "cLISI": [
+          "0.136",
+          0.13622129946960984
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.143",
+          0.14303828292241832
+        ]
+      },
+      "evaluation_timestamp": 1761464300.9733243,
+      "evaluation_datetime": "2025-10-26T15:38:20.973325",
+      "sort_key": [
+        0.11353555834873978
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.11353555834873978,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761464301.0277786,
+    "version_notified": "original",
+    "message": "Your research submission 'Idea 4 \u2014 QMAP(\u03bb=1.0): Batchwise Quantile Mapping to Global (HVG) + ComBat \u2192 PCA50 \u2192 kNN15' (ID: 374) has been evaluated.\n\n**Score:** 0.11353555834873978\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.043\n**NMI:** 0.075\n**Graph_conn:** 0.117\n**kBET:** 0.327\n**iLISI:** 0.294\n**cLISI:** 0.136\n**PCR:** 0.000\n**Cell_cycle:** 0.143\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.043  NMI: 0.075\n  Graph_conn: 0.117  kBET: 0.327  iLISI: 0.294  cLISI: 0.136\n  PCR: 0.000  Cell_cycle: 0.143\n\nRaw Scores (before normalization):\n  ASW_batch: 0.038065  ASW_label: 0.240413  ARI: 0.042381  NMI: 0.075596\n  Graph_conn: 0.131985  kBET: 0.318669  iLISI: 0.294231  cLISI: 0.748375\n  PCR: 0.000000  Cell_cycle: 0.131050\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 1999 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f8fc6687-7d33-48fd-bd5a-70d271827963/result_human.h5ad\n\nRESULT_UUID: f8fc6687-7d33-48fd-bd5a-70d271827963\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

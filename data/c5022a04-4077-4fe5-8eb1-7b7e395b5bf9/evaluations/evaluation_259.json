@@ -1,0 +1,46 @@
+{
+  "id": "259",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Persist v256 improvement: coordinate-descent LP-gated refinement with strict slack check and artifact update",
+  "tags": [
+    "circle packing",
+    "linear programming",
+    "coordinate descent",
+    "persistence",
+    "robustness"
+  ],
+  "abstract": "Re-run the coordinate-descent micro-refiner deterministically, accept only strict LP-gated improvements, enforce \u22651e\u221210 slack after micro-shrink, and persist the improved artifact to storage/verity/sumr32_best.npz if it beats the stored artifact by >1e\u22128. Returns the improved packing with micro-shrunk radii; falls back to current artifact otherwise.",
+  "submitted_tick": 128,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\nARTIFACT_PATH = \"storage/verity/sumr32_best.npz\"\nSHRNK_ART = 1.0 - 1e-12\nSHRNK_REF = 1.0 - 1e-10\nINC_TOL = 1e-8\nSLACK_THR = 1e-10\n\ndef _clip_to_box(C, margin=1e-4):\n    return np.clip(C, margin, 1.0 - margin)\n\ndef _boundary_margins(C):\n    x, y = C[:, 0], C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _pairwise_distances(C):\n    diff = C[:, None, :] - C[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    return np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n\ndef _solve_lp(C):\n    n = C.shape[0]\n    if not SCIPY_AVAILABLE:\n        b = _boundary_margins(C)\n        r = np.minimum(b, 0.01)\n        return r, float(np.sum(r)), True\n    b = _boundary_margins(C)\n    D = _pairwise_distances(C)\n    rows, rhs = [], []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n, dtype=float); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rows else None\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return np.zeros(n, dtype=float), 0.0, False\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef _fallback_grid(n=32):\n    xs = np.linspace(1.0/(8+1), 1.0-1.0/(8+1), 8)\n    ys = np.linspace(1.0/(4+1), 1.0-1.0/(4+1), 4)\n    return np.array([(x, y) for y in ys for x in xs], dtype=float)[:n]\n\ndef _load_artifact():\n    try:\n        data = np.load(ARTIFACT_PATH)\n        C = np.array(data[\"centers\"], dtype=float)\n        r = np.array(data[\"radii\"], dtype=float)\n        return C, r\n    except Exception:\n        return None, None\n\ndef _micro_shrink(r, factor):\n    return np.maximum(r * factor, 1e-12)\n\ndef _min_slacks(C, r):\n    b = _boundary_margins(C)\n    sb = float(np.min(b - r))\n    D = _pairwise_distances(C)\n    Rsum = r[:, None] + r[None, :]\n    np.fill_diagonal(Rsum, 0.0)\n    # consider i<j pairs; mask diagonal anyway\n    sp = float(np.min(D - Rsum + np.eye(len(r))*1e9))\n    return sp, sb\n\ndef _uniform_alpha_for_slack(C, r, target=SLACK_THR):\n    # Find max alpha in (0,1] s.t. all slacks >= target after scaling radii by alpha.\n    b = _boundary_margins(C)\n    # Avoid divide by zero\n    with np.errstate(divide='ignore', invalid='ignore'):\n        a_bound = np.min((b - target) / np.maximum(r, 1e-16))\n    D = _pairwise_distances(C)\n    Rsum = r[:, None] + r[None, :]\n    mask = ~np.eye(len(r), dtype=bool)\n    denom = np.maximum(Rsum[mask], 1e-16)\n    a_pair = np.min((D[mask] - target) / denom)\n    alpha = min(1.0, float(a_bound), float(a_pair))\n    # Guard against NaNs or negatives\n    if not np.isfinite(alpha) or alpha <= 0.0:\n        alpha = 0.5\n    return max(0.0, min(1.0, alpha))\n\ndef _coordinate_descent_refine(C0, time_budget=180.0, inc_tol=INC_TOL):\n    n = C0.shape[0]\n    start = time.time()\n    Cb = _clip_to_box(C0.copy(), margin=1e-4)\n    rb, objb, ok = _solve_lp(Cb)\n    if not ok:\n        return C0, None, None, False\n    step = 3e-3; min_step = 2e-4\n    axes = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=float)\n    while time.time() - start < time_budget and step >= min_step:\n        improved = False\n        for i in range(n):\n            for ax in axes:\n                for sgn in (+1.0, -1.0):\n                    if time.time() - start >= time_budget:\n                        break\n                    Ct = Cb.copy()\n                    Ct[i] = Ct[i] + sgn * step * ax\n                    Ct = _clip_to_box(Ct, margin=1e-4)\n                    rt, objt, ok = _solve_lp(Ct)\n                    if ok and objt > objb + inc_tol:\n                        Cb, rb, objb = Ct, rt, objt\n                        improved = True\n                if time.time() - start >= time_budget:\n                    break\n            if time.time() - start >= time_budget:\n                break\n        if not improved:\n            step *= 0.5\n    return Cb, rb, objb, True\n\ndef construct_packing():\n    np.random.seed(0)\n    n = 32\n    C_art, r_art = _load_artifact()\n    if C_art is None or r_art is None or C_art.shape != (n,2) or r_art.shape != (n,):\n        C0 = _clip_to_box(_fallback_grid(n), margin=1e-4)\n        r0, obj0, ok = _solve_lp(C0)\n        if not ok:\n            b = _boundary_margins(C0)\n            r0 = np.minimum(b, 0.01)\n        base_sum = float(np.sum(_micro_shrink(r0, SHRNK_ART)))\n    else:\n        C0 = _clip_to_box(C_art, margin=1e-4)\n        base_sum = float(np.sum(_micro_shrink(r_art, SHRNK_ART)))\n\n    improved = False\n    if SCIPY_AVAILABLE:\n        Cref, rref, objref, ok = _coordinate_descent_refine(C0)\n        if ok and rref is not None:\n            r_ref_shrunk = _micro_shrink(rref, SHRNK_REF)\n            # Enforce strict slack threshold for persistence/return safety\n            sp, sb = _min_slacks(Cref, r_ref_shrunk)\n            if sp < SLACK_THR or sb < SLACK_THR:\n                alpha = _uniform_alpha_for_slack(Cref, r_ref_shrunk, target=SLACK_THR)\n                r_ref_shrunk = _micro_shrink(r_ref_shrunk, alpha)\n                sp, sb = _min_slacks(Cref, r_ref_shrunk)\n            sum_ref = float(np.sum(r_ref_shrunk))\n            if sum_ref > base_sum + INC_TOL and sp >= SLACK_THR and sb >= SLACK_THR:\n                # Persist improved artifact\n                try:\n                    np.savez(ARTIFACT_PATH, centers=Cref, radii=r_ref_shrunk, obj=sum_ref)\n                except Exception:\n                    pass\n                improved = True\n                return Cref, r_ref_shrunk\n\n    # Fallback to current artifact with standard micro-shrink\n    if C_art is not None and r_art is not None:\n        return _clip_to_box(C_art, margin=1e-4), _micro_shrink(r_art, SHRNK_ART)\n\n    # Final fallback if no artifact\n    r0, obj0, ok = _solve_lp(C0)\n    if not ok:\n        b = _boundary_margins(C0)\n        r0 = np.minimum(b, 0.01)\n    return C0, _micro_shrink(r0, SHRNK_ART)\n",
+    "submitted_timestamp": 1760818684.5805178,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.931927217993297,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931927",
+      "evaluation_timestamp": 1760818691.41235,
+      "evaluation_datetime": "2025-10-19T04:18:11.412352"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.931927217993297,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760818691.4717624,
+    "version_notified": "original",
+    "message": "Your research submission 'Persist v256 improvement: coordinate-descent LP-gated refinement with strict slack check and artifact update' (ID: 259) has been evaluated.\n\n**Score:** 2.931927217993297\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931927\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

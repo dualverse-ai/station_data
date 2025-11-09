@@ -1,0 +1,46 @@
+{
+  "id": "106",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Hybrid JAX-CPU Method with Robust Final Refinement",
+  "tags": [
+    "jax",
+    "gpu",
+    "hybrid method",
+    "iterative refinement",
+    "robustness"
+  ],
+  "abstract": "This submission synthesizes all previous research insights. It uses a high-speed, JAX-based gradient descent on the GPU to perform a massive number of optimization steps, quickly finding a near-optimal arrangement of circle centers. To guarantee a valid solution, the radii from this phase are discarded. The optimized centers are then passed to a proven, CPU-based iterative refinement function (`compute_max_radii`) for a final, robust calculation of the largest possible valid radii. This combines GPU speed with CPU reliability.",
+  "submitted_tick": 39,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax\nimport jax.numpy as jnp\nfrom jax import grad, jit\nimport numpy as np\nfrom scipy.optimize import minimize # For the robust CPU part\n\ndef compute_max_radii(centers: np.ndarray) -> np.ndarray:\n    \"\"\"A robust CPU function to compute max valid radii for a fixed set of centers.\"\"\"\n    n = centers.shape[0]; epsilon = 1e-12\n    max_r_from_x = np.minimum(centers[:, 0], 1 - centers[:, 0])\n    max_r_from_y = np.minimum(centers[:, 1], 1 - centers[:, 1])\n    radii = np.minimum(max_r_from_x, max_r_from_y)\n    radii = np.maximum(radii, 0.0)\n    for _ in range(25):\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n                rad_sum = radii[i] + radii[j]\n                if dist_sq < rad_sum**2:\n                    dist = np.sqrt(dist_sq) if dist_sq > 0 else 0.0\n                    if rad_sum > epsilon:\n                        scale_factor = dist / rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n    return np.maximum(radii, 0.0)\n\ndef construct_packing() -> tuple:\n    n_circles = 32\n    key = jax.random.PRNGKey(137) # Use best seed\n\n    # Phase 1: High-speed search for centers using JAX\n    n_grid = 6\n    grid_points = np.linspace(0.1, 0.9, n_grid)\n    initial_centers = np.array([p for x in grid_points for y in grid_points for p in [[x,y]]][:n_circles])\n    initial_radii = np.full(n_circles, 0.05)\n    \n    key, subkey = jax.random.split(key)\n    noise_level = 0.04\n    perturbation = (jax.random.uniform(subkey, (n_circles, 2)) - 0.5) * noise_level\n    initial_centers += np.array(perturbation)\n\n    params = jnp.hstack((jnp.array(initial_centers), jnp.array(initial_radii).reshape(-1, 1))).flatten()\n\n    @jit\n    def loss_function(p):\n        s = p.reshape(n_circles, 3); c, r = s[:, :2], s[:, 2]\n        obj = -jnp.sum(r)\n        p_bound = jnp.sum(jax.nn.relu(c + r[:, None] - 1)**2) + jnp.sum(jax.nn.relu(r[:, None] - c)**2)\n        p1, p2 = c[:, None, :], c[None, :, :]; dist_sq = jnp.sum((p1 - p2)**2, axis=-1)\n        r1, r2 = r[:, None], r[None, :]; rad_sum_sq = (r1 + r2)**2\n        overlap = jax.nn.relu(rad_sum_sq - dist_sq)\n        p_overlap = (jnp.sum(overlap) - jnp.trace(overlap)) / 2.0\n        return obj + 1000.0 * p_bound + 1000.0 * p_overlap\n\n    grad_fn = jit(grad(loss_function))\n    \n    learning_rate = 0.0001\n    num_iterations = 30000\n\n    for _ in range(num_iterations):\n        g = grad_fn(params)\n        params -= learning_rate * g\n\n    jax_optimized_params = np.array(params).reshape(n_circles, 3)\n    jax_optimized_centers = jax_optimized_params[:, :2]\n    \n    # Phase 2: Discard JAX radii and use robust CPU refinement\n    final_centers = np.clip(jax_optimized_centers, 0.0, 1.0) # Final clip for safety\n    final_radii = compute_max_radii(final_centers)\n    \n    # Final safety margin\n    final_radii *= (1.0 - 1e-8)\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760788862.1706095,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.762012004852295,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.762012",
+      "evaluation_timestamp": 1760788874.8760834,
+      "evaluation_datetime": "2025-10-18T20:01:14.876086"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.762012004852295,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760788874.901865,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid JAX-CPU Method with Robust Final Refinement' (ID: 106) has been evaluated.\n\n**Score:** 1.762012004852295\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.762012\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

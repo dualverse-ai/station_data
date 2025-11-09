@@ -1,0 +1,46 @@
+{
+  "id": "89",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "Multi-Start JAX with Perturbed Grid Initialization",
+  "tags": [
+    "multi-start",
+    "noise perturbation",
+    "jax",
+    "optimization",
+    "symmetry breaking"
+  ],
+  "abstract": "This experiment is a synthesis of previous findings, designed to break the current performance plateau. It employs a multi-start strategy where each of the 5 trials is initialized with the optimal 4x8 grid perturbed by a unique random noise. By running multiple deep-convergence optimizations on slightly different, high-quality starting points, this method thoroughly explores the solution space around the current best-known optimum in search of a superior configuration.",
+  "submitted_tick": 34,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\n\ndef construct_packing() -> tuple:\n    n = 32\n    num_restarts = 5\n    best_score = -1.0\n    best_packing = (None, None)\n    main_key = jax.random.PRNGKey(0)\n\n    # --- Base Grid (Best known start) ---\n    grid_rows, grid_cols = 4, 8\n    x_coords = np.linspace(0.1, 0.9, grid_cols)\n    y_coords = np.linspace(0.1, 0.9, grid_rows)\n    xx, yy = np.meshgrid(x_coords, y_coords)\n    base_grid_points = jnp.array(np.stack([xx.ravel(), yy.ravel()], axis=-1))\n\n    # --- Loss Function ---\n    def loss_fn(params):\n        centers, radii = params['centers'], jax.nn.softplus(params['raw_radii'])\n        objective = -jnp.sum(radii)\n        bpx = jnp.sum(jax.nn.relu(centers[:, 0] + radii - 1) + jax.nn.relu(radii - centers[:, 0]))\n        bpy = jnp.sum(jax.nn.relu(centers[:, 1] + radii - 1) + jax.nn.relu(radii - centers[:, 1]))\n        dist = jnp.sqrt(jnp.sum((centers[:, None, :] - centers[None, :, :])**2, axis=-1) + 1e-9)\n        radii_sum = radii[:, None] + radii[None, :]\n        mask = jnp.triu(jnp.ones((n, n)), k=1)\n        overlap_penalty = jnp.sum(mask * jax.nn.relu(radii_sum - dist))\n        return objective + 1000.0 * (bpx + bpy) + 1000.0 * overlap_penalty\n\n    # --- Optimization Setup ---\n    n_steps_per_restart = 30000 \n    schedule = optax.exponential_decay(init_value=1e-3, transition_steps=1, decay_rate=0.9999)\n    optimizer = optax.adam(schedule)\n\n    @jax.jit\n    def run_optimization(params):\n        opt_state = optimizer.init(params)\n        def step_fn(carry, _):\n            params, opt_state = carry\n            loss, grads = jax.value_and_grad(loss_fn)(params)\n            updates, opt_state = optimizer.update(grads, opt_state, params)\n            params = optax.apply_updates(params, updates)\n            return (params, opt_state), loss\n        (final_params, _), _ = jax.lax.scan(step_fn, (params, opt_state), None, length=n_steps_per_restart)\n        return final_params\n\n    # --- Main Loop for Restarts ---\n    for i in range(num_restarts):\n        main_key, key1, key2 = jax.random.split(main_key, 3)\n        \n        noise = jax.random.normal(key1, base_grid_points.shape) * 0.01\n        initial_centers = base_grid_points + noise\n        raw_radii = jax.random.normal(key2, (n,)) * 0.1 - 2.0\n        \n        initial_params = {'centers': initial_centers, 'raw_radii': raw_radii}\n        final_params = run_optimization(initial_params)\n        \n        final_radii = jax.nn.softplus(final_params['raw_radii'])\n        current_score = jnp.sum(final_radii)\n\n        if current_score > best_score:\n            best_score = current_score\n            final_centers = final_params['centers']\n            clipped_centers = jnp.clip(final_centers, final_radii[:, None], 1.0 - final_radii[:, None])\n            best_packing = (np.array(clipped_centers), np.array(final_radii))\n\n    return best_packing\n",
+    "submitted_timestamp": 1760787226.5257645,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.8283157348632812,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.828316",
+      "evaluation_timestamp": 1760787233.8643196,
+      "evaluation_datetime": "2025-10-18T19:33:53.864322"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.8283157348632812,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760787233.8805108,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Start JAX with Perturbed Grid Initialization' (ID: 89) has been evaluated.\n\n**Score:** 2.8283157348632812\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.828316\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

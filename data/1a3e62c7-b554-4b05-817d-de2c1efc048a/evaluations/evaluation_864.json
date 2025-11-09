@@ -1,0 +1,47 @@
+{
+  "id": "864",
+  "author": "Episteme II",
+  "research_task_id": "1",
+  "title": "Experiment 13: Innovation via Contact Squeezing",
+  "tags": [
+    "episteme",
+    "innovation",
+    "sota",
+    "nudging",
+    "contact graph",
+    "refinement"
+  ],
+  "abstract": "Differential analysis revealed that the SOTA 'nudging' method does not change the packing's contact graph. This suggests the score increase is from fine-tuning the existing structure, not creating a new one.\nThis experiment introduces a new 'contact squeezing' hypothesis. Instead of nudging non-touching circles, I will apply a small compressive force to *existing* contacts in the base SOTA.\nThe script will iterate through several contact pairs, 'squeezing' each one and then running the exhaustive refinement to see if this pressure forces the system into a better equilibrium.",
+  "submitted_tick": 540,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\nN = 26\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt('storage/episteme/sota_base_centers.txt')\n        base_radii = np.loadtxt('storage/episteme/sota_base_radii.txt')\n    except Exception:\n        return np.array([[0.5, 0.5]] * 26), np.array([0.05] * 26)\n\n    # --- Heuristic: Get existing contacts ---\n    def get_contacts(centers, radii):\n        contacts = []\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                if abs(dist - (radii[i] + radii[j])) < 1e-6:\n                    contacts.append((i, j))\n        return contacts\n\n    base_contacts = get_contacts(base_centers, base_radii)\n    # Let's test a few promising contacts from the middle of the list\n    pairs_to_squeeze = base_contacts[5:10] \n\n    # --- Helper functions ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v = 0\n            for i in range(N):\n                for j in range(i + 1, N):\n                    dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v == 0: break\n        return c, np.maximum(r, 0)\n\n    # --- Main Loop ---\n    overall_best_score = -np.inf\n    overall_best_centers, overall_best_radii = None, None\n\n    for target_pair in pairs_to_squeeze:\n        # --- Stage 1: Squeezing ---\n        squeezed_centers = np.copy(base_centers)\n        i_sq, j_sq = target_pair\n        dist_vec = squeezed_centers[i_sq] - squeezed_centers[j_sq]\n        dist = np.linalg.norm(dist_vec)\n        \n        if dist > 1e-9:\n            grad_ci = dist_vec / dist\n            squeeze_amount = 1e-4 # A small, constant squeeze force\n            squeezed_centers[i_sq] += grad_ci * squeeze_amount\n            squeezed_centers[j_sq] -= grad_ci * squeeze_amount\n        \n        # Use original radii for refinement stage\n        squeezed_radii = np.copy(base_radii)\n        \n        # --- Stage 2: Refinement ---\n        run_best_score = -np.inf\n        run_best_centers, run_best_radii = None, None\n        jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3] # Reduced search for efficiency\n        restarts_per_amplitude = 4\n        bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n        constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n        for amp in jitter_amplitudes:\n            for i in range(restarts_per_amplitude):\n                np.random.seed(int(amp * 1e6) + i + 500)\n                jitter = np.random.uniform(-amp, amp, size=squeezed_centers.shape)\n                perturbed_centers = np.clip(squeezed_centers + jitter, 1e-6, 1 - 1e-6)\n                initial_z = cr_to_z(perturbed_centers, squeezed_radii)\n                \n                res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n                \n                if res.success:\n                    c_res, r_res = z_to_cr(res.x)\n                    c_final, r_final = _ensure_validity(c_res, r_res)\n                    final_score = np.sum(r_final)\n                    if final_score > run_best_score:\n                        run_best_score = final_score; run_best_centers, run_best_radii = c_final, r_final\n        \n        if run_best_score > overall_best_score:\n            overall_best_score = run_best_score\n            overall_best_centers, overall_best_radii = run_best_centers, run_best_radii\n\n    if overall_best_centers is None:\n        return base_centers, base_radii\n    \n    return overall_best_centers, overall_best_radii\n",
+    "submitted_timestamp": 1761002026.7465644,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359830849175276,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635983",
+      "evaluation_timestamp": 1761002033.526656,
+      "evaluation_datetime": "2025-10-21T07:13:53.526658"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359830849175276,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761002033.5449903,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 13: Innovation via Contact Squeezing' (ID: 864) has been evaluated.\n\n**Score:** 2.6359830849175276\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635983\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

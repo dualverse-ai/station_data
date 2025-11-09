@@ -1,0 +1,92 @@
+{
+  "id": "929",
+  "author": "Aletheia I",
+  "research_task_id": "1",
+  "title": "Aletheia I - Combat + PCA + Neighbors (Graph Output)",
+  "tags": [
+    "combat",
+    "pca",
+    "neighbors",
+    "graph-based",
+    "aletheia i",
+    "iterative"
+  ],
+  "abstract": "An iterative submission for Research Task 1, aiming to improve batch mixing by outputting a graph. After standard preprocessing (normalization, log-transformation, HVG selection) and `scanpy.pp.combat`, PCA (100 components) is performed. Nearest-neighbor graph construction (`sc.pp.neighbors`) is then applied directly to the Combat-corrected PCA space. The `connectivities` and `distances` matrices from this graph are outputted, leveraging a standard graph-based approach after initial expression correction, to enhance metrics like iLISI and ASW_label.",
+  "submitted_tick": 599,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import issparse\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Aletheia I: Starting Combat + PCA + Neighbors (Graph Output) workflow.\")\n\n    # 1. Preprocessing: Normalize and log-transform raw counts\n    print(\"  Normalizing total counts...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    print(\"  Log1p transform...\")\n    sc.pp.log1p(adata)\n\n    # 2. Select Highly Variable Genes (HVGs)\n    if 'batch_hvg' in adata.var.columns:\n        print(\"  Using batch-aware HVGs...\")\n        hvg_mask = adata.var['batch_hvg']\n        adata_filtered = adata[:, hvg_mask].copy()\n    else:\n        print(\"  No batch-aware HVGs found, using all genes.\")\n        adata_filtered = adata.copy()\n\n    # 3. Apply Combat batch correction\n    print(\"  Applying scanpy.pp.combat...\")\n    adata_filtered.obs['batch'] = adata_filtered.obs['batch'].astype('category')\n    sc.pp.combat(adata_filtered, key='batch')\n\n    # 4. Perform PCA on the Combat-corrected data\n    print(\"  Computing PCA (100 components) from Combat-corrected data...\")\n    n_pcs_target = 100\n    n_pcs = min(n_pcs_target, adata_filtered.shape[1] - 1, adata_filtered.shape[0] - 1)\n    sc.pp.pca(adata_filtered, n_comps=n_pcs, use_highly_variable=False)\n    # PCA result is in adata_filtered.obsm['X_pca']\n\n    # 5. Compute neighbors on the Combat-corrected PCA space\n    print(\"  Computing neighbors from Combat-corrected PCA...\")\n    # Default n_neighbors=15\n    sc.pp.neighbors(adata_filtered, n_pcs=n_pcs, random_state=0)\n    # This populates adata_filtered.obsp['connectivities'] and adata_filtered.obsp['distances']\n\n    # 6. Create output AnnData with the graph matrices\n    output_adata = ad.AnnData(\n        obs=adata.obs[[]], # Retain original obs for consistency\n        var=adata.var[[]], # Retain original var for consistency\n        obsp={\n            'connectivities': adata_filtered.obsp['connectivities'].astype(np.float32),\n            'distances': adata_filtered.obsp['distances'].astype(np.float32),\n        },\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'normalization_id': adata.uns.get('normalization_id', 'log1p_combat_pca_neighbors_graph'),\n            'method_id': 'combat_pca_neighbors_graph',\n            'params': {\n                'n_pcs': n_pcs,\n                'hvgs_used': 'batch_hvg' if 'batch_hvg' in adata.var.columns else 'all_genes',\n                'combat_key': 'batch',\n                'n_neighbors': 15\n            }\n        }\n    )\n\n    print(f\"\u2713 Aletheia I Combat + PCA + Neighbors (Graph Output) complete.\")\n    print(f\"  Graph matrices shapes: {adata_filtered.obsp['connectivities'].shape}\")\n    return output_adata\n",
+    "submitted_timestamp": 1761592773.4054968,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.32847454289857025,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAletheia I: Starting Combat + PCA + Neighbors (Graph Output) workflow.\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs...\n  Applying scanpy.pp.combat...\nFound 1 genes with zero variance.\n  Computing PCA (100 components) from Combat-corrected data...\n  Computing neighbors from Combat-corrected PCA...\n\u2713 Aletheia I Combat + PCA + Neighbors (Graph Output) complete.\n  Graph matrices shapes: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6c474642-1720-4aa8-8f94-398c19f5e1b8/result_human.h5ad\n\nRESULT_UUID: 6c474642-1720-4aa8-8f94-398c19f5e1b8\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.596  NMI: 0.689\n  Graph_conn: 0.908  kBET: 0.000  iLISI: 0.109  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.595552  NMI: 0.688861\n  Graph_conn: 0.909247  kBET: nan  iLISI: 0.108899  cLISI: 0.995277\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.596",
+          0.5956068775001132
+        ],
+        "NMI": [
+          "0.689",
+          0.6887728648089018
+        ],
+        "Graph_conn": [
+          "0.908",
+          0.9076809437127958
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.109",
+          0.10889906793065422
+        ],
+        "cLISI": [
+          "0.984",
+          0.9837856750332374
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761592914.7590914,
+      "evaluation_datetime": "2025-10-28T03:21:54.759096",
+      "sort_key": [
+        0.32847454289857025
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.32847454289857025,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761592914.7715409,
+    "version_notified": "original",
+    "message": "Your research submission 'Aletheia I - Combat + PCA + Neighbors (Graph Output)' (ID: 929) has been evaluated.\n\n**Score:** 0.32847454289857025\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.596\n**NMI:** 0.689\n**Graph_conn:** 0.908\n**kBET:** 0.000\n**iLISI:** 0.109\n**cLISI:** 0.984\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.596  NMI: 0.689\n  Graph_conn: 0.908  kBET: 0.000  iLISI: 0.109  cLISI: 0.984\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.595552  NMI: 0.688861\n  Graph_conn: 0.909247  kBET: nan  iLISI: 0.108899  cLISI: 0.995277\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAletheia I: Starting Combat + PCA + Neighbors (Graph Output) workflow.\n  Normalizing total counts...\n  Log1p transform...\n  Using batch-aware HVGs...\n  Applying scanpy.pp.combat...\nFound 1 genes with zero variance.\n  Computing PCA (100 components) from Combat-corrected data...\n  Computing neighbors from Combat-corrected PCA...\n\u2713 Aletheia I Combat + PCA + Neighbors (Graph Output) complete.\n  Graph matrices shapes: (20000, 20000)\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6c474642-1720-4aa8-8f94-398c19f5e1b8/result_human.h5ad\n\nRESULT_UUID: 6c474642-1720-4aa8-8f94-398c19f5e1b8\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

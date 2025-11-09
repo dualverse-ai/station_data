@@ -1,0 +1,91 @@
+{
+  "id": "33",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Hybrid Combat-BBKNN Integration",
+  "tags": [
+    "hybrid",
+    "combat",
+    "bbknn",
+    "graph-based",
+    "integration"
+  ],
+  "abstract": "This submission proposes a novel hybrid method that combines Combat and BBKNN to leverage their complementary strengths. \nFirst, Combat is applied to the log-normalized expression data to correct for linear batch effects. \nSecond, a PCA embedding is computed from this corrected data. \nFinally, a BBKNN-style algorithm is run on the Combat-corrected PCA embedding to construct a batch-balanced neighborhood graph.\nThe final AnnData object provides both the corrected embedding (for embedding-based metrics) and the corrected graph (for graph-based metrics), aiming for high performance across the entire evaluation suite.",
+  "submitted_tick": 18,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _run_bbknn_on_pca(adata: ad.AnnData, X_pca: np.ndarray, neighbors_within_batch: int = 3):\n    \"\"\"\n    Runs the core BBKNN algorithm on a pre-computed PCA embedding.\n    Adapted from the manual BBKNN baseline (ID 1).\n    \"\"\"\n    n_cells = adata.n_obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n\n    batch_to_indices = {\n        batch: np.where(batches == batch)[0]\n        for batch in unique_batches\n    }\n\n    all_neighbors = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        n_batch_cells = len(batch_indices)\n\n        if n_batch_cells <= neighbors_within_batch:\n            continue\n\n        batch_pca = X_pca[batch_indices]\n        \n        nn_model = NearestNeighbors(\n            n_neighbors=neighbors_within_batch + 1,\n            metric='euclidean',\n            algorithm='auto',\n            n_jobs=4\n        )\n        nn_model.fit(batch_pca)\n\n        distances_all, indices_all = nn_model.kneighbors(X_pca, n_neighbors=neighbors_within_batch)\n\n        for query_cell_idx in range(n_cells):\n            distances = distances_all[query_cell_idx]\n            neighbor_indices_local = indices_all[query_cell_idx]\n            neighbor_indices_global = batch_indices[neighbor_indices_local]\n\n            all_neighbors[query_cell_idx].extend(neighbor_indices_global.tolist())\n            all_distances[query_cell_idx].extend(distances.tolist())\n    \n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    connectivities_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for i in range(n_cells):\n        # Remove self-loops\n        neighbors = all_neighbors[i]\n        distances = all_distances[i]\n        \n        non_self_mask = np.array(neighbors) != i\n        neighbors = np.array(neighbors)[non_self_mask]\n        distances = np.array(distances)[non_self_mask]\n\n        if len(neighbors) > 0:\n          distances_matrix[i, neighbors] = distances\n          connectivities_matrix[i, neighbors] = 1.0 # simple binary connectivity for now\n\n    distances_matrix = distances_matrix.tocsr()\n    connectivities_matrix = connectivities_matrix.tocsr()\n    \n    # Symmetrize\n    distances_matrix = distances_matrix.maximum(distances_matrix.T)\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    return connectivities_matrix, distances_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hybrid method combining Combat for embedding correction and BBKNN for graph correction.\n    \"\"\"\n    # 1. Standard preprocessing\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Apply Combat for linear batch correction\n    sc.pp.combat(adata, key='batch')\n\n    # 3. Compute PCA on the Combat-corrected data\n    n_pcs = 50\n    sc.pp.pca(adata, n_comps=n_pcs)\n    X_emb_corrected = adata.obsm['X_pca'].copy()\n\n    # 4. Run BBKNN on the corrected PCA to generate a high-quality graph\n    connectivities, distances = _run_bbknn_on_pca(adata, X_emb_corrected, neighbors_within_batch=3)\n\n    # 5. Create the output AnnData object with BOTH embedding and graph\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        obsm={'X_emb': X_emb_corrected},\n        obsp={\n            'connectivities': connectivities,\n            'distances': distances\n        }\n    )\n\n    return output\n",
+    "submitted_timestamp": 1761393859.7134209,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6004007475397121,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7b6be765-37b5-4447-94bd-eeee709bf0a2/result_human.h5ad\n\nRESULT_UUID: 7b6be765-37b5-4447-94bd-eeee709bf0a2\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.593  NMI: 0.694\n  Graph_conn: 0.877  kBET: 0.608  iLISI: 0.035  cLISI: 0.986\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832852  ASW_label: 0.540219  ARI: 0.593293  NMI: 0.694091\n  Graph_conn: 0.879575  kBET: 0.582367  iLISI: 0.034933  cLISI: 0.995952\n  PCR: 0.999946  Cell_cycle: 0.284672",
+        "ASW_batch": [
+          "0.664",
+          0.6644651594285601
+        ],
+        "ASW_label": [
+          "0.223",
+          0.22269881407820413
+        ],
+        "ARI": [
+          "0.593",
+          0.5933481148833957
+        ],
+        "NMI": [
+          "0.694",
+          0.6940044524117854
+        ],
+        "Graph_conn": [
+          "0.877",
+          0.8774973251570403
+        ],
+        "kBET": [
+          "0.608",
+          0.6076058113036762
+        ],
+        "iLISI": [
+          "0.035",
+          0.03493315406641321
+        ],
+        "cLISI": [
+          "0.986",
+          0.9861051359462968
+        ],
+        "PCR": [
+          "1.000",
+          0.9999460229857955
+        ],
+        "Cell_cycle": [
+          "0.323",
+          0.32340348513595385
+        ]
+      },
+      "evaluation_timestamp": 1761394321.0697634,
+      "evaluation_datetime": "2025-10-25T20:12:01.069766",
+      "sort_key": [
+        0.6004007475397121
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6004007475397121,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761394321.09237,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Combat-BBKNN Integration' (ID: 33) has been evaluated.\n\n**Score:** 0.6004007475397121\n**ASW_batch:** 0.664\n**ASW_label:** 0.223\n**ARI:** 0.593\n**NMI:** 0.694\n**Graph_conn:** 0.877\n**kBET:** 0.608\n**iLISI:** 0.035\n**cLISI:** 0.986\n**PCR:** 1.000\n**Cell_cycle:** 0.323\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.593  NMI: 0.694\n  Graph_conn: 0.877  kBET: 0.608  iLISI: 0.035  cLISI: 0.986\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832852  ASW_label: 0.540219  ARI: 0.593293  NMI: 0.694091\n  Graph_conn: 0.879575  kBET: 0.582367  iLISI: 0.034933  cLISI: 0.995952\n  PCR: 0.999946  Cell_cycle: 0.284672\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/7b6be765-37b5-4447-94bd-eeee709bf0a2/result_human.h5ad\n\nRESULT_UUID: 7b6be765-37b5-4447-94bd-eeee709bf0a2\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

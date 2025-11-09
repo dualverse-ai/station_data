@@ -1,0 +1,116 @@
+{
+  "id": "724",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Harmony Lambda Sweep (lambda=0.5)",
+  "tags": [
+    "baseline",
+    "harmony",
+    "hyperparameter-tuning",
+    "lambda"
+  ],
+  "abstract": "Having concluded that the 'theta' parameter has minimal impact, this experiment pivots to tuning 'lambda_harmony'. The default is 1; this submission tests lambda=0.5 to evaluate the effect of weaker regularization on batch-specific variables.",
+  "submitted_tick": 457,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Parameters for consistency\n    params = {'n_pcs_graph': 50, 'k_total': 48, 'metric': 'cosine'}\n\n    # Standard preprocessing\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n    \n    # --- Graph Path (HYPOTHESIS TEST) ---\n    # 1. Generate PCA representation of the data.\n    Zg = _pca_array(Xd, n_comps=params['n_pcs_graph'], random_state=0)\n\n    # 2. Apply Harmony to the PCA representation for batch correction.\n    # This experiment tests lambda_harmony=0.5. The best theta so far was 4.\n    adata.obsm['X_pca'] = Zg\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lambda_harmony=0.5)\n\n    # Get the harmony-corrected embeddings\n    Z_corrected = adata.obsm['X_harmony']\n\n    # 3. Build a standard kNN graph on the Harmony-corrected PCA.\n    adata.obsm['X_corrected_pca'] = Z_corrected\n    sc.pp.neighbors(adata, use_rep='X_corrected_pca', n_neighbors=params['k_total'], metric=params['metric'])\n\n    return adata\n",
+    "submitted_timestamp": 1761538511.1133385,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp9wtamtlf/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmp9wtamtlf/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp9wtamtlf/submission.py\", line 36, in eliminate_batch_effect_fn\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lambda_harmony=0.5)\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/legacy_api_wrap/__init__.py\", line 82, in fn_compatible\n    return fn(*args_all, **kw)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/external/pp/_harmony_integrate.py\", line 97, in harmony_integrate\n    harmony_out = harmonypy.run_harmony(X, adata.obs, key, **kwargs)\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: run_harmony() got an unexpected keyword argument 'lambda_harmony'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761538523.5952518,
+      "evaluation_datetime": "2025-10-27T12:15:23.595256"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_724_1761538523",
+      "started_timestamp": 1761538523.594639,
+      "completed_timestamp": 1761538747.2814684,
+      "final_report": "# Debug Report for Evaluation 724\n\n## Summary\n**SUCCESS** - Fixed parameter naming error in Harmony integration. The code now executes successfully with a score of 0.3776.\n\n## Root Cause\nThe original submission used an incorrect parameter name `lambda_harmony=0.5` when calling `sc.external.pp.harmony_integrate()`. The underlying `harmonypy.run_harmony()` function expects the parameter to be named `lamb` (not `lambda_harmony`), which caused a `TypeError: run_harmony() got an unexpected keyword argument 'lambda_harmony'`.\n\nThis is a classic Python API mismatch issue - the agent likely assumed the parameter would follow the naming convention `lambda_harmony` based on the conceptual meaning, but the library implementation uses the shortened form `lamb`.\n\n## Fix Applied\nChanged line 36 in the submission from:\n```python\nsc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lambda_harmony=0.5)\n```\n\nTo:\n```python\nsc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lamb=0.5)\n```\n\nThe fix was simple: replaced `lambda_harmony=0.5` with `lamb=0.5` to match the actual parameter name expected by the `harmonypy.run_harmony()` function.\n\n## Verification\n- Submission v2 was created with the corrected parameter name\n- Evaluation completed successfully with score: 0.3776\n- The algorithm executed without errors and produced valid batch integration results\n- Performance metrics show:\n  - ARI: 0.767\n  - NMI: 0.711\n  - Graph connectivity: 0.967\n  - iLISI: 0.348\n\n## Recommendation\nThe agent should verify library API parameter names before submission, especially when using external integration libraries like Harmony. The parameter documentation for `harmonypy.run_harmony()` clearly shows `lamb` as the correct parameter name for the ridge regression penalty term.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Parameters for consistency\n    params = {'n_pcs_graph': 50, 'k_total': 48, 'metric': 'cosine'}\n\n    # Standard preprocessing\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Graph Path (HYPOTHESIS TEST) ---\n    # 1. Generate PCA representation of the data.\n    Zg = _pca_array(Xd, n_comps=params['n_pcs_graph'], random_state=0)\n\n    # 2. Apply Harmony to the PCA representation for batch correction.\n    # This experiment tests lamb=0.5 (ridge regression penalty). The best theta so far was 4.\n    adata.obsm['X_pca'] = Zg\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lamb=0.5)\n\n    # Get the harmony-corrected embeddings\n    Z_corrected = adata.obsm['X_harmony']\n\n    # 3. Build a standard kNN graph on the Harmony-corrected PCA.\n    adata.obsm['X_corrected_pca'] = Z_corrected\n    sc.pp.neighbors(adata, use_rep='X_corrected_pca', n_neighbors=params['k_total'], metric=params['metric'])\n\n    return adata\n",
+      "created_timestamp": 1761538561.4863648,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.3776057178658139,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f0f7acc6-b7e7-4bf1-a185-1c853f1969f7/result_human.h5ad\n\nRESULT_UUID: f0f7acc6-b7e7-4bf1-a185-1c853f1969f7\n\n\nSTDERR:\n2025-10-27 12:16:13,267 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 12:16:18,875 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 12:16:18,950 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 12:16:22,926 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 12:16:26,864 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 12:16:30,860 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 12:16:34,751 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 12:16:38,661 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 12:16:41,337 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 12:16:45,212 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 12:16:48,862 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 12:16:51,601 - harmonypy - INFO - Iteration 10 of 10\n2025-10-27 12:16:54,149 - harmonypy - INFO - Converged after 10 iterations\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.767  NMI: 0.711\n  Graph_conn: 0.967  kBET: 0.000  iLISI: 0.348  cLISI: 0.982\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.767146  NMI: 0.711383\n  Graph_conn: 0.967535  kBET: nan  iLISI: 0.348131  cLISI: 0.994894\n  PCR: nan  Cell_cycle: 0.000000",
+          "ASW_batch": [
+            "0.000",
+            0.0
+          ],
+          "ASW_label": [
+            "0.000",
+            0.0
+          ],
+          "ARI": [
+            "0.767",
+            0.7671775980429534
+          ],
+          "NMI": [
+            "0.711",
+            0.7113015861684387
+          ],
+          "Graph_conn": [
+            "0.967",
+            0.9669745657450762
+          ],
+          "kBET": [
+            "0.000",
+            0.0
+          ],
+          "iLISI": [
+            "0.348",
+            0.3481314693452002
+          ],
+          "cLISI": [
+            "0.982",
+            0.9824719593564702
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.000",
+            0.0
+          ]
+        },
+        "evaluation_timestamp": 1761538716.4748242,
+        "evaluation_datetime": "2025-10-27T12:18:36.474825",
+        "sort_key": [
+          0.3776057178658139
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.3776057178658139,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761538747.2986796,
+    "version_notified": "v2",
+    "message": "Your research submission 'Logos V: Harmony Lambda Sweep (lambda=0.5)' (ID: 724) succeeded after automatic debugging.\n\n**Score:** 0.3776057178658139\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.767\n**NMI:** 0.711\n**Graph_conn:** 0.967\n**kBET:** 0.000\n**iLISI:** 0.348\n**cLISI:** 0.982\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.767  NMI: 0.711\n  Graph_conn: 0.967  kBET: 0.000  iLISI: 0.348  cLISI: 0.982\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.767146  NMI: 0.711383\n  Graph_conn: 0.967535  kBET: nan  iLISI: 0.348131  cLISI: 0.994894\n  PCR: nan  Cell_cycle: 0.000000\n\n**Debugger Report:** # Debug Report for Evaluation 724\n\n## Summary\n**SUCCESS** - Fixed parameter naming error in Harmony integration. The code now executes successfully with a score of 0.3776.\n\n## Root Cause\nThe original submission used an incorrect parameter name `lambda_harmony=0.5` when calling `sc.external.pp.harmony_integrate()`. The underlying `harmonypy.run_harmony()` function expects the parameter to be named `lamb` (not `lambda_harmony`), which caused a `TypeError: run_harmony() got an unexpected keyword argument 'lambda_harmony'`.\n\nThis is a classic Python API mismatch issue - the agent likely assumed the parameter would follow the naming convention `lambda_harmony` based on the conceptual meaning, but the library implementation uses the shortened form `lamb`.\n\n## Fix Applied\nChanged line 36 in the submission from:\n```python\nsc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lambda_harmony=0.5)\n```\n\nTo:\n```python\nsc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lamb=0.5)\n```\n\nThe fix was simple: replaced `lambda_harmony=0.5` with `lamb=0.5` to match the actual parameter name expected by the `harmonypy.run_harmony()` function.\n\n## Verification\n- Submission v2 was created with the corrected parameter name\n- Evaluation completed successfully with score: 0.3776\n- The algorithm executed without errors and produced valid batch integration results\n- Performance metrics show:\n  - ARI: 0.767\n  - NMI: 0.711\n  - Graph connectivity: 0.967\n  - iLISI: 0.348\n\n## Recommendation\nThe agent should verify library API parameter names before submission, especially when using external integration libraries like Harmony. The parameter documentation for `harmonypy.run_harmony()` clearly shows `lamb` as the correct parameter name for the ridge regression penalty term.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef eliminate_batch_effect_fn(adata):\n    # Parameters for consistency\n    params = {'n_pcs_graph': 50, 'k_total': 48, 'metric': 'cosine'}\n\n    # Standard preprocessing\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # --- Graph Path (HYPOTHESIS TEST) ---\n    # 1. Generate PCA representation of the data.\n    Zg = _pca_array(Xd, n_comps=params['n_pcs_graph'], random_state=0)\n\n    # 2. Apply Harmony to the PCA representation for batch correction.\n    # This experiment tests lamb=0.5 (ridge regression penalty). The best theta so far was 4.\n    adata.obsm['X_pca'] = Zg\n    sc.external.pp.harmony_integrate(adata, key='batch', basis='X_pca', adjusted_basis='X_harmony', theta=4, lamb=0.5)\n\n    # Get the harmony-corrected embeddings\n    Z_corrected = adata.obsm['X_harmony']\n\n    # 3. Build a standard kNN graph on the Harmony-corrected PCA.\n    adata.obsm['X_corrected_pca'] = Z_corrected\n    sc.pp.neighbors(adata, use_rep='X_corrected_pca', n_neighbors=params['k_total'], metric=params['metric'])\n\n    return adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f0f7acc6-b7e7-4bf1-a185-1c853f1969f7/result_human.h5ad\n\nRESULT_UUID: f0f7acc6-b7e7-4bf1-a185-1c853f1969f7\n\n\nSTDERR:\n2025-10-27 12:16:13,267 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-27 12:16:18,875 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-27 12:16:18,950 - harmonypy - INFO - Iteration 1 of 10\n2025-10-27 12:16:22,926 - harmonypy - INFO - Iteration 2 of 10\n2025-10-27 12:16:26,864 - harmonypy - INFO - Iteration 3 of 10\n2025-10-27 12:16:30,860 - harmonypy - INFO - Iteration 4 of 10\n2025-10-27 12:16:34,751 - harmonypy - INFO - Iteration 5 of 10\n2025-10-27 12:16:38,661 - harmonypy - INFO - Iteration 6 of 10\n2025-10-27 12:16:41,337 - harmonypy - INFO - Iteration 7 of 10\n2025-10-27 12:16:45,212 - harmonypy - INFO - Iteration 8 of 10\n2025-10-27 12:16:48,862 - harmonypy - INFO - Iteration 9 of 10\n2025-10-27 12:16:51,601 - harmonypy - INFO - Iteration 10 of 10\n2025-10-27 12:16:54,149 - harmonypy - INFO - Converged after 10 iterations\n\n```"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "1455",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "Diagnostics: \u03c3_kd distributions \u2014 FWPCA-only at \u03b4\u2208{0.10,0.12} (kd=22, k=50)",
+  "tags": [
+    "analysis",
+    "diagnostics",
+    "fwpca",
+    "kd",
+    "delta",
+    "density"
+  ],
+  "abstract": "Analysis-only test. Runs FWPCA-only twice on Human Heart with \u03b4=0.10 and \u03b4=0.12 (kd=22, k=50), then computes kd-th neighbor distance (\u03c3_kd) distributions from the final distance graphs. Reports global and per-batch summaries (median, mean, CV, Gini) for both deltas.",
+  "submitted_tick": 1033,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, numpy as np\nimport anndata as ad\nimport scipy.sparse as sp\nsys.path.append('storage/praxis')\nfrom fwpca_only_utils import run_fwpca_only\n\ndef _kd_stat_from_distances(D: sp.csr_matrix, kd: int) -> np.ndarray:\n    if not sp.isspmatrix_csr(D):\n        D = D.tocsr()\n    n = D.shape[0]\n    sigma = np.full(n, np.nan, dtype=np.float64)\n    idx_ptr = D.indptr\n    data = D.data\n    for i in range(n):\n        start, end = idx_ptr[i], idx_ptr[i+1]\n        row = data[start:end]\n        if row.size >= kd:\n            kth = np.partition(row, kd-1)[kd-1]\n            sigma[i] = float(kth)\n    return sigma\n\ndef _gini(x):\n    x = np.asarray(x, dtype=np.float64)\n    x = x[np.isfinite(x)]\n    if x.size == 0:\n        return np.nan\n    x = np.abs(x)\n    if np.allclose(x.sum(), 0):\n        return 0.0\n    x.sort()\n    n = x.size\n    cumx = np.cumsum(x)\n    return (n + 1 - 2 * np.sum(cumx) / cumx[-1]) / n\n\ndef _summaries(sigma: np.ndarray, batches: np.ndarray, label: str):\n    mask = np.isfinite(sigma)\n    s = sigma[mask]\n    out = {\n        \"label\": label,\n        \"n\": int(s.size),\n        \"median\": float(np.median(s)) if s.size else np.nan,\n        \"mean\": float(np.mean(s)) if s.size else np.nan,\n        \"std\": float(np.std(s, ddof=1)) if s.size > 1 else np.nan,\n        \"cv\": float(np.std(s, ddof=1) / np.mean(s)) if s.size > 1 and np.mean(s) > 0 else np.nan,\n        \"gini\": float(_gini(s)),\n    }\n    per_batch = {}\n    for b in np.unique(batches):\n        mb = mask & (batches == b)\n        sb = sigma[mb]\n        sb = sb[np.isfinite(sb)]\n        per_batch[str(b)] = float(np.median(sb)) if sb.size else np.nan\n    out[\"per_batch_median\"] = per_batch\n    return out\n\ndef test(adata: ad.AnnData):\n    kdensity = 22\n    k_total = 50\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # FWPCA-only at \u03b4=0.10\n    ad_d010 = adata.copy()\n    ad_d010 = run_fwpca_only(\n        ad_d010,\n        alpha_g=0.50,\n        kdensity=kdensity,\n        k_total=k_total,\n        delta=0.10,\n        metric='cosine',\n        cap=2.0,\n        rng_seed=0,\n        pbve_temper=None\n    )\n    D010 = ad_d010.obsp.get('distances', None)\n\n    # FWPCA-only at \u03b4=0.12\n    ad_d012 = adata.copy()\n    ad_d012 = run_fwpca_only(\n        ad_d012,\n        alpha_g=0.50,\n        kdensity=kdensity,\n        k_total=k_total,\n        delta=0.12,\n        metric='cosine',\n        cap=2.0,\n        rng_seed=0,\n        pbve_temper=None\n    )\n    D012 = ad_d012.obsp.get('distances', None)\n\n    results = {}\n    if D010 is not None:\n        sig010 = _kd_stat_from_distances(D010, kdensity)\n        results[\"fwpca_d010\"] = _summaries(sig010, batches, \"fwpca_d010\")\n    else:\n        results[\"fwpca_d010\"] = {\"label\": \"fwpca_d010\", \"error\": \"no_distances\"}\n\n    if D012 is not None:\n        sig012 = _kd_stat_from_distances(D012, kdensity)\n        results[\"fwpca_d012\"] = _summaries(sig012, batches, \"fwpca_d012\")\n    else:\n        results[\"fwpca_d012\"] = {\"label\": \"fwpca_d012\", \"error\": \"no_distances\"}\n\n    # Contrast summary: relative change of median and dispersion\n    if \"fwpca_d010\" in results and \"fwpca_d012\" in results and \"median\" in results[\"fwpca_d010\"] and \"median\" in results[\"fwpca_d012\"]:\n        m010 = results[\"fwpca_d010\"][\"median\"]\n        m012 = results[\"fwpca_d012\"][\"median\"]\n        cv010 = results[\"fwpca_d010\"][\"cv\"]\n        cv012 = results[\"fwpca_d012\"][\"cv\"]\n        results[\"diff\"] = {\n            \"median_ratio_d012_over_d010\": (m012 / m010) if (m010 and np.isfinite(m010) and np.isfinite(m012)) else np.nan,\n            \"cv_delta\": (cv012 - cv010) if (cv010 is not None and cv012 is not None) else np.nan\n        }\n\n    print(json.dumps(results, indent=2, sort_keys=True))\n    return \"\u03c3_kd diagnostics completed (FWPCA-only)\"\n",
+    "submitted_timestamp": 1761740894.7165437,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n{\n  \"diff\": {\n    \"cv_delta\": -0.013756163496080887,\n    \"median_ratio_d012_over_d010\": 1.01668818435296\n  },\n  \"fwpca_d010\": {\n    \"cv\": 0.4598255933673993,\n    \"gini\": 0.25658321630941183,\n    \"label\": \"fwpca_d010\",\n    \"mean\": 0.24839952450990677,\n    \"median\": 0.23783019185066223,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.17397278547286987,\n      \"Kuppe et al. 2022\": 0.22651341557502747,\n      \"Litvinukova et al. 2020\": 0.24068647623062134,\n      \"Tucker et al. 2020\": 0.29333534836769104\n    },\n    \"std\": 0.11422045874994773\n  },\n  \"fwpca_d012\": {\n    \"cv\": 0.4460694298713184,\n    \"gini\": 0.24876378033887614,\n    \"label\": \"fwpca_d012\",\n    \"mean\": 0.2520624566137791,\n    \"median\": 0.24179914593696594,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.1766539216041565,\n      \"Kuppe et al. 2022\": 0.22891438007354736,\n      \"Litvinukova et al. 2020\": 0.24541175365447998,\n      \"Tucker et al. 2020\": 0.2957015931606293\n    },\n    \"std\": 0.11243735631367237\n  }\n}\nTest result: \u03c3_kd diagnostics completed (FWPCA-only)\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761740988.2528615,
+      "evaluation_datetime": "2025-10-29T20:29:48.252868",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761740988.281638,
+    "version_notified": "original",
+    "message": "Your research submission 'Diagnostics: \u03c3_kd distributions \u2014 FWPCA-only at \u03b4\u2208{0.10,0.12} (kd=22, k=50)' (ID: 1455) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n{\n  \"diff\": {\n    \"cv_delta\": -0.013756163496080887,\n    \"median_ratio_d012_over_d010\": 1.01668818435296\n  },\n  \"fwpca_d010\": {\n    \"cv\": 0.4598255933673993,\n    \"gini\": 0.25658321630941183,\n    \"label\": \"fwpca_d010\",\n    \"mean\": 0.24839952450990677,\n    \"median\": 0.23783019185066223,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.17397278547286987,\n      \"Kuppe et al. 2022\": 0.22651341557502747,\n      \"Litvinukova et al. 2020\": 0.24068647623062134,\n      \"Tucker et al. 2020\": 0.29333534836769104\n    },\n    \"std\": 0.11422045874994773\n  },\n  \"fwpca_d012\": {\n    \"cv\": 0.4460694298713184,\n    \"gini\": 0.24876378033887614,\n    \"label\": \"fwpca_d012\",\n    \"mean\": 0.2520624566137791,\n    \"median\": 0.24179914593696594,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.1766539216041565,\n      \"Kuppe et al. 2022\": 0.22891438007354736,\n      \"Litvinukova et al. 2020\": 0.24541175365447998,\n      \"Tucker et al. 2020\": 0.2957015931606293\n    },\n    \"std\": 0.11243735631367237\n  }\n}\nTest result: \u03c3_kd diagnostics completed (FWPCA-only)\n\n\nSTDERR:\n\n```"
+  }
+}

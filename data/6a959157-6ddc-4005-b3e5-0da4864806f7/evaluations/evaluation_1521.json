@@ -1,0 +1,90 @@
+{
+  "id": "1521",
+  "author": "Nous I",
+  "research_task_id": "1",
+  "title": "Novel Hypothesis: Explained Variance Weighting for PCA in ALC Pipeline",
+  "tags": [
+    "sota-iteration",
+    "novel-hypothesis",
+    "pca-weighting",
+    "explained-variance"
+  ],
+  "abstract": "This experiment tests if replacing the hard 50-component cutoff in the Adaptive Local Correction (ALC) pipeline with a soft weighting of 100 components by their explained variance can improve performance. This principled approach to latent space construction aims to improve upon my stable baseline of ~0.737 by including more information from later components while diminishing their noise.",
+  "submitted_tick": 1075,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\ndef normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=np.float32)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(np.float32)\n    return B\n\ndef ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=np.float32)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    if alpha == 0.0: return Xd\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym, D_sym = A.maximum(A.T), D.maximum(D.T)\n    A_sym.eliminate_zeros(); D_sym.eliminate_zeros()\n    return A_sym.astype(np.float32), D_sym.astype(np.float32)\n\ndef build_density_adaptive_bbsg(Zcorr, batches, k_total=50, metric='cosine', delta=0.04, k_density=18, rng_seed=0):\n    n = Zcorr.shape[0]\n    cats = np.unique(batches)\n    B_other = max(len(cats) - 1, 1)\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Zcorr)\n    d_all, _ = nn_all.kneighbors(Zcorr, return_distance=True)\n    d_k = d_all[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    inv_dense = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    base_cross = (len(cats) - 1) / float(len(cats))\n    f_cross = np.clip(base_cross + (inv_dense - 0.5) * 2.0 * float(delta), 0.60, 0.90)\n    max_cross_per = int(np.ceil(0.9 * k_total / B_other))\n    max_within = int(np.ceil((1.0 - 0.60) * k_total))\n    batch_to_indices, nn_models = {}, {}\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        batch_to_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=max(max_within, max_cross_per) + 1, metric=metric, algorithm='brute')\n        nn.fit(Zcorr[mask]); nn_models[j] = nn\n    nn_dists, nn_idx_local = {}, {}\n    for j in range(len(cats)):\n        d, ii = nn_models[j].kneighbors(Zcorr, return_distance=True)\n        nn_dists[j] = d; nn_idx_local[j] = ii\n    rows, cols, dvals = [], [], []\n    batch_codes = {val: idx for idx, val in enumerate(cats)}\n    bc = np.array([batch_codes[b] for b in batches], dtype=int)\n    for i in range(n):\n        bi = int(bc[i])\n        q_cross_total = int(round(f_cross[i] * k_total))\n        q_within = max(0, min(k_total, int(round(k_total - q_cross_total))))\n        q_per_other = q_cross_total // B_other\n        rem = q_cross_total - q_per_other * B_other\n        d_i, ii = nn_dists[bi][i], nn_idx_local[bi][i]\n        start = 1 if d_i[0] == 0.0 else 0\n        sel = min(q_within, d_i.shape[0] - start)\n        if sel > 0:\n            cols.extend(batch_to_indices[bi][ii[start:start + sel]])\n            rows.extend([i] * sel); dvals.extend(d_i[start:start + sel])\n        other_batches = [j for j in range(len(cats)) if j != bi]\n        batch_scores = sorted([(j, nn_dists[j][i][0]) for j in other_batches], key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem): q_map[batch_scores[k % len(other_batches)][0]] += 1\n        for j in other_batches:\n            d_ij, ii_j = nn_dists[j][i], nn_idx_local[j][i]\n            sel_j = min(q_map[j], d_ij.shape[0])\n            if sel_j > 0:\n                cols.extend(batch_to_indices[j][ii_j[:sel_j]])\n                rows.extend([i] * sel_j); dvals.extend(d_ij[:sel_j])\n    return _symmetrize_binary_with_distances(np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(dvals, dtype=np.float32), n)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"[Nous I] Testing Explained Variance Weighting.\")\n    # --- Configuration --- Using my stable baseline parameters\n    alpha_emb, n_pcs_emb, emb_n_neighbors = 0.5, 60, 15\n    alpha_g, l2, gamma_max = 0.5, 1e-3, 0.74\n    lam_override, k_total, kdensity, delta = 0.62, 50, 18, 0.04\n    metric, rng_seed = 'cosine', 0\n    # *** HYPOTHESIS PARAMETER ***\n    n_pcs_graph = 100\n\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv_mask = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv_mask]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    \n    # --- Path 1: Embedding (unchanged) ---\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    ad_pc_combat = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc_combat, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc_combat.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric, random_state=rng_seed)\n\n    # --- Path 2: Graph with *** MODIFIED *** Latent Space ---\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    \n    # *** CORE OF THE HYPOTHESIS ***\n    # 1. Compute more PCs\n    ad_graph_pca = ad.AnnData(Xw_graph)\n    sc.pp.pca(ad_graph_pca, n_comps=n_pcs_graph, svd_solver='arpack', random_state=rng_seed)\n    Zg_raw = ad_graph_pca.obsm['X_pca']\n    variance_ratios = ad_graph_pca.uns['pca']['variance_ratio']\n    # 2. Apply soft weighting\n    Zg = Zg_raw * variance_ratios\n    print(f\"  Applied explained variance weighting to {Zg.shape[1]} PCs.\")\n    \n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n    nn_density = NearestNeighbors(n_neighbors=kdensity + 1, metric=metric, algorithm='brute')\n    nn_density.fit(Zg)\n    d_k, _ = nn_density.kneighbors(Zg, return_distance=True)\n    d_k = d_k[:, -1]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k))\n    density_factor = 1.0 - (d_k - d_min) / (d_max - d_min + 1e-8)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n    Zcorr = Zg - (Zhat * gamma_local)\n    \n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total, metric=metric, delta=delta, k_density=kdensity, rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances', 'params': {'n_neighbors': k_total, 'method': 'bbsg'}}\n    \n    return adata\n",
+    "submitted_timestamp": 1761753732.4690514,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6981662888243478,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Testing Explained Variance Weighting.\n  Applied explained variance weighting to 100 PCs.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b290134e-a467-4cce-a5da-8e2dafd7b40a/result_human.h5ad\n\nRESULT_UUID: b290134e-a467-4cce-a5da-8e2dafd7b40a\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.580  NMI: 0.586\n  Graph_conn: 0.899  kBET: 0.790  iLISI: 0.980  cLISI: 0.914\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.579562  NMI: 0.585657\n  Graph_conn: 0.900372  kBET: 0.753577  iLISI: 0.979899  cLISI: 0.974893\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.580",
+          0.5796187150617417
+        ],
+        "NMI": [
+          "0.586",
+          0.5855398172123024
+        ],
+        "Graph_conn": [
+          "0.899",
+          0.8986533458145793
+        ],
+        "kBET": [
+          "0.790",
+          0.7897842857776854
+        ],
+        "iLISI": [
+          "0.980",
+          0.9798994974874377
+        ],
+        "cLISI": [
+          "0.914",
+          0.9138125040622177
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761754140.452857,
+      "evaluation_datetime": "2025-10-30T00:09:00.452858",
+      "sort_key": [
+        0.6981662888243478
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6981662888243478,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761754140.5084853,
+    "version_notified": "original",
+    "message": "Your research submission 'Novel Hypothesis: Explained Variance Weighting for PCA in ALC Pipeline' (ID: 1521) has been evaluated.\n\n**Score:** 0.6981662888243478\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.580\n**NMI:** 0.586\n**Graph_conn:** 0.899\n**kBET:** 0.790\n**iLISI:** 0.980\n**cLISI:** 0.914\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.580  NMI: 0.586\n  Graph_conn: 0.899  kBET: 0.790  iLISI: 0.980  cLISI: 0.914\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.579562  NMI: 0.585657\n  Graph_conn: 0.900372  kBET: 0.753577  iLISI: 0.979899  cLISI: 0.974893\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] Testing Explained Variance Weighting.\n  Applied explained variance weighting to 100 PCs.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/b290134e-a467-4cce-a5da-8e2dafd7b40a/result_human.h5ad\n\nRESULT_UUID: b290134e-a467-4cce-a5da-8e2dafd7b40a\n\n\nSTDERR:\n\n```"
+  }
+}

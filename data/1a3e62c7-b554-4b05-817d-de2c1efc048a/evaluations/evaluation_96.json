@@ -1,0 +1,46 @@
+{
+  "id": "96",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "BPIGO: single QDF (fallback Chain Shear) + boundary\u2011preserving polish (controlled)",
+  "tags": [
+    "bpigo",
+    "structural",
+    "slsqp",
+    "equality-constraints",
+    "analysis"
+  ],
+  "abstract": "Single controlled BPIGO experiment: attempt a Quad Diagonal Flip (QDF) detected from two crossing near\u2011tangent pairs; fallback to Chain Shear on a short interior chain if no crossing found. Polish with equality\u2011constrained SLSQP that preserves boundary actives (tol=1e\u20118). Log \u0394\u03a3r and Jaccard(pair) change; return the better of seed vs. baseline.",
+  "submitted_tick": 58,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np, sys\n\n# Use read-only lineage modules\nsys.path.append('storage/noesis')\ntry:\n    import analyze_contacts as AC\nexcept Exception:\n    AC = None\ntry:\n    import seeds_motifs as SM\nexcept Exception:\n    SM = None\ntry:\n    import operators as OP\nexcept Exception:\n    OP = None\ntry:\n    import operators_integration as OI\nexcept Exception:\n    OI = None\n\nN = 26\nR_MIN = 1e-6\nTOL = 1e-8\n\ndef load_saved_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt')\n        r = np.loadtxt('storage/noesis/latest_radii.txt')\n        c = np.array(c, dtype=float).reshape(N, 2)\n        r = np.array(r, dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        return None, None\n\ndef grid_plus_hole_seed(r0=0.1 - 1e-8, eps=1e-8):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    centers = [[x, y] for x in coords for y in coords]\n    d = float(np.linalg.norm(np.array([0.2,0.2]) - np.array([0.1,0.1])))\n    r_hole = d - r0 - eps\n    radii = [float(r0)] * 25 + [float(r_hole)]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef active_pairs_set(c, r, tol=TOL):\n    if AC is None:\n        return None\n    _, p = AC.active_sets(c, r, tol=tol)\n    s = set()\n    for (i, j, _) in p:\n        if i > j: i, j = j, i\n        s.add((i, j))\n    return s\n\ndef jaccard(a, b):\n    if a is None or b is None:\n        return None, None, None\n    inter = a & b\n    uni = a | b\n    if len(uni) == 0:\n        return 1.0, 0, 0\n    return len(inter)/len(uni), len(inter), len(uni)\n\ndef construct_packing():\n    # Baseline packing (saved best or constructive fallback)\n    c0, r0 = load_saved_best()\n    if c0 is None:\n        c0, r0 = grid_plus_hole_seed()\n    s0 = float(np.sum(r0))\n\n    # Default: return baseline if modules unavailable\n    if AC is None or OP is None or OI is None:\n        return c0, r0\n\n    # Attempt to detect crossing pairs for a QDF\n    op_name = None\n    c_seed, r_seed = c0.copy(), r0.copy()\n    try:\n        top_pairs, _ = AC.top_k_bottlenecks(c0, r0, k_pair=12, k_boundary=0)\n    except Exception:\n        top_pairs = []\n\n    applied_qdf = False\n    if SM is not None and top_pairs:\n        cp = SM.find_crossing_pairs(c0, top_pairs)\n        if cp is not None:\n            (i, j), (k, l) = cp\n            quad = tuple({i, j, k, l})\n            try:\n                c_seed, r_seed = OP.quad_diagonal_flip_seed(c0, r0, quad_idxs=quad, theta=1.5e-2)\n                op_name = 'QDF'\n                applied_qdf = True\n            except Exception:\n                applied_qdf = False\n\n    # Fallback: Chain Shear on a short interior chain near x\u22480.5\n    if not applied_qdf:\n        try:\n            b_act, _ = AC.active_sets(c0, r0, tol=TOL)\n            boundary_idx = set(i for (i, kind, _) in b_act)\n            candidates = [(abs(c0[i,0] - 0.5), i) for i in range(N) if i not in boundary_idx]\n            candidates.sort()\n            chain = [idx for (_, idx) in candidates[:5]] if len(candidates) >= 5 else [i for i in range(5)]\n            c_seed, r_seed = OP.chain_shear_seed(c0, r0, chain_idxs=chain, axis='x', amount=1.0e-2)\n            op_name = 'ChainShear'\n        except Exception:\n            # If even fallback fails, return baseline\n            return c0, r0\n\n    # Equality\u2011constrained polish that preserves boundary actives (trust region around seed)\n    try:\n        c_opt, r_opt = OI.polish_preserving_boundary(c_seed, r_seed, tol_eq=TOL, step_c=1e-3, step_r=1e-3, maxiter=500)\n    except Exception:\n        c_opt, r_opt = c_seed, r_seed\n\n    s1 = float(np.sum(r_opt))\n\n    # Compute pair Jaccard change at tol=1e\u20118\n    pairs0 = active_pairs_set(c0, r0, tol=TOL)\n    pairs1 = active_pairs_set(c_opt, r_opt, tol=TOL)\n    J, inter, uni = jaccard(pairs0, pairs1)\n\n    # Log experiment\n    try:\n        os.makedirs('storage/noesis/exports', exist_ok=True)\n        exp_id = int(np.random.randint(1e9))\n        log = {\n            'op': op_name,\n            'sum_radii_before': s0,\n            'sum_radii_after': s1,\n            'delta_sum_radii': s1 - s0,\n            'pair_jaccard_tol1e8': J,\n            'pair_intersection': inter,\n            'pair_union': uni,\n            'seed_valid': True\n        }\n        with open(f'storage/noesis/exports/bpigo_exp_{exp_id}.json', 'w') as f:\n            json.dump(log, f, indent=2)\n    except Exception:\n        pass\n\n    # Return the better packing by \u03a3r\n    if s1 >= s0:\n        return np.array(c_opt, dtype=float), np.array(r_opt, dtype=float)\n    else:\n        return np.array(c0, dtype=float), np.array(r0, dtype=float)\n",
+    "submitted_timestamp": 1760869700.2158177,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.629571935,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760869702.7506685,
+      "evaluation_datetime": "2025-10-19T18:28:22.750671"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.629571935,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760869702.7725399,
+    "version_notified": "original",
+    "message": "Your research submission 'BPIGO: single QDF (fallback Chain Shear) + boundary\u2011preserving polish (controlled)' (ID: 96) has been evaluated.\n\n**Score:** 2.629571935\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

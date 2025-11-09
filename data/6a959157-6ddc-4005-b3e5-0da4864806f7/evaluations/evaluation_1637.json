@@ -1,0 +1,92 @@
+{
+  "id": "1637",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "ComBat-PC Equal-Quota Graph (cosine): k=50, kq=1280, kd=22, \u03b4=0.12",
+  "tags": [
+    "embed-then-correct",
+    "combat",
+    "equal-quota",
+    "knn",
+    "cosine",
+    "graph"
+  ],
+  "abstract": "Ablation of 1633 using cosine candidate metric. Normalize counts \u2192 PCA(100) \u2192 ComBat on PCs, then build equal\u2011quota k=50 graph from kq=1280 cosine candidates with GraphFWPCA local scaling (kd=22, \u03b4=0.12). Weighted symmetric connectivities via 1/(scaled+eps); true distances retained; row-normalized. Tests whether cosine improves mixing over Euclidean.",
+  "submitted_tick": 1138,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nimport pandas as pd\nimport anndata as ad\nimport scanpy as sc\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _pca_svd(X, n_components=100, random_state=0):\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _safe_batch_codes(series):\n    if not pd.api.types.is_categorical_dtype(series):\n        cats = pd.Categorical(series)\n        return cats.codes, int(len(cats.categories))\n    else:\n        return series.cat.codes.to_numpy(), int(series.cat.categories.size)\n\ndef _equal_quota_select_per_row(d_scaled_row, d_raw_row, idx_row, batch_row_codes, k, nbatches):\n    base = k // nbatches\n    rem = k - base * nbatches\n    cols_sel, w_sel, d_sel = [], [], []\n    ptr = np.zeros(nbatches, dtype=int)\n    pos_by_b = [np.where(batch_row_codes == b)[0] for b in range(nbatches)]\n    for b in range(nbatches):\n        pos = pos_by_b[b]\n        take = min(base, pos.size)\n        if take > 0:\n            sel_pos = pos[:take]\n            ptr[b] = take\n            cols_sel.append(idx_row[sel_pos])\n            w_sel.append(1.0 / (d_scaled_row[sel_pos] + 1e-12))\n            d_sel.append(d_raw_row[sel_pos])\n    if cols_sel:\n        cols_sel = np.concatenate(cols_sel); w_sel = np.concatenate(w_sel); d_sel = np.concatenate(d_sel)\n    else:\n        cols_sel = np.array([], dtype=int); w_sel = np.array([], dtype=float); d_sel = np.array([], dtype=float)\n    selected = set(cols_sel.tolist())\n    for _ in range(rem):\n        best_b = -1; best_val = np.inf; best_col = None; best_w = None; best_d = None\n        for b in range(nbatches):\n            pos = pos_by_b[b]; p = ptr[b]\n            if p < pos.size:\n                j = pos[p]; val = d_scaled_row[j]; cand = int(idx_row[j])\n                if val < best_val and cand not in selected:\n                    best_val = val; best_b = b; best_col = cand\n                    best_w = 1.0 / (d_scaled_row[j] + 1e-12); best_d = d_raw_row[j]\n        if best_b == -1: break\n        ptr[best_b] += 1; selected.add(best_col)\n        cols_sel = np.append(cols_sel, best_col); w_sel = np.append(w_sel, best_w); d_sel = np.append(d_sel, best_d)\n    if cols_sel.size < k:\n        order = np.argsort(d_scaled_row, kind='mergesort')\n        for j in order:\n            cand = int(idx_row[j])\n            if cand not in selected:\n                cols_sel = np.append(cols_sel, cand)\n                w_sel = np.append(w_sel, 1.0 / (d_scaled_row[j] + 1e-12))\n                d_sel = np.append(d_sel, d_raw_row[j])\n                selected.add(cand)\n                if cols_sel.size >= k: break\n    if cols_sel.size > k:\n        keep = np.argsort(-w_sel)[:k]\n        cols_sel = cols_sel[keep]; w_sel = w_sel[keep]; d_sel = d_sel[keep]\n    return cols_sel.astype(int), w_sel.astype(float), d_sel.astype(float)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs = 100; k = 50; kd = 22; delta = 0.12; kq = 1280; mutual_boost = 1.10\n    # 1) Normalize + features\n    Xn = _normalize_log1p_from_counts(adata)\n    if 'batch_hvg' in adata.var.columns:\n        m = adata.var['batch_hvg'].values.astype(bool)\n        if 0 < m.sum() < Xn.shape[1]: Xn = Xn[:, m]\n    # 2) PCA then ComBat on PCs\n    Z0 = _pca_svd(Xn, n_components=n_pcs, random_state=0)\n    ad_pca = ad.AnnData(X=Z0.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pca, key='batch')\n    Z = np.asarray(ad_pca.X, dtype=np.float32)\n    # 3) Cosine KNN candidates\n    nn = NearestNeighbors(n_neighbors=kq + 1, metric=\"cosine\")\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d_raw = d_all[:, 1:]; idx = idx_all[:, 1:]\n    n = Z.shape[0]\n    # 4) Local scaling on cosine distances\n    kd_pos = int(min(kd, d_raw.shape[1])) - 1\n    sigma = np.maximum(d_raw[:, kd_pos], 1e-12)\n    sigma_i = sigma[:, None]; sigma_j = sigma[idx]; sigma_ij = 0.5 * (sigma_i + sigma_j)\n    d_scaled = d_raw / (np.power(sigma_ij, delta) + 1e-12)\n    # 5) Equal\u2011quota selection\n    batch_codes, nbatches = _safe_batch_codes(adata.obs['batch'])\n    batch_of_idx = batch_codes[idx]\n    rows = []; cols = []; data_w = []; data_d = []\n    for i in range(n):\n        csel, wsel, dsel = _equal_quota_select_per_row(d_scaled[i], d_raw[i], idx[i], batch_of_idx[i], k=k, nbatches=nbatches)\n        if csel.size == 0: continue\n        rows.append(np.full(csel.size, i, dtype=int)); cols.append(csel); data_w.append(wsel); data_d.append(dsel)\n    if not rows:\n        I = sp.eye(n, format='csr', dtype=np.float64)\n        adata.obsm['X_emb'] = Z; adata.obsp['connectivities'] = I; adata.obsp['distances'] = I\n        return adata\n    rows = np.concatenate(rows); cols = np.concatenate(cols)\n    data_w = np.concatenate(data_w); data_d = np.concatenate(data_d)\n    W_dir = sp.coo_matrix((data_w, (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((data_d, (rows, cols)), shape=(n, n)).tocsr()\n    # 6) Symmetrize + soft mutual\n    W_sym = W_dir.maximum(W_dir.T); D_sym = D_dir.minimum(D_dir.T)\n    mutual = W_dir.minimum(W_dir.T)\n    if mutual_boost != 1.0: W_sym = W_sym + (mutual_boost - 1.0) * mutual\n    # 7) Row\u2011normalize and write\n    W_sym = W_sym.tocsr().astype(np.float64); D_sym = D_sym.tocsr().astype(np.float64)\n    row_sum = np.asarray(W_sym.sum(axis=1)).ravel(); row_sum[row_sum == 0.0] = 1.0\n    W_sym = _row_scale_csr(W_sym, 1.0 / row_sum)\n    adata.obsm['X_emb'] = Z; adata.obsp['connectivities'] = W_sym; adata.obsp['distances'] = D_sym\n    return adata\n",
+    "submitted_timestamp": 1761779232.842786,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6331053590897981,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6afe231b-036e-4fd2-9f5d-5c63df831ffd/result_human.h5ad\n\nRESULT_UUID: 6afe231b-036e-4fd2-9f5d-5c63df831ffd\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.753  ASW_label: 0.209  ARI: 0.700  NMI: 0.688\n  Graph_conn: 0.914  kBET: 0.689  iLISI: 0.089  cLISI: 0.983\n  PCR: 1.000  Cell_cycle: 0.306\n\nRaw Scores (before normalization):\n  ASW_batch: 0.872778  ASW_label: 0.532185  ARI: 0.699831  NMI: 0.687765\n  Graph_conn: 0.915851  kBET: 0.659156  iLISI: 0.088890  cLISI: 0.994990\n  PCR: 0.999919  Cell_cycle: 0.270085",
+        "ASW_batch": [
+          "0.753",
+          0.7530956371333396
+        ],
+        "ASW_label": [
+          "0.209",
+          0.20880587979878232
+        ],
+        "ARI": [
+          "0.700",
+          0.6998721212744993
+        ],
+        "NMI": [
+          "0.688",
+          0.687676909846715
+        ],
+        "Graph_conn": [
+          "0.914",
+          0.9143995330100076
+        ],
+        "kBET": [
+          "0.689",
+          0.6893143639754314
+        ],
+        "iLISI": [
+          "0.089",
+          0.08889010505751616
+        ],
+        "cLISI": [
+          "0.983",
+          0.9828013470122859
+        ],
+        "PCR": [
+          "1.000",
+          0.9999194811639263
+        ],
+        "Cell_cycle": [
+          "0.306",
+          0.3062782126254779
+        ]
+      },
+      "evaluation_timestamp": 1761779683.2313402,
+      "evaluation_datetime": "2025-10-30T07:14:43.231340",
+      "sort_key": [
+        0.6331053590897981
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6331053590897981,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761779683.3352726,
+    "version_notified": "original",
+    "message": "Your research submission 'ComBat-PC Equal-Quota Graph (cosine): k=50, kq=1280, kd=22, \u03b4=0.12' (ID: 1637) has been evaluated.\n\n**Score:** 0.6331053590897981\n**ASW_batch:** 0.753\n**ASW_label:** 0.209\n**ARI:** 0.700\n**NMI:** 0.688\n**Graph_conn:** 0.914\n**kBET:** 0.689\n**iLISI:** 0.089\n**cLISI:** 0.983\n**PCR:** 1.000\n**Cell_cycle:** 0.306\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.753  ASW_label: 0.209  ARI: 0.700  NMI: 0.688\n  Graph_conn: 0.914  kBET: 0.689  iLISI: 0.089  cLISI: 0.983\n  PCR: 1.000  Cell_cycle: 0.306\n\nRaw Scores (before normalization):\n  ASW_batch: 0.872778  ASW_label: 0.532185  ARI: 0.699831  NMI: 0.687765\n  Graph_conn: 0.915851  kBET: 0.659156  iLISI: 0.088890  cLISI: 0.994990\n  PCR: 0.999919  Cell_cycle: 0.270085\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6afe231b-036e-4fd2-9f5d-5c63df831ffd/result_human.h5ad\n\nRESULT_UUID: 6afe231b-036e-4fd2-9f5d-5c63df831ffd\n\n\nSTDERR:\n\n```"
+  }
+}

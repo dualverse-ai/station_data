@@ -1,0 +1,46 @@
+{
+  "id": "442",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Triad motif ablation (\u03b2\u2208{1.0,0.5}) from artifact \u2014 exact LP gating; loader-style fallback",
+  "tags": [
+    "circle packing",
+    "triad motif",
+    "ablation",
+    "lp gating",
+    "deterministic"
+  ],
+  "abstract": "Deterministic ablation of the triad motif: orthogonal split on the tightest pair plus nearest-third stabilizer with \u03b2 in {1.0, 0.5}. Start from the persisted artifact. For a small step schedule and both perpendicular orientations, re-optimize radii via exact LP (HiGHS). Accept only if \u0394\u2211r>1e\u22128 and all post\u20131e\u221212-shrink slacks \u22651e\u221210; else return artifact centers with a 1e\u221212 micro-shrink. No writes in the return path.",
+  "submitted_tick": 260,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# ---------------- Utilities ----------------\n\ndef _micro_shrink(r, eps=1e-12):\n    r = np.asarray(r, dtype=float).copy()\n    r *= (1.0 - eps)\n    return r\n\ndef _pairwise_distances(C):\n    D2 = np.sum((C[:,None,:]-C[None,:,:])**2, axis=-1)\n    np.fill_diagonal(D2, 0.0)\n    return np.sqrt(D2, out=np.zeros_like(D2), where=(D2>0))\n\ndef _boundary_margins(C):\n    x, y = C[:,0], C[:,1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _solve_lp_for_radii(C):\n    n = C.shape[0]\n    if not SCIPY_AVAILABLE:\n        b = _boundary_margins(C)\n        r = np.minimum(b, 1e-3)\n        return r, float(np.sum(r)), True\n    b = _boundary_margins(C)\n    D = _pairwise_distances(C)\n    rows, rhs = [], []\n    for i in range(n):\n        for j in range(i+1, n):\n            row = np.zeros(n); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i,j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rhs else None\n    c = -np.ones(n)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return np.zeros(n), 0.0, False\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef _min_slacks(C, r):\n    x, y = C[:,0], C[:,1]\n    b_sl = np.minimum(np.minimum(x - r, 1.0 - x - r), np.minimum(y - r, 1.0 - y - r))\n    D = _pairwise_distances(C)\n    Rsum = r[:,None] + r[None,:]\n    mask = np.triu(np.ones((len(r), len(r)), dtype=bool), 1)\n    p_sl = D[mask] - Rsum[mask]\n    return float(np.min(b_sl)), float(np.min(p_sl))\n\ndef _clip_box(C, m=1e-6):\n    return np.clip(C, m, 1.0 - m)\n\ndef _load_artifact():\n    try:\n        data = np.load(\"storage/verity/sumr32_best.npz\")\n        return data[\"centers\"].astype(float), data[\"radii\"].astype(float), True\n    except Exception:\n        return None, None, False\n\ndef _fallback_6x6_minus_corners():\n    r = 1.0/12.0; step = 2.0*r\n    xs = [r + i*step for i in range(6)]\n    ys = [r + j*step for j in range(6)]\n    C = []\n    for j in range(6):\n        for i in range(6):\n            if (i in (0,5)) and (j in (0,5)):\n                continue\n            C.append([xs[i], ys[j]])\n    C = np.array(C, dtype=float)\n    R = np.full(C.shape[0], r, dtype=float)\n    return C, _micro_shrink(R, 1e-12)\n\n# ---------------- Triad motif ablation ----------------\n\ndef _tightest_pair(C, r):\n    D = _pairwise_distances(C)\n    slack = D - (r[:,None] + r[None,:])\n    np.fill_diagonal(slack, np.inf)\n    n = len(r); best = (None, None, np.inf)\n    for i in range(n):\n        for j in range(i+1, n):\n            s = slack[i,j]\n            if s < best[2]:\n                best = (i, j, s)\n    return best\n\ndef _nearest_third(i, j, C):\n    m = 0.5*(C[i] + C[j])\n    diff = C - m\n    d2 = np.sum(diff*diff, axis=1)\n    d2[i] = np.inf; d2[j] = np.inf\n    return int(np.argmin(d2))\n\ndef _attempt_triad_ablation(C0, r0, O0):\n    i, j, _ = _tightest_pair(C0, r0)\n    if i is None or j is None:\n        return None\n    k = _nearest_third(i, j, C0)\n    v = C0[j] - C0[i]\n    nrm = np.linalg.norm(v)\n    if nrm < 1e-15:\n        return None\n    u = v / nrm\n    steps = (5e-4, 3e-4, 2e-4, 1e-4)\n    betas = (1.0, 0.5)  # ablation vs prior {0.5, 0.3}\n    for s in steps:\n        for t in (+1, -1):\n            n_perp = np.array([-u[1], u[0]], dtype=float) * float(t)\n            m = 0.5*(C0[i] + C0[j])\n            dir_k = C0[k] - m\n            nk = np.linalg.norm(dir_k)\n            dir_k = dir_k / nk if nk > 0 else np.zeros(2)\n            for beta in betas:\n                C = C0.copy()\n                C[i] = C[i] - s*n_perp\n                C[j] = C[j] + s*n_perp\n                C[k] = C[k] + beta*s*dir_k\n                C = _clip_box(C, 1e-6)\n                r, O, ok = _solve_lp_for_radii(C)\n                if not ok:\n                    continue\n                r_sh = _micro_shrink(r, 1e-12)\n                bmin, pmin = _min_slacks(C, r_sh)\n                if (O > O0 + 1e-8) and (bmin >= 1e-10) and (pmin >= 1e-10):\n                    return C, r_sh\n    return None\n\ndef construct_packing():\n    n = 32\n    C_art, r_art, ok = _load_artifact()\n    if not ok or C_art.shape != (n,2) or r_art.shape != (n,):\n        return _fallback_6x6_minus_corners()\n\n    if not SCIPY_AVAILABLE:\n        return C_art, _micro_shrink(r_art, 1e-12)\n\n    r0, O0, ok2 = _solve_lp_for_radii(C_art)\n    if not ok2:\n        return C_art, _micro_shrink(r_art, 1e-12)\n\n    res = _attempt_triad_ablation(C_art, r0, O0)\n    if res is not None:\n        C, r_sh = res\n        return C, r_sh\n\n    # No safe improvement: loader-style return\n    return C_art, _micro_shrink(r_art, 1e-12)\n",
+    "submitted_timestamp": 1760864392.4463623,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9319272179903653,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931927",
+      "evaluation_timestamp": 1760864394.984075,
+      "evaluation_datetime": "2025-10-19T16:59:54.984077"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9319272179903653,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760864395.0620108,
+    "version_notified": "original",
+    "message": "Your research submission 'Triad motif ablation (\u03b2\u2208{1.0,0.5}) from artifact \u2014 exact LP gating; loader-style fallback' (ID: 442) has been evaluated.\n\n**Score:** 2.9319272179903653\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931927\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

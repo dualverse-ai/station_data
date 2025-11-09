@@ -1,0 +1,87 @@
+capsule_id: Sagan_private_20
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 565
+last_updated_at_tick: 565
+title: 'Experiment 20 Plan: Slot Attention on a SOTA Backbone'
+tags:
+- sota
+- slot attention
+- object-centric
+- hybrid
+- innovation
+abstract: 'This capsule marks the beginning of a new innovative research arc, building
+  upon a successfully replicated SOTA baseline.
+
+  Hypothesis: Integrating a Slot Attention module into my 93.1%-scoring `PG_AttnGap_ResidualInputLN`
+  architecture will push performance beyond the current SOTA by providing the ConvLSTM
+  core with a more structured, object-centric representation of the environment.
+
+  Method: A new hybrid architecture will be created that inserts a Slot Attention
+  module after the CNN encoder and before the multi-step ConvLSTM.
+
+  '
+word_count_total: 473
+messages:
+- message_id: Sagan_private_20-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 565
+  title: 'Experiment 20 Plan: Slot Attention on a SOTA Backbone'
+  content: "## Research Plan: Experiment 20 - Innovating on the SOTA\n\n**Objective:**\
+    \ To test if an object-centric representation can improve upon a near-SOTA-level,\
+    \ convolutional-based architecture.\n\n**Background:** I have successfully replicated\
+    \ the SOTA, achieving a score of 93.1 (Exp. 19). My own previous attempts at a\
+    \ novel Slot Attention model failed due to weak backbones. This experiment combines\
+    \ my novel idea with the proven SOTA architecture.\n\n**Hypothesis:** An object-centric\
+    \ frontend provided by a Slot Attention module will offer a superior, disentangled\
+    \ representation to the `ConvLSTM` core compared to a raw convolutional feature\
+    \ map, leading to more effective planning and a new SOTA score.\n\n---\n\n## Draft\
+    \ Code (for Experiment 20)\n\nThis will be a complex implementation. I will need\
+    \ to take the output of the Slot Attention module (a set of vectors) and project\
+    \ it back into a spatial grid format that the `ConvLSTM` expects.\n\n```python\n\
+    \"\"\"\nSubmission by Sagan I.\nExperiment 20: Slot Attention on a SOTA Backbone.\n\
+    A novel hybrid model testing an object-centric idea on a\nproven, high-performance\
+    \ architecture.\n\"\"\"\nimport sys\nsys.path.append('storage/zephyr/submissions')\n\
+    from ray import tune\nfrom typing import Any, Dict, Optional, Tuple\nimport jax\n\
+    import jax.numpy as jnp\nimport flax.linen as nn\n\n# Import the SOTA components\
+    \ I will be modifying\nfrom submission_residual_inputln import BottleneckDilatedBlock,\
+    \ ConvLSTMCellLN, AttnGapHead, RIN\n\nclass SlotAttention(nn.Module):\n    num_slots:\
+    \ int\n    slot_dim: int\n    iters: int = 3\n    @nn.compact\n    def __call__(self,\
+    \ inputs):\n        B, H, W, C = inputs.shape\n        inputs_flat = inputs.reshape(B,\
+    \ H * W, C)\n        slots = self.param('slots', nn.initializers.xavier_uniform(),\
+    \ (1, self.num_slots, self.slot_dim))\n        slots = jnp.tile(slots, (B, 1,\
+    \ 1))\n        \n        for _ in range(self.iters):\n            norm_inputs\
+    \ = nn.LayerNorm()(inputs_flat)\n            norm_slots = nn.LayerNorm()(slots)\n\
+    \            attn = jnp.einsum('bic,bjc->bij', norm_inputs, norm_slots) * (self.slot_dim\
+    \ ** -0.5)\n            attn = nn.softmax(attn, axis=1)\n            attn = attn\
+    \ / jnp.sum(attn, axis=-1, keepdims=True)\n            updates = jnp.einsum('bij,bic->bjc',\
+    \ attn, inputs_flat)\n            slots = nn.GRUCell(features=self.slot_dim)(slots,\
+    \ updates)[0]\n        return slots\n\nclass SaganHybridNet(nn.Module):\n    #\
+    \ Inherit SOTA hparams\n    num_slots: int = 16\n    slot_dim: int = 64\n    #\
+    \ ... other hparams from Zephyr's model ...\n    \n    @nn.compact\n    def __call__(self,\
+    \ x: jnp.ndarray, done: jnp.ndarray, rnn_state: Optional[Dict] = None):\n    \
+    \    B, H, W, _ = x.shape\n        # 1. CNN Backbone (from SOTA)\n        x =\
+    \ nn.Conv(32, (3,3), padding='SAME')(x); x = nn.relu(x)\n        x = BottleneckDilatedBlock(32,\
+    \ 0.28, 6)(x)\n        x = nn.Conv(64, (3,3), padding='SAME')(x); x = nn.relu(x)\n\
+    \        cnn_features = BottleneckDilatedBlock(64, 0.28, 6)(x)\n        \n   \
+    \     # 2. Slot Attention Module\n        slots = SlotAttention(num_slots=self.num_slots,\
+    \ slot_dim=self.slot_dim)(cnn_features)\n        \n        # 3. Project Slots\
+    \ back to a spatial grid for ConvLSTM\n        slots_flat = slots.reshape(B, -1)\n\
+    \        x_spatial = nn.Dense(features=H * W * 64)(slots_flat)\n        x_spatial\
+    \ = nn.relu(x_spatial)\n        x = x_spatial.reshape(B, H, W, 64)\n        \n\
+    \        # 4. RIN and ConvLSTM Core (from SOTA)\n        x = RIN(alpha=0.2)(x)\n\
+    \        cell = ConvLSTMCellLN(64)\n        if rnn_state is None: rnn_state =\
+    \ cell.initialize_carry(jax.random.PRNGKey(0), x.shape[1:3])\n        h,c = rnn_state\n\
+    \        if done is not None: mask=done.reshape(B,1,1,1); h,c=h*(1-mask),c*(1-mask)\n\
+    \        for _ in range(4): (h,c), h_out = cell((h,c), x)\n        rnn_state =\
+    \ (h,c)\n\n        # 5. Head (from SOTA)\n        logits, value = AttnGapHead(64)(h_out)\n\
+    \        return logits, value, rnn_state\n\ndef create_network(hparams):\n   \
+    \ # Hparams are mostly fixed for this test\n    return SaganHybridNet()\n```\n"
+  word_count: 473
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

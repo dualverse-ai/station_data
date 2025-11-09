@@ -1,0 +1,50 @@
+{
+  "id": "1830",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Graph diagnostics (test()): Frozen MPB\u2011GraphFWPCA+DAQB on Heart (degree, batch-mixing, sigma-kd coupling)",
+  "tags": [
+    "diagnostics",
+    "graph",
+    "mixing",
+    "sigma-kd",
+    "reproducibility",
+    "test-mode"
+  ],
+  "abstract": "Runs the frozen baseline on Heart (test mode) and prints diagnostics: degree stats, per-cell batch-mixing fractions, sigma_kd summaries (kd=22), and coupling (Pearson/Spearman) between sigma_kd and mixing. Outputs JSON blocks for archival.",
+  "submitted_tick": 1326,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, numpy as np\nimport anndata as ad\nimport scipy.sparse as sp\nfrom scipy.stats import pearsonr, spearmanr\n\nsys.path.extend(['storage/praxis'])\nfrom mpb_graphfwpca_override import eliminate_mpb_graphfwpca as run_frozen\nfrom diag_sigma_kd import sigma_kd_from_embedding, global_summary, per_batch_summary\n\nFROZEN_CFG = dict(\n    lam_override=0.605,\n    delta=0.12,\n    kdensity=22,\n    k_total=50,\n    emb_n_neighbors=17,\n    gamma_max=0.70,\n    cap=2.0,\n    rng_seed=0,\n)\n\ndef _degree_stats(C):\n    deg = np.asarray(C.sum(axis=1)).ravel()\n    return {\n        \"n\": int(deg.size),\n        \"mean\": float(deg.mean()),\n        \"median\": float(np.median(deg)),\n        \"min\": float(deg.min()) if deg.size else 0.0,\n        \"max\": float(deg.max()) if deg.size else 0.0,\n        \"std\": float(deg.std()),\n    }, deg\n\ndef _per_cell_mixing(C, batches):\n    # mixing_other = fraction of neighbors with batch != own batch\n    n = C.shape[0]\n    codes = batches.cat.codes.to_numpy()\n    mixing = np.zeros(n, dtype=np.float32)\n    indptr, indices = C.indptr, C.indices\n    for i in range(n):\n        start, end = indptr[i], indptr[i+1]\n        nbrs = indices[start:end]\n        d = end - start\n        if d == 0:\n            mixing[i] = np.nan\n        else:\n            mixing[i] = 1.0 - (np.sum(codes[nbrs] == codes[i]) / d)\n    return mixing\n\ndef _per_batch_summary(vals, batches):\n    out = {}\n    for cat in batches.cat.categories:\n        mask = (batches == cat).to_numpy()\n        v = vals[mask]\n        v = v[~np.isnan(v)]\n        if v.size:\n            out[str(cat)] = {\n                \"n\": int(v.size),\n                \"mean\": float(np.mean(v)),\n                \"median\": float(np.median(v)),\n                \"std\": float(np.std(v)),\n            }\n    return out\n\ndef test(adata: ad.AnnData):\n    # Run frozen integration on provided Heart data\n    A = run_frozen(adata.copy(), **FROZEN_CFG)\n    print(\"[DIAG] Integration done. Has graph:\", ('connectivities' in A.obsp and 'distances' in A.obsp), \"Has X_emb:\", ('X_emb' in A.obsm))\n\n    # Ensure CSR graph\n    C = A.obsp['connectivities'].tocsr().astype(np.float64)\n    b = A.obs['batch'].astype('category')\n\n    # Degree statistics\n    deg_stats, deg_vec = _degree_stats(C)\n    print(\"DEGREE_JSON:\", json.dumps(deg_stats))\n\n    # Per-cell batch-mixing\n    mix = _per_cell_mixing(C, b)\n    mix_all = mix[~np.isnan(mix)]\n    mix_summary = {\n        \"n\": int(mix_all.size),\n        \"mean\": float(np.mean(mix_all)),\n        \"median\": float(np.median(mix_all)),\n        \"std\": float(np.std(mix_all)),\n    }\n    mix_by_batch = _per_batch_summary(mix, b)\n    print(\"MIXING_JSON:\", json.dumps({\"all\": mix_summary, \"by_batch\": mix_by_batch}))\n\n    # sigma_kd (kd=22) from embedding; summaries\n    sig = sigma_kd_from_embedding(np.asarray(A.obsm['X_emb']), kd=22, extra=16, metric=\"euclidean\")\n    sigma_global = global_summary(sig)\n    sigma_batches = per_batch_summary(sig, b.to_numpy())\n    print(\"SIGMA_GLOBAL_JSON:\", json.dumps(sigma_global))\n    # Convert per-batch dataframe to dict\n    sigma_batches_dict = {str(r[\"batch\"]): {k: r[k] for k in [\"n\",\"median\",\"mean\",\"cv\",\"gini\"]} for _, r in sigma_batches.iterrows()}\n    print(\"SIGMA_BY_BATCH_JSON:\", json.dumps(sigma_batches_dict))\n\n    # Coupling: sigma_kd vs mixing_other (exclude NaNs)\n    msk = ~np.isnan(mix)\n    pr, pp = pearsonr(sig[msk], mix[msk])\n    sr, spv = spearmanr(sig[msk], mix[msk])\n    coupling = {\"pearson_r\": float(pr), \"pearson_p\": float(pp), \"spearman_r\": float(sr), \"spearman_p\": float(spv)}\n    print(\"COUPLING_JSON:\", json.dumps(coupling))\n\n    return \"Graph diagnostics completed\"\n",
+    "submitted_timestamp": 1761840271.1126196,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[DIAG] Integration done. Has graph: True Has X_emb: True\nDEGREE_JSON: {\"n\": 20000, \"mean\": 92.00375, \"median\": 58.0, \"min\": 50.0, \"max\": 3847.0, \"std\": 143.30487652532102}\nMIXING_JSON: {\"all\": {\"n\": 20000, \"mean\": 0.7797343730926514, \"median\": 0.7818182110786438, \"std\": 0.08988457918167114}, \"by_batch\": {\"Koenig et al. 2022\": {\"n\": 3261, \"mean\": 0.8293188810348511, \"median\": 0.8333333134651184, \"std\": 0.08470505475997925}, \"Kuppe et al. 2022\": {\"n\": 906, \"mean\": 0.8951085805892944, \"median\": 0.9252659678459167, \"std\": 0.08790641278028488}, \"Litvinukova et al. 2020\": {\"n\": 9685, \"mean\": 0.7815194129943848, \"median\": 0.7924528121948242, \"std\": 0.0711975172162056}, \"Tucker et al. 2020\": {\"n\": 6148, \"mean\": 0.7336195707321167, \"median\": 0.7254902124404907, \"std\": 0.08919268846511841}}}\nSIGMA_GLOBAL_JSON: {\"n\": 20000, \"median\": 11.318583965301514, \"mean\": 11.720042165255547, \"cv\": 0.2861451705529407, \"gini\": 0.15614037405307662}\nSIGMA_BY_BATCH_JSON: {\"Koenig et al. 2022\": {\"n\": 3261, \"median\": 10.889581680297852, \"mean\": 10.971186705726453, \"cv\": 0.2551772562718998, \"gini\": 0.1404642331323873}, \"Kuppe et al. 2022\": {\"n\": 906, \"median\": 13.085490703582764, \"mean\": 12.520032161118968, \"cv\": 0.2941419132013762, \"gini\": 0.16245368198831536}, \"Litvinukova et al. 2020\": {\"n\": 9685, \"median\": 10.39061164855957, \"mean\": 10.721863692534235, \"cv\": 0.26373895137511516, \"gini\": 0.1429501897892497}, \"Tucker et al. 2020\": {\"n\": 6148, \"median\": 13.295211791992188, \"mean\": 13.5717964309644, \"cv\": 0.25992420584469833, \"gini\": 0.14156370289442458}}\nCOUPLING_JSON: {\"pearson_r\": -0.03730695055790311, \"pearson_p\": 1.3095330446128981e-07, \"spearman_r\": -0.10057352424297557, \"spearman_p\": 3.9678775587613396e-46}\nTest result: Graph diagnostics completed\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761840335.9386632,
+      "evaluation_datetime": "2025-10-31T00:05:35.938672",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761840335.9724145,
+    "version_notified": "original",
+    "message": "Your research submission 'Graph diagnostics (test()): Frozen MPB\u2011GraphFWPCA+DAQB on Heart (degree, batch-mixing, sigma-kd coupling)' (ID: 1830) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[DIAG] Integration done. Has graph: True Has X_emb: True\nDEGREE_JSON: {\"n\": 20000, \"mean\": 92.00375, \"median\": 58.0, \"min\": 50.0, \"max\": 3847.0, \"std\": 143.30487652532102}\nMIXING_JSON: {\"all\": {\"n\": 20000, \"mean\": 0.7797343730926514, \"median\": 0.7818182110786438, \"std\": 0.08988457918167114}, \"by_batch\": {\"Koenig et al. 2022\": {\"n\": 3261, \"mean\": 0.8293188810348511, \"median\": 0.8333333134651184, \"std\": 0.08470505475997925}, \"Kuppe et al. 2022\": {\"n\": 906, \"mean\": 0.8951085805892944, \"median\": 0.9252659678459167, \"std\": 0.08790641278028488}, \"Litvinukova et al. 2020\": {\"n\": 9685, \"mean\": 0.7815194129943848, \"median\": 0.7924528121948242, \"std\": 0.0711975172162056}, \"Tucker et al. 2020\": {\"n\": 6148, \"mean\": 0.7336195707321167, \"median\": 0.7254902124404907, \"std\": 0.08919268846511841}}}\nSIGMA_GLOBAL_JSON: {\"n\": 20000, \"median\": 11.318583965301514, \"mean\": 11.720042165255547, \"cv\": 0.2861451705529407, \"gini\": 0.15614037405307662}\nSIGMA_BY_BATCH_JSON: {\"Koenig et al. 2022\": {\"n\": 3261, \"median\": 10.889581680297852, \"mean\": 10.971186705726453, \"cv\": 0.2551772562718998, \"gini\": 0.1404642331323873}, \"Kuppe et al. 2022\": {\"n\": 906, \"median\": 13.085490703582764, \"mean\": 12.520032161118968, \"cv\": 0.2941419132013762, \"gini\": 0.16245368198831536}, \"Litvinukova et al. 2020\": {\"n\": 9685, \"median\": 10.39061164855957, \"mean\": 10.721863692534235, \"cv\": 0.26373895137511516, \"gini\": 0.1429501897892497}, \"Tucker et al. 2020\": {\"n\": 6148, \"median\": 13.295211791992188, \"mean\": 13.5717964309644, \"cv\": 0.25992420584469833, \"gini\": 0.14156370289442458}}\nCOUPLING_JSON: {\"pearson_r\": -0.03730695055790311, \"pearson_p\": 1.3095330446128981e-07, \"spearman_r\": -0.10057352424297557, \"spearman_p\": 3.9678775587613396e-46}\nTest result: Graph diagnostics completed\n\n\nSTDERR:\n\n```"
+  }
+}

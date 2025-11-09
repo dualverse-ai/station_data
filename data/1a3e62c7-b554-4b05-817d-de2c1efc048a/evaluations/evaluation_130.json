@@ -1,0 +1,46 @@
+{
+  "id": "130",
+  "author": "Aletheia I",
+  "research_task_id": "1",
+  "title": "Exploratory NEB v2: SLSQP Relaxation of Intermediate Images",
+  "tags": [
+    "nudged elastic band",
+    "neb",
+    "slsqp",
+    "solution landscape",
+    "pathfinding"
+  ],
+  "abstract": "This is a revised, more robust attempt at a Nudged Elastic Band (NEB) algorithm. The previous version failed due to simplistic constraint handling. This version replaces the custom physics-based relaxation with the powerful SLSQP solver. In each step, every intermediate image in the band is partially optimized using a short SLSQP run to ensure it remains a valid packing. This should provide a more stable method for finding a path between the two SOTA solutions.",
+  "submitted_tick": 79,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\n# --- Define SLSQP components globally for reuse ---\nN = 26\ndef pack_to_z(c, r):\n    z = np.zeros(N*3); z[0::3], z[1::3], z[2::3] = c[:,0], c[:,1], r; return z\ndef z_to_pack(z):\n    c = np.vstack((z[0::3], z[1::3])).T; r = z[2::3]; return c, r\ndef objective(z): return -np.sum(z[2::3])\ndef constraint_boundary(z):\n    c, r = z_to_pack(z)\n    return np.concatenate((c[:,0]-r, 1-c[:,0]-r, c[:,1]-r, 1-c[:,1]-r))\ndef constraint_nonoverlap(z):\n    c, r = z_to_pack(z)\n    pdist_sq = np.sum((c[:,None,:]-c[None,:,:])**2, axis=-1)\n    r_sum = r[:,None] + r[None,:]\n    iu = np.triu_indices(N, k=1)\n    return np.sqrt(pdist_sq[iu]) - r_sum[iu]\n\ndef construct_packing():\n    \"\"\"\n    A more robust NEB implementation using SLSQP for image relaxation.\n    \"\"\"\n    try:\n        centers_A = np.loadtxt(\"storage/Aletheia/my_sota_centers.txt\")\n        radii_A = np.loadtxt(\"storage/Aletheia/my_sota_radii.txt\")\n        centers_B = np.loadtxt(\"storage/Noesis/latest_centers.txt\")\n        radii_B = np.loadtxt(\"storage/Noesis/latest_radii.txt\")\n    except IOError:\n        return np.zeros((N,2)), np.zeros(N)\n\n    pack_A = np.hstack([centers_A, radii_A.reshape(-1, 1)])\n    pack_B = np.hstack([centers_B, radii_B.reshape(-1, 1)])\n\n    num_images = 8 # Fewer images for this expensive approach\n    band = np.array([pack_A + (i / (num_images + 1.0)) * (pack_B - pack_A) for i in range(num_images + 2)])\n    \n    num_steps = 3\n    spring_constant = 10.0\n    bounds = [(0,1) if i%3!=2 else (1e-6,0.5) for i in range(N*3)]\n    constraints = [{'type':'ineq','fun':constraint_boundary}, {'type':'ineq','fun':constraint_nonoverlap}]\n\n    for _ in range(num_steps):\n        # 1. Relax each intermediate image using a few SLSQP steps\n        for i in range(1, num_images + 1):\n            z0 = pack_to_z(band[i,:,:2], band[i,:,2])\n            res = minimize(objective, z0, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter':5, 'ftol':1e-3}) # Short run\n            if res.success:\n                c, r = z_to_pack(res.x)\n                band[i] = np.hstack([c, r.reshape(-1,1)])\n        \n        # 2. Re-apply spring force to maintain spacing\n        tangents = band[1:] - band[:-1]\n        lengths = np.linalg.norm(tangents, axis=(1,2))\n        avg_length = np.mean(lengths)\n        \n        for i in range(1, num_images + 1):\n            spring_force_vec = (lengths[i] - avg_length) * tangents[i] + (lengths[i-1] - avg_length) * tangents[i-1]\n            band[i] -= 0.01 * spring_force_vec # Gently nudge back into place\n\n    # Return the midpoint image of the final band\n    final_pack = band[num_images // 2]\n    final_centers, final_radii = final_pack[:,:2], final_pack[:,2]\n    \n    safety_factor = 1.0 - 1e-9\n    return final_centers, final_radii * safety_factor\n",
+    "submitted_timestamp": 1760872495.902849,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.17930524842266757, r1+r2=0.17931043757546705",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 1 and 2 overlap: dist=0.17930524842266757, r1+r2=0.17931043757546705",
+      "evaluation_timestamp": 1760872502.2044058,
+      "evaluation_datetime": "2025-10-19T19:15:02.204408"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760872502.2356403,
+    "version_notified": "original",
+    "message": "Your research submission 'Exploratory NEB v2: SLSQP Relaxation of Intermediate Images' (ID: 130) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 1 and 2 overlap: dist=0.17930524842266757, r1+r2=0.17931043757546705\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "640",
+  "author": "Verity II",
+  "research_task_id": "1",
+  "title": "Contact\u2011graph and boundary\u2011slack auditor (full\u2011precision diagnostics; returns baseline)",
+  "tags": [
+    "circle packing",
+    "analysis",
+    "diagnostics",
+    "contact graph",
+    "zero slack"
+  ],
+  "abstract": "Loads the persisted best packing and prints full-precision diagnostics: min/median/max pairwise slack, count of near-contacts (<=1e-12, 5e-12), boundary slacks per side, degree distribution of near-contacts, and safety checks. Returns the unchanged configuration to keep score constant; logs are for analysis and reproducibility.",
+  "submitted_tick": 391,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\n\nN = 32\nR_MIN = 1e-8\n\ndef _pair_indices(n):\n    return [(i, j) for i in range(n) for j in range(i + 1, n)]\n\nPAIRS = _pair_indices(N)\n\ndef _load_best():\n    # Try lineage storage first\n    C = None; r = None\n    try:\n        C = np.load(\"storage/verity/best_centers.npy\").astype(float)\n        r = np.load(\"storage/verity/best_radii.npy\").astype(float)\n    except Exception:\n        pass\n    if C is not None and r is not None and C.shape == (N, 2) and r.shape == (N,):\n        return C, r\n\n    # Fallback: deterministic 6x6 minus corners, with small radii from boundaries\n    xs = np.linspace(0.1, 0.9, 6)\n    ys = np.linspace(0.1, 0.9, 6)\n    centers = []\n    for ix, x in enumerate(xs):\n        for iy, y in enumerate(ys):\n            if (ix in (0, 5)) and (iy in (0, 5)):\n                continue\n            centers.append([x, y])\n    C = np.array(centers, dtype=float)\n    x = C[:, 0]; y = C[:, 1]\n    r = np.minimum.reduce([x, 1.0 - x, y, 1.0 - y]).astype(float)\n    r = np.maximum(R_MIN, 0.99 * r)\n    return C, r\n\ndef _slack_stats(C, r, eps1=1e-12, eps5=5e-12):\n    x = C[:, 0]; y = C[:, 1]\n    # Boundary slacks\n    sb_left  = x - r\n    sb_right = (1.0 - x) - r\n    sb_bot   = y - r\n    sb_top   = (1.0 - y) - r\n\n    # Pairwise slacks\n    s_pairs = []\n    deg_eps1 = np.zeros(N, dtype=int)\n    deg_eps5 = np.zeros(N, dtype=int)\n    for (i, j) in PAIRS:\n        dij = float(np.linalg.norm(C[i] - C[j]))\n        s = dij - (r[i] + r[j])\n        s_pairs.append(s)\n        if s <= eps1 + 0.0:\n            deg_eps1[i] += 1; deg_eps1[j] += 1\n        if s <= eps5 + 0.0:\n            deg_eps5[i] += 1; deg_eps5[j] += 1\n    s_pairs = np.array(s_pairs, dtype=float)\n\n    def quantiles(v):\n        v_sorted = np.sort(v)\n        n = len(v_sorted)\n        def q(p):\n            idx = min(n - 1, max(0, int(round(p * (n - 1)))))\n            return v_sorted[idx]\n        return q(0.0), q(0.25), q(0.5), q(0.75), q(1.0)\n\n    # Print diagnostics\n    def fmt(v): return f\"{v:.18f}\"\n    print(\"[audit] pairwise_slack: min/25%/50%/75%/max =\", \" \".join(fmt(z) for z in quantiles(s_pairs)))\n    print(\"[audit] pairwise_slack <= 1e-12:\", int(np.sum(s_pairs <= 1e-12)))\n    print(\"[audit] pairwise_slack <= 5e-12:\", int(np.sum(s_pairs <= 5e-12)))\n    for name, arr in [(\"left\", sb_left), (\"right\", sb_right), (\"bottom\", sb_bot), (\"top\", sb_top)]:\n        a_min, a_q1, a_med, a_q3, a_max = quantiles(arr)\n        print(f\"[audit] boundary_{name}: min/25%/50%/75%/max =\", \" \".join(fmt(z) for z in [a_min, a_q1, a_med, a_q3, a_max]))\n\n    # Degree distributions (near-contacts)\n    def hist_counts(deg):\n        vals, counts = np.unique(deg, return_counts=True)\n        return list(zip(vals.tolist(), counts.tolist()))\n    print(\"[audit] degree(<=1e-12) histogram:\", hist_counts(deg_eps1))\n    print(\"[audit] degree(<=5e-12) histogram:\", hist_counts(deg_eps5))\n\n    # Safety checks\n    n_viol_b = int(np.sum(sb_left < -1e-15) + np.sum(sb_right < -1e-15) + np.sum(sb_bot < -1e-15) + np.sum(sb_top < -1e-15))\n    n_viol_p = int(np.sum(s_pairs < -1e-15))\n    print(f\"[audit] safety: n_boundary_viol={n_viol_b} n_pair_viol={n_viol_p}\")\n\ndef construct_packing() -> tuple:\n    C, r = _load_best()\n    # Log sum of radii at full precision\n    print(f\"[audit] sum_r_full={np.sum(r):.18f}\")\n    _slack_stats(C, r, eps1=1e-12, eps5=5e-12)\n\n    # Persist a snapshot for reproducibility\n    try:\n        os.makedirs(\"storage/verity\", exist_ok=True)\n        np.save(\"storage/verity/audit_centers.npy\", C)\n        np.save(\"storage/verity/audit_radii.npy\", r)\n    except Exception:\n        pass\n\n    return np.array(C, dtype=float), np.array(r, dtype=float)\n",
+    "submitted_timestamp": 1760902033.4993982,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9395727712063042,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[audit] sum_r_full=2.939572771206304225\n[audit] pairwise_slack: min/25%/50%/75%/max = 0.000000000000000416 0.142457667682378830 0.314473713448536030 0.495317692997778281 0.987571070999599510\n[audit] pairwise_slack <= 1e-12: 74\n[audit] pairwise_slack <= 5e-12: 74\n[audit] boundary_left: min/25%/50%/75%/max = 0.000000000000000194 0.171546168479383615 0.496008539721763397 0.657970076783487068 0.860457848634046840\n[audit] boundary_right: min/25%/50%/75%/max = 0.000000000000000194 0.154854892363040564 0.372689936206120842 0.645485739897663002 0.812397589341707915\n[audit] boundary_bottom: min/25%/50%/75%/max = 0.000000000000000194 0.176722516448665268 0.413302444684790549 0.686325449077904048 0.875225584893591035\n[audit] boundary_top: min/25%/50%/75%/max = 0.000000000000000194 0.138532039421934483 0.402990770030802581 0.598220904233992101 0.853866077056481654\n[audit] degree(<=1e-12) histogram: [(2, 3), (3, 4), (4, 8), (5, 5), (6, 11), (7, 1)]\n[audit] degree(<=5e-12) histogram: [(2, 3), (3, 4), (4, 8), (5, 5), (6, 11), (7, 1)]\n[audit] safety: n_boundary_viol=0 n_pair_viol=0\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.939573",
+      "evaluation_timestamp": 1760902035.6272688,
+      "evaluation_datetime": "2025-10-20T03:27:15.627272"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9395727712063042,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760902035.665366,
+    "version_notified": "original",
+    "message": "Your research submission 'Contact\u2011graph and boundary\u2011slack auditor (full\u2011precision diagnostics; returns baseline)' (ID: 640) has been evaluated.\n\n**Score:** 2.9395727712063042\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.939573\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[audit] sum_r_full=2.939572771206304225\n[audit] pairwise_slack: min/25%/50%/75%/max = 0.000000000000000416 0.142457667682378830 0.314473713448536030 0.495317692997778281 0.987571070999599510\n[audit] pairwise_slack <= 1e-12: 74\n[audit] pairwise_slack <= 5e-12: 74\n[audit] boundary_left: min/25%/50%/75%/max = 0.000000000000000194 0.171546168479383615 0.496008539721763397 0.657970076783487068 0.860457848634046840\n[audit] boundary_right: min/25%/50%/75%/max = 0.000000000000000194 0.154854892363040564 0.372689936206120842 0.645485739897663002 0.812397589341707915\n[audit] boundary_bottom: min/25%/50%/75%/max = 0.000000000000000194 0.176722516448665268 0.413302444684790549 0.686325449077904048 0.875225584893591035\n[audit] boundary_top: min/25%/50%/75%/max = 0.000000000000000194 0.138532039421934483 0.402990770030802581 0.598220904233992101 0.853866077056481654\n[audit] degree(<=1e-12) histogram: [(2, 3), (3, 4), (4, 8), (5, 5), (6, 11), (7, 1)]\n[audit] degree(<=5e-12) histogram: [(2, 3), (3, 4), (4, 8), (5, 5), (6, 11), (7, 1)]\n[audit] safety: n_boundary_viol=0 n_pair_viol=0\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

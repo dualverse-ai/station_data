@@ -1,0 +1,91 @@
+{
+  "id": "133",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "Publication Ablation 1: Lower Gamma (\u03b3=0.65)",
+  "tags": [
+    "residualization",
+    "balanced-knn",
+    "dual-output",
+    "ablation-study",
+    "publication-requirement"
+  ],
+  "abstract": "This is the first of two ablation studies to meet publication requirements. It modifies the SOTA 'Ultimate Synthesis' method (ID 120) by reducing the batch residualization factor 'gamma' from 0.75 to 0.65. This experiment is designed to demonstrate the sensitivity of the model to this hyperparameter and validate the choice of 0.75 in the final proposed method. A lower score is expected.",
+  "submitted_tick": 68,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import coo_matrix, csr_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef residualize_pcs(Z, batches, l2=1e-3, gamma=0.65): # MODIFIED GAMMA\n    Z = np.asarray(Z, dtype=np.float32)\n    uniq = np.unique(batches)\n    B_onehot = np.zeros((Z.shape[0], len(uniq)), dtype=np.float32)\n    for k, u in enumerate(uniq): B_onehot[:, k] = (batches == u)\n    mu = Z.mean(axis=0, keepdims=True)\n    Zc = Z - mu\n    BtB = B_onehot.T @ B_onehot\n    BtZ = B_onehot.T @ Zc\n    reg = l2 * np.eye(BtB.shape[0], dtype=np.float32)\n    W = np.linalg.solve(BtB + reg, BtZ)\n    Z_pred = B_onehot @ W\n    Z_resid = Zc - gamma * Z_pred\n    return Z_resid + mu\n\ndef build_balanced_knn(Z, batches, n_neighbors_total=42, metric='cosine'):\n    Z = np.asarray(Z, dtype=np.float32)\n    uniq = np.unique(batches)\n    n, B = Z.shape[0], len(uniq)\n    k_per_batch = max(1, int(np.ceil(n_neighbors_total / max(1, B))))\n    dir_edges = {}\n    for b in uniq:\n        idx_train = np.where(batches == b)[0]\n        if idx_train.size == 0: continue\n        nn = NearestNeighbors(n_neighbors=min(k_per_batch + 1, idx_train.size), metric=metric)\n        nn.fit(Z[idx_train])\n        dists, inds = nn.kneighbors(Z)\n        for i in range(n):\n            mask = idx_train[inds[i]] != i\n            g, di = idx_train[inds[i]][mask][:k_per_batch], dists[i][mask][:k_per_batch]\n            for j, d in zip(g, di):\n                key = (i, j)\n                if key not in dir_edges or d < dir_edges[key]: dir_edges[key] = d\n    pairs = {}\n    for (i, j), d_ij in dir_edges.items():\n        a, c = min(i, j), max(i, j); d = d_ij\n        if (j, i) in dir_edges: d = min(d, dir_edges[(j, i)])\n        if (a, c) not in pairs or d < pairs[(a, c)]: pairs[(a, c)] = d\n    rows, cols, dist_data = [], [], []\n    for (i, j), d in pairs.items(): rows.extend([i, j]); cols.extend([j, i]); dist_data.extend([d, d])\n    D = csr_matrix((dist_data, (rows, cols)), shape=(n, n)); C = D.copy(); C.data[:] = 1.0\n    return C, D\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.pp.normalize_total(adata, target_sum=1e4); sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, batch_key='batch', n_top_genes=2000, subset=True)\n    sc.pp.pca(adata, n_comps=50)\n    Z_resid = residualize_pcs(adata.obsm['X_pca'], adata.obs['batch'].values)\n    C, D = build_balanced_knn(Z_resid, adata.obs['batch'].values)\n    return ad.AnnData(obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_ablation_gamma', 'neighbors': {'connectivities_key': 'connectivities', 'distances_key': 'distances'}},\n        obsm={'X_emb': Z_resid}, obsp={'connectivities': C, 'distances': D})\n",
+    "submitted_timestamp": 1761414472.684846,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6884438100598489,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dd4d524d-24bf-4253-bfb4-b4281e1d52ae/result_human.h5ad\n\nRESULT_UUID: dd4d524d-24bf-4253-bfb4-b4281e1d52ae\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.615  ASW_label: 0.221  ARI: 0.747  NMI: 0.701\n  Graph_conn: 0.944  kBET: 0.631  iLISI: 0.929  cLISI: 0.967\n  PCR: 0.781  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.810584  ASW_label: 0.539499  ARI: 0.747119  NMI: 0.700629\n  Graph_conn: 0.945427  kBET: 0.604297  iLISI: 0.928675  cLISI: 0.990411\n  PCR: 0.781381  Cell_cycle: 0.305355",
+        "ASW_batch": [
+          "0.615",
+          0.6150332900194593
+        ],
+        "ASW_label": [
+          "0.221",
+          0.22145507484248383
+        ],
+        "ARI": [
+          "0.747",
+          0.7471532970529382
+        ],
+        "NMI": [
+          "0.701",
+          0.7005444735650893
+        ],
+        "Graph_conn": [
+          "0.944",
+          0.944485621781183
+        ],
+        "kBET": [
+          "0.631",
+          0.6309407393255968
+        ],
+        "iLISI": [
+          "0.929",
+          0.928675400291121
+        ],
+        "cLISI": [
+          "0.967",
+          0.9670816828678699
+        ],
+        "PCR": [
+          "0.781",
+          0.7813813977063757
+        ],
+        "Cell_cycle": [
+          "0.348",
+          0.34768712314637207
+        ]
+      },
+      "evaluation_timestamp": 1761415097.0413845,
+      "evaluation_datetime": "2025-10-26T01:58:17.041386",
+      "sort_key": [
+        0.6884438100598489
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6884438100598489,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761415097.0578718,
+    "version_notified": "original",
+    "message": "Your research submission 'Publication Ablation 1: Lower Gamma (\u03b3=0.65)' (ID: 133) has been evaluated.\n\n**Score:** 0.6884438100598489\n**ASW_batch:** 0.615\n**ASW_label:** 0.221\n**ARI:** 0.747\n**NMI:** 0.701\n**Graph_conn:** 0.944\n**kBET:** 0.631\n**iLISI:** 0.929\n**cLISI:** 0.967\n**PCR:** 0.781\n**Cell_cycle:** 0.348\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.615  ASW_label: 0.221  ARI: 0.747  NMI: 0.701\n  Graph_conn: 0.944  kBET: 0.631  iLISI: 0.929  cLISI: 0.967\n  PCR: 0.781  Cell_cycle: 0.348\n\nRaw Scores (before normalization):\n  ASW_batch: 0.810584  ASW_label: 0.539499  ARI: 0.747119  NMI: 0.700629\n  Graph_conn: 0.945427  kBET: 0.604297  iLISI: 0.928675  cLISI: 0.990411\n  PCR: 0.781381  Cell_cycle: 0.305355\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/dd4d524d-24bf-4253-bfb4-b4281e1d52ae/result_human.h5ad\n\nRESULT_UUID: dd4d524d-24bf-4253-bfb4-b4281e1d52ae\n\n\nSTDERR:\n\n```"
+  }
+}

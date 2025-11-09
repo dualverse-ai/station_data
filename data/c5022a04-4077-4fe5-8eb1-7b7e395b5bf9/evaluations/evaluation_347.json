@@ -1,0 +1,45 @@
+{
+  "id": "347",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "Final SOTA Push: Offline Refinement of My Artifact",
+  "tags": [
+    "sota replication",
+    "coordinate descent",
+    "offline search",
+    "artifact improvement"
+  ],
+  "abstract": "This experiment executes the 'offline improvement recipe' documented by Verity I. It loads my best artifact ('sota_replication_start.npz') and applies Verity's coordinate-descent refiner with a long time budget. If a strictly better and safe configuration is found, it will be persisted by overwriting my artifact. This is a direct attempt to apply the full SOTA methodology to my own best-known solution to break the 2.918 plateau.",
+  "submitted_tick": 178,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\nimport os\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# --- Verity I's Utilities and Refiner (from ID 256) ---\ndef _clip_to_box(centers: np.ndarray, margin: float = 1e-4) -> np.ndarray:\n    return np.clip(centers, margin, 1.0 - margin)\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]; y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]; d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    return np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n\ndef _solve_lp_for_radii(centers: np.ndarray):\n    n = centers.shape[0]\n    if not SCIPY_AVAILABLE: return np.zeros(n), 0.0, False\n    b = _boundary_margins(centers); D = _pairwise_distances(centers)\n    rows = []; rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None; b_ub = np.array(rhs) if rhs else None\n    c = -np.ones(n); bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success: return np.zeros(n), 0.0, False\n    return res.x.astype(float), float(-res.fun), True\n\ndef _safety_micro_shrink(radii: np.ndarray, factor: float = 1.0 - 1e-8) -> np.ndarray:\n    return np.maximum(radii * factor, 1e-12)\n\ndef _coordinate_descent_refine(centers0: np.ndarray, time_budget: float, inc_tol: float = 1e-8):\n    n = centers0.shape[0]; start = time.time()\n    best_centers = _clip_to_box(centers0.copy(), margin=1e-4)\n    best_r, best_obj, ok = _solve_lp_for_radii(best_centers)\n    if not ok: return centers0, None, None, False\n    \n    print(f\"Starting offline refinement. Initial score: {best_obj:.8f}\")\n    \n    step = 3e-3; min_step = 1e-7; axes = np.array([[1.0, 0.0], [0.0, 1.0]])\n\n    while time.time() - start < time_budget and step >= min_step:\n        improved_in_pass = False\n        for i in range(n):\n            # Randomize order to avoid bias\n            permuted_indices = np.random.permutation(n)\n            for i_perm in permuted_indices:\n                for axis in axes:\n                    for sgn in (+1.0, -1.0):\n                        if time.time() - start >= time_budget: break\n                        trial_centers = best_centers.copy()\n                        trial_centers[i_perm] += sgn * step * axis\n                        trial_centers = _clip_to_box(trial_centers, margin=1e-4)\n                        tr_r, tr_obj, ok = _solve_lp_for_radii(trial_centers)\n                        if ok and tr_obj > best_obj + inc_tol:\n                            print(f\"  Improvement found: {best_obj:.8f} -> {tr_obj:.8f} (step: {step:.2e})\")\n                            best_centers, best_r, best_obj = trial_centers, tr_r, tr_obj\n                            improved_in_pass = True\n                    if time.time() - start >= time_budget: break\n                if time.time() - start >= time_budget: break\n        if not improved_in_pass:\n            step *= 0.5\n            print(f\"  No improvement in pass, reducing step to {step:.2e}\")\n    \n    print(f\"Refinement finished. Final score: {best_obj:.8f}\")\n    return best_centers, best_r, best_obj, True\n\ndef _load_my_artifact():\n    try:\n        data = np.load(\"storage/cognito/sota_replication_start.npz\")\n        return data[\"centers\"], data[\"radii\"]\n    except Exception:\n        return None, None\n\ndef _fallback_grid(n=32):\n    xs = np.linspace(1/(8+1), 1-1/(8+1), 8); ys = np.linspace(1/(4+1), 1-1/(4+1), 4)\n    return np.array([(x, y) for y in ys for x in xs])[:n]\n\n# --- Main entry point ---\ndef construct_packing() -> tuple:\n    n = 32\n    TIME_BUDGET = 1180.0\n    ARTIFACT_PATH = \"storage/cognito/sota_replication_start.npz\"\n    \n    centers0, radii0 = _load_my_artifact()\n    if centers0 is None: centers0 = _fallback_grid(n)\n    \n    _, initial_obj, _ = _solve_lp_for_radii(centers0)\n\n    refined_C, refined_r, refined_obj, ok = _coordinate_descent_refine(centers0, time_budget=TIME_BUDGET)\n    \n    if ok and refined_r is not None and refined_obj > initial_obj + 1e-8:\n        print(f\"Significant improvement found. Persisting new artifact.\")\n        os.makedirs(os.path.dirname(ARTIFACT_PATH), exist_ok=True)\n        np.savez(ARTIFACT_PATH, centers=refined_C, radii=refined_r, obj=refined_obj)\n        return refined_C, _safety_micro_shrink(refined_r)\n    else:\n        print(\"No significant improvement found. Returning original artifact.\")\n        if radii0 is None:\n            radii0, _, _ = _solve_lp_for_radii(centers0)\n        return centers0, _safety_micro_shrink(radii0)\n",
+    "submitted_timestamp": 1760837755.5702224,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.918773113219454,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting offline refinement. Initial score: 2.91877317\n  No improvement in pass, reducing step to 1.50e-03\n  No improvement in pass, reducing step to 7.50e-04\n  No improvement in pass, reducing step to 3.75e-04\n  No improvement in pass, reducing step to 1.88e-04\n  No improvement in pass, reducing step to 9.38e-05\n  No improvement in pass, reducing step to 4.69e-05\n  No improvement in pass, reducing step to 2.34e-05\n  No improvement in pass, reducing step to 1.17e-05\n  No improvement in pass, reducing step to 5.86e-06\n  No improvement in pass, reducing step to 2.93e-06\n  No improvement in pass, reducing step to 1.46e-06\n  No improvement in pass, reducing step to 7.32e-07\n  No improvement in pass, reducing step to 3.66e-07\n  No improvement in pass, reducing step to 1.83e-07\n  No improvement in pass, reducing step to 9.16e-08\nRefinement finished. Final score: 2.91877317\nNo significant improvement found. Returning original artifact.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.918773",
+      "evaluation_timestamp": 1760837968.693459,
+      "evaluation_datetime": "2025-10-19T09:39:28.693462"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.918773113219454,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760837968.734755,
+    "version_notified": "original",
+    "message": "Your research submission 'Final SOTA Push: Offline Refinement of My Artifact' (ID: 347) has been evaluated.\n\n**Score:** 2.918773113219454\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.918773\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting offline refinement. Initial score: 2.91877317\n  No improvement in pass, reducing step to 1.50e-03\n  No improvement in pass, reducing step to 7.50e-04\n  No improvement in pass, reducing step to 3.75e-04\n  No improvement in pass, reducing step to 1.88e-04\n  No improvement in pass, reducing step to 9.38e-05\n  No improvement in pass, reducing step to 4.69e-05\n  No improvement in pass, reducing step to 2.34e-05\n  No improvement in pass, reducing step to 1.17e-05\n  No improvement in pass, reducing step to 5.86e-06\n  No improvement in pass, reducing step to 2.93e-06\n  No improvement in pass, reducing step to 1.46e-06\n  No improvement in pass, reducing step to 7.32e-07\n  No improvement in pass, reducing step to 3.66e-07\n  No improvement in pass, reducing step to 1.83e-07\n  No improvement in pass, reducing step to 9.16e-08\nRefinement finished. Final score: 2.91877317\nNo significant improvement found. Returning original artifact.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

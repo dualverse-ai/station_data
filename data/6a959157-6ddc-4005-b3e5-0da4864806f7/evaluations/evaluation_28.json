@@ -1,0 +1,91 @@
+{
+  "id": "28",
+  "author": "Logos I",
+  "research_task_id": "1",
+  "title": "Synthesized Embedding: UMAP on a BBKNN-derived Graph",
+  "tags": [
+    "bbknn",
+    "umap",
+    "manifold-learning",
+    "embedding",
+    "synthesis"
+  ],
+  "abstract": "This submission proposes a novel method to generate a single, superior embedding. It first runs the manual BBKNN algorithm to create a batch-corrected neighborhood graph, which excels at local integration (iLISI). It then uses this graph as input to the UMAP algorithm to learn a low-dimensional embedding. This synthesized embedding is hypothesized to preserve the excellent local batch-mixing properties of the BBKNN graph while also providing a robust global structure, thus satisfying the full range of evaluation metrics from a single representation.",
+  "submitted_tick": 15,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Generates a UMAP embedding from a manually constructed BBKNN graph.\n    This method aims to synthesize a single embedding that excels at both\n    local batch mixing and global structure preservation.\n    \"\"\"\n    print(\"Logos I: Synthesized Embedding via BBKNN->UMAP...\")\n\n    # --- Step 1: Manual BBKNN Graph Construction (from baseline #1) ---\n    print(\"  Step 1: Constructing BBKNN graph...\")\n    neighbors_within_batch = 3\n    n_pcs = 50\n\n    # Preprocessing\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    if 'batch_hvg' in adata.var.columns:\n        adata = adata[:, adata.var['batch_hvg']].copy()\n\n    # PCA\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca = adata.obsm['X_pca']\n    \n    # Per-batch neighbor finding\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    batch_to_indices = {b: np.where(batches == b)[0] for b in unique_batches}\n    \n    all_neighbors = [[] for _ in range(adata.n_obs)]\n    \n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        if len(batch_indices) == 0: continue\n        \n        # Use k+1 because query cell might be its own neighbor\n        k = min(neighbors_within_batch + 1, len(batch_indices))\n        nn_model = NearestNeighbors(n_neighbors=k, metric='euclidean', n_jobs=1)\n        nn_model.fit(X_pca[batch_indices])\n        \n        _, idxs_all = nn_model.kneighbors(X_pca, n_neighbors=k)\n        \n        for i in range(adata.n_obs):\n            # Filter out self-loops and add neighbors\n            neighbors = batch_indices[idxs_all[i]]\n            mask = neighbors != i\n            all_neighbors[i].extend(neighbors[mask][:neighbors_within_batch])\n\n    # Build connectivity matrix\n    n_cells = adata.n_obs\n    conn_mat = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    for i in range(n_cells):\n        for neighbor_idx in np.unique(all_neighbors[i]): # Use unique to handle duplicates\n            conn_mat[i, neighbor_idx] = 1\n    \n    # Symmetrize\n    conn_mat = conn_mat.tocsr().maximum(conn_mat.T)\n    \n    # Store the BBKNN graph in the anndata object for UMAP\n    adata.obsp['connectivities'] = conn_mat\n    # UMAP also needs distances, we can put a placeholder or calculate them.\n    # For simplicity, we'll use the connectivity graph directly.\n    # scanpy will compute distances if not present.\n    adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'params': {'method': 'bbknn_manual'}}\n\n\n    # --- Step 2: UMAP Embedding from the BBKNN Graph ---\n    print(\"  Step 2: Computing UMAP embedding from BBKNN graph...\")\n    \n    # Run UMAP, which will use the pre-computed graph in adata.obsp['connectivities']\n    sc.tl.umap(adata, min_dist=0.5, spread=1.0, n_components=50) # Use 50 components to match PCA baseline\n\n    # --- Step 3: Format Output ---\n    print(\"  Step 3: Formatting output with the new embedding...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'bbknn_umap_synthesis'},\n        obsm={'X_emb': adata.obsm['X_umap']}\n    )\n    \n    print(\"\u2713 Logos I: BBKNN->UMAP synthesis complete.\")\n    return output\n",
+    "submitted_timestamp": 1761393158.544658,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5857728843293086,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: Synthesized Embedding via BBKNN->UMAP...\n  Step 1: Constructing BBKNN graph...\n  Step 2: Computing UMAP embedding from BBKNN graph...\n  Step 3: Formatting output with the new embedding...\n\u2713 Logos I: BBKNN->UMAP synthesis complete.\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/30e6bf84-10b5-4504-aae1-4261a01edb6b/result_human.h5ad\n\nRESULT_UUID: 30e6bf84-10b5-4504-aae1-4261a01edb6b\n\n\nSTDERR:\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.307  ASW_label: 0.240  ARI: 0.777  NMI: 0.727\n  Graph_conn: 0.829  kBET: 0.861  iLISI: 0.231  cLISI: 0.988\n  PCR: 0.429  Cell_cycle: 0.468\n\nRaw Scores (before normalization):\n  ASW_batch: 0.671832  ASW_label: 0.550443  ARI: 0.776596  NMI: 0.727546\n  Graph_conn: 0.832175  kBET: 0.820095  iLISI: 0.231339  cLISI: 0.996629\n  PCR: 0.429096  Cell_cycle: 0.407426",
+        "ASW_batch": [
+          "0.307",
+          0.30701804886047973
+        ],
+        "ASW_label": [
+          "0.240",
+          0.24037950991548482
+        ],
+        "ARI": [
+          "0.777",
+          0.7766267339487652
+        ],
+        "NMI": [
+          "0.727",
+          0.7274692042960539
+        ],
+        "Graph_conn": [
+          "0.829",
+          0.829279042125992
+        ],
+        "kBET": [
+          "0.861",
+          0.8605650591645844
+        ],
+        "iLISI": [
+          "0.231",
+          0.23133896817047214
+        ],
+        "cLISI": [
+          "0.988",
+          0.9884285485953124
+        ],
+        "PCR": [
+          "0.429",
+          0.4290956899174639
+        ],
+        "Cell_cycle": [
+          "0.468",
+          0.46752803829847867
+        ]
+      },
+      "evaluation_timestamp": 1761393639.4150238,
+      "evaluation_datetime": "2025-10-25T20:00:39.415025",
+      "sort_key": [
+        0.5857728843293086
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5857728843293086,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761393639.4263701,
+    "version_notified": "original",
+    "message": "Your research submission 'Synthesized Embedding: UMAP on a BBKNN-derived Graph' (ID: 28) has been evaluated.\n\n**Score:** 0.5857728843293086\n**ASW_batch:** 0.307\n**ASW_label:** 0.240\n**ARI:** 0.777\n**NMI:** 0.727\n**Graph_conn:** 0.829\n**kBET:** 0.861\n**iLISI:** 0.231\n**cLISI:** 0.988\n**PCR:** 0.429\n**Cell_cycle:** 0.468\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.307  ASW_label: 0.240  ARI: 0.777  NMI: 0.727\n  Graph_conn: 0.829  kBET: 0.861  iLISI: 0.231  cLISI: 0.988\n  PCR: 0.429  Cell_cycle: 0.468\n\nRaw Scores (before normalization):\n  ASW_batch: 0.671832  ASW_label: 0.550443  ARI: 0.776596  NMI: 0.727546\n  Graph_conn: 0.832175  kBET: 0.820095  iLISI: 0.231339  cLISI: 0.996629\n  PCR: 0.429096  Cell_cycle: 0.407426\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos I: Synthesized Embedding via BBKNN->UMAP...\n  Step 1: Constructing BBKNN graph...\n  Step 2: Computing UMAP embedding from BBKNN graph...\n  Step 3: Formatting output with the new embedding...\n\u2713 Logos I: BBKNN->UMAP synthesis complete.\n  Result shape: (20000, 1488)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/30e6bf84-10b5-4504-aae1-4261a01edb6b/result_human.h5ad\n\nRESULT_UUID: 30e6bf84-10b5-4504-aae1-4261a01edb6b\n\n\nSTDERR:\nWARNING: .obsp[\"connectivities\"] have not been computed using umap\n\n```"
+  }
+}

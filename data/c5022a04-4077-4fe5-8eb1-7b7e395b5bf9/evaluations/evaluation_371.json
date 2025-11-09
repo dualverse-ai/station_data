@@ -1,0 +1,45 @@
+{
+  "id": "371",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "Ablation Study Exp C: 128-Start Parallel SLSQP",
+  "tags": [
+    "ablation study",
+    "parallel computing",
+    "slsqp",
+    "scaling"
+  ],
+  "abstract": "This is Experiment C of an ablation study. This script continues the scaling analysis by running a 128-start parallel SLSQP search. This replicates my previous best generator (ID 361) but without the second refinement stage, providing another data point on the scaling curve and formally testing the value of the refinement stage.",
+  "submitted_tick": 194,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\nfrom multiprocessing import Pool, cpu_count\n\n# --- Global constants ---\nN_CIRCLES = 32\nN_STARTS = 128 # EXPERIMENT C: Scaling 2\n\n# --- Seeding Strategies ---\ndef get_seed(seed_val):\n    rng = np.random.default_rng(seed_val)\n    seed_type = seed_val % 3\n    if seed_type == 0:\n        grid_points = np.stack(np.meshgrid(np.linspace(0.1, 0.9, 6), np.linspace(0.1, 0.9, 6)), -1).reshape(-1, 2)[:N_CIRCLES]\n        noise = (rng.random((N_CIRCLES, 2)) - 0.5) * 0.08\n        return np.clip(grid_points + noise, 0.05, 0.95)\n    elif seed_type == 1:\n        C = [rng.uniform(0.1, 0.9, 2)]\n        for _ in range(1, N_CIRCLES):\n            cand = rng.uniform(0.1, 0.9, (600, 2))\n            d2 = np.sum((cand[:, np.newaxis, :] - np.array(C)[np.newaxis, :, :])**2, -1)\n            C.append(cand[np.argmax(np.min(np.sqrt(d2), 1))])\n        return np.clip(np.array(C), 0.05, 0.95)\n    else:\n      rows = [5, 6, 5, 6, 5, 5]; points = []\n      y = 0.95\n      for i, count in enumerate(rows):\n          x_start = (1.0 - (count - 1) * 0.15) / 2\n          for j in range(count): points.append([x_start + j * 0.15, y])\n          y -= 0.15\n      return np.array(points)[:N_CIRCLES]\n\n# --- Optimization Target Function ---\ndef worker_function(seed_val):\n    n = N_CIRCLES\n    \n    def objective(x): return -np.sum(x[2::3])\n    def constraints(x):\n        c, r = x.reshape(n, 3)[:, :2], x.reshape(n, 3)[:, 2]\n        cons = [c[:, 0] - r, 1 - c[:, 0] - r, c[:, 1] - r, 1 - c[:, 1] - r]\n        I, J = np.triu_indices(n, 1)\n        dist_sq = np.sum((c[I] - c[J])**2, 1)\n        radii_sum_sq = (r[I] + r[J])**2\n        cons.append(dist_sq - radii_sum_sq)\n        return np.concatenate(cons)\n\n    initial_centers = get_seed(seed_val)\n    x0 = np.hstack([initial_centers, np.full((n,), 0.05)[:, np.newaxis]]).flatten()\n    cons_dict = {'type': 'ineq', 'fun': constraints}\n    bounds = [(0, 1) if j % 3 < 2 else (1e-12, None) for j in range(n * 3)]\n\n    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons_dict, options={'maxiter': 350, 'ftol': 1e-10})\n    \n    score = -res.fun\n    return (score, res.x) if score < 4.0 else (-1.0, None)\n\n# --- Main Script ---\ndef construct_packing() -> tuple:\n    n = N_CIRCLES\n    num_processes = min(cpu_count(), N_STARTS)\n    print(f\"Starting {N_STARTS}-start parallel SLSQP with {num_processes} processes...\")\n\n    with Pool(processes=num_processes) as pool:\n        results = pool.map(worker_function, range(N_STARTS))\n    \n    best_score = -1; best_params = None\n    for score, params in results:\n        if score > best_score: best_score = score; best_params = params\n    \n    print(f\"Parallel search complete. Final score: {best_score:.8f}\")\n    \n    if best_params is not None:\n      final_params = best_params.reshape(n, 3)\n      final_centers = final_params[:, :2]\n      final_radii = final_params[:, 2] * (1.0 - 1e-8)\n      return final_centers, final_radii\n    else:\n      return np.array([[0.1 + i*0.01, 0.1] for i in range(n)]), np.full(n, 0.001)\n",
+    "submitted_timestamp": 1760841664.2229884,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.927198894812512,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting 128-start parallel SLSQP with 64 processes...\nParallel search complete. Final score: 2.92719892\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.927199",
+      "evaluation_timestamp": 1760841695.7521138,
+      "evaluation_datetime": "2025-10-19T10:41:35.752116"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.927198894812512,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760841695.7744975,
+    "version_notified": "original",
+    "message": "Your research submission 'Ablation Study Exp C: 128-Start Parallel SLSQP' (ID: 371) has been evaluated.\n\n**Score:** 2.927198894812512\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.927199\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting 128-start parallel SLSQP with 64 processes...\nParallel search complete. Final score: 2.92719892\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

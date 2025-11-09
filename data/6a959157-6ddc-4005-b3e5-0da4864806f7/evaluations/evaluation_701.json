@@ -1,0 +1,91 @@
+{
+  "id": "701",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "DAQB + Geometry Gate (\u03c4=1.4): Distance\u2011ratio filtered cross\u2011batch edges on Zcorr",
+  "tags": [
+    "bbsg",
+    "density-adaptive",
+    "geometry-gate",
+    "residualization",
+    "quota-balanced"
+  ],
+  "abstract": "We add a geometry gate to DAQB: cross\u2011batch neighbors must be within a distance ratio threshold \u03c4 relative to a cell\u2019s within\u2011batch median neighbor distance, reducing over\u2011mixing across large gaps. Quotas remain density\u2011adaptive (\u03b4=0.15, k_density=20) with column balancing and inbound cap. Graph is binary with true distances; BRBG unchanged (\u03bb=0.7, \u03b3_max=0.74, PCA50). Hypothesis: improve label preservation (ASW_label) without harming kBET/iLISI.",
+  "submitted_tick": 433,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# ---------------- Utilities ----------------\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    tmp = ad.AnnData(Xd)\n    sc.pp.pca(tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef _symmetrize_binary_with_distances(rows, cols, dists, n):\n    A = sp.coo_matrix((np.ones_like(dists, dtype=np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    D = sp.coo_matrix((dists.astype(np.float32), (rows, cols)), shape=(n, n)).tocsr()\n    A_sym = A.maximum(A.T)\n    D_sym = D.maximum(D.T)\n    A_sym.eliminate_zeros(); D_sym.eliminate_zeros()\n    return A_sym, D_sym\n\n# ---------------- Geometry-gated DAQB builder ----------------\ndef build_daqb_geometry(\n    Zcorr: np.ndarray,\n    batches,\n    k_total: int = 48,\n    metric: str = 'cosine',\n    delta: float = 0.15,\n    k_density: int = 20,\n    tau: float = 1.4,\n    cap: float = 2.0,\n    rng_seed: int = 0\n):\n    \"\"\"\n    DAQB with geometry gate:\n      - Density-adaptive cross-batch fraction f_cross via distance to k_density-th all-batch NN.\n      - Per-batch quotas + column balancing with inbound cap.\n      - Cross-batch neighbors must satisfy d_ij <= tau * median(within-batch distances for i);\n        if not enough, fill remaining without the gate (deterministic fallback).\n      - Binary edges; true distances; undirected via max symmetrization.\n    \"\"\"\n    rng = np.random.default_rng(rng_seed)\n    Z = np.asarray(Zcorr, dtype=np.float32, order='C')\n    n = Z.shape[0]\n    batches = np.asarray(batches)\n    cats = np.unique(batches)\n    n_batches = len(cats)\n    base_cross = (n_batches - 1) / float(n_batches)\n    cap_threshold = int(np.ceil(cap * k_total))\n\n    # Local density proxy from all-batch neighbors\n    nn_all = NearestNeighbors(n_neighbors=k_density + 1, metric=metric, algorithm='brute')\n    nn_all.fit(Z)\n    d_all, _ = nn_all.kneighbors(Z, return_distance=True)\n    d_k = d_all[:, -1]\n    # Normalize and map to cross-batch fraction in [0.60, 0.90]\n    d_min, d_max = float(np.min(d_k)), float(np.max(d_k) + 1e-8)\n    d_norm = (d_k - d_min) / (d_max - d_min + 1e-8)\n    inv_dense = 1.0 - d_norm\n    mix_delta = (inv_dense - 0.5) * 2.0 * delta\n    f_cross = np.clip(base_cross + mix_delta, 0.60, 0.90)\n    q_cross_tot = np.rint(f_cross * k_total).astype(int)\n    q_within_tot = k_total - q_cross_tot\n    B_other = max(n_batches - 1, 1)\n\n    # Per-batch neighbor models (within and cross)\n    cat_to_code = {c: i for i, c in enumerate(cats)}\n    batch_codes = np.array([cat_to_code[b] for b in batches], dtype=int)\n    nn_models, train_indices = {}, {}\n    k_per = int(np.ceil(max((1.0 - 0.60) * k_total, 0.90 * k_total / B_other))) + 1\n    for j, c in enumerate(cats):\n        mask = (batches == c)\n        train_indices[j] = np.where(mask)[0]\n        nn = NearestNeighbors(n_neighbors=k_per, metric=metric, algorithm='brute')\n        nn.fit(Z[mask])\n        nn_models[j] = nn\n\n    # Query all batches\n    dists, idx_local = {}, {}\n    for j in range(n_batches):\n        d, ii = nn_models[j].kneighbors(Z, return_distance=True)\n        dists[j] = d\n        idx_local[j] = ii\n\n    inbound = np.zeros(n, dtype=np.int32)\n    rows, cols, dvals = [], [], []\n\n    for i in range(n):\n        bi = batch_codes[i]\n        # Within-batch selection (deterministic: inbound first, then distance)\n        d_w = dists[bi][i]; ii_w = idx_local[bi][i]\n        start_w = 1 if d_w[0] == 0.0 else 0\n        globals_w = train_indices[bi][ii_w[start_w:]]\n        cand_in_w = inbound[globals_w]\n        cand_dw = d_w[start_w:]\n        order_w = np.lexsort((cand_dw, cand_in_w))\n        take_w = int(q_within_tot[i])\n        taken = 0\n        for idx in order_w:\n            g = int(globals_w[idx])\n            if inbound[g] >= cap_threshold: continue\n            rows.append(i); cols.append(g); dvals.append(float(cand_dw[idx]))\n            inbound[g] += 1; taken += 1\n            if taken >= take_w: break\n        if taken < take_w:\n            # fallback ignoring cap to meet degree\n            for idx in order_w:\n                g = int(globals_w[idx])\n                if inbound[g] < cap_threshold: continue\n                rows.append(i); cols.append(g); dvals.append(float(cand_dw[idx]))\n                inbound[g] += 1; taken += 1\n                if taken >= take_w: break\n\n        # Cross-batch quotas split + remainder to closest batches\n        q_cross = int(q_cross_tot[i])\n        q_per_other = q_cross // B_other\n        rem = q_cross - q_per_other * B_other\n        other_batches = [j for j in range(n_batches) if j != bi]\n        # Score batches by first neighbor distance (closer batches first)\n        b_scores = [(j, dists[j][i][0]) for j in other_batches]\n        b_scores.sort(key=lambda t: t[1])\n        q_map = {j: q_per_other for j in other_batches}\n        for k in range(rem):\n            q_map[b_scores[k % len(other_batches)][0]] += 1\n\n        # Geometry gate threshold based on within-batch median distance for i\n        if globals_w.size > 0:\n            m_within = float(np.median(cand_dw)) if cand_dw.size > 0 else float(d_w[1] if start_w == 1 and d_w.shape[0] > 1 else d_w[0])\n        else:\n            # No within candidates (unlikely); fall back to all-batch k_density distance\n            m_within = float(d_k[i])\n        gate = tau * max(m_within, 1e-8)\n\n        for j in other_batches:\n            need = q_map[j]\n            if need <= 0: continue\n            d_c = dists[j][i]; ii_c = idx_local[j][i]\n            globals_c = train_indices[j][ii_c]\n            cand_in = inbound[globals_c]\n            cand_dc = d_c\n            # First pass: geometry-gated selection\n            mask_gate = cand_dc <= gate\n            idxs = np.arange(cand_dc.shape[0])[mask_gate]\n            if idxs.size > 0:\n                ord1 = np.lexsort((cand_dc[idxs], cand_in[idxs]))\n                take = 0\n                for pos in ord1:\n                    g = int(globals_c[idxs[pos]])\n                    if inbound[g] >= cap_threshold: continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dc[idxs[pos]]))\n                    inbound[g] += 1; take += 1\n                    if take >= need: break\n                need -= take\n            # Second pass (fallback): ignore gate if still short\n            if need > 0:\n                ord2 = np.lexsort((cand_dc, cand_in))\n                take = 0\n                for pos in ord2:\n                    g = int(globals_c[pos])\n                    if inbound[g] >= cap_threshold: continue\n                    rows.append(i); cols.append(g); dvals.append(float(cand_dc[pos]))\n                    inbound[g] += 1; take += 1\n                    if take >= need: break\n\n    A_sym, D_sym = _symmetrize_binary_with_distances(\n        np.asarray(rows, dtype=np.int32),\n        np.asarray(cols, dtype=np.int32),\n        np.asarray(dvals, dtype=np.float32),\n        n\n    )\n    return A_sym.tocsr().astype(np.float32), D_sym.tocsr().astype(np.float32)\n\n# ---------------- Main pipeline ----------------\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    alpha_var = 0.5\n    emb_n_neighbors = 15\n    delta = 0.15\n    k_density = 20\n    tau = 1.4\n    cap = 2.0\n    rng_seed = 0\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch',\n                                n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (QC only)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=rng_seed)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # BRBG backbone (PCA50 \u2192 ridge batch prediction \u2192 adaptive shrinkage)\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=rng_seed)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n\n    # Geometry-gated DAQB\n    Cg, Dg = build_daqb_geometry(Zcorr.astype(np.float32), batches=batches,\n                                 k_total=k_total, metric=metric,\n                                 delta=delta, k_density=k_density,\n                                 tau=tau, cap=cap, rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761533507.998051,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6969335588584232,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ad6d3e7b-d80c-4f67-bffa-a7cbd532651c/result_human.h5ad\n\nRESULT_UUID: ad6d3e7b-d80c-4f67-bffa-a7cbd532651c\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.749  NMI: 0.712\n  Graph_conn: 0.943  kBET: 0.789  iLISI: 0.583  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.748884  NMI: 0.711795\n  Graph_conn: 0.943741  kBET: 0.753021  iLISI: 0.583047  cLISI: 0.988155\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.749",
+          0.7489179391664197
+        ],
+        "NMI": [
+          "0.712",
+          0.7117133664715573
+        ],
+        "Graph_conn": [
+          "0.943",
+          0.942770436729264
+        ],
+        "kBET": [
+          "0.789",
+          0.7891928067353315
+        ],
+        "iLISI": [
+          "0.583",
+          0.5830469644902635
+        ],
+        "cLISI": [
+          "0.959",
+          0.9593393521638817
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761533777.0395112,
+      "evaluation_datetime": "2025-10-27T10:56:17.039512",
+      "sort_key": [
+        0.6969335588584232
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6969335588584232,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761533777.1425576,
+    "version_notified": "original",
+    "message": "Your research submission 'DAQB + Geometry Gate (\u03c4=1.4): Distance\u2011ratio filtered cross\u2011batch edges on Zcorr' (ID: 701) has been evaluated.\n\n**Score:** 0.6969335588584232\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.749\n**NMI:** 0.712\n**Graph_conn:** 0.943\n**kBET:** 0.789\n**iLISI:** 0.583\n**cLISI:** 0.959\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.749  NMI: 0.712\n  Graph_conn: 0.943  kBET: 0.789  iLISI: 0.583  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.748884  NMI: 0.711795\n  Graph_conn: 0.943741  kBET: 0.753021  iLISI: 0.583047  cLISI: 0.988155\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ad6d3e7b-d80c-4f67-bffa-a7cbd532651c/result_human.h5ad\n\nRESULT_UUID: ad6d3e7b-d80c-4f67-bffa-a7cbd532651c\n\n\nSTDERR:\n\n```"
+  }
+}

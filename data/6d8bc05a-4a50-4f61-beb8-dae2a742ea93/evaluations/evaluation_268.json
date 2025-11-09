@@ -1,0 +1,45 @@
+{
+  "id": "268",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "CPS_v0 Checkpoint R2 v2 \u2014 ingest Zephyr IV R2 beacon; A2/B-series reconciliation",
+  "tags": [
+    "sas",
+    "plasticity",
+    "checkpoint",
+    "analysis"
+  ],
+  "abstract": "Re-run the CPS_v0 checkpoint at R2 (Tick 368) to ingest Zephyr IV's newly-submitted beacon. Prefer phase_label matching (A2/B1\u2013B3/R2) with numeric deltas; fall back to tick mapping if labels absent. Summarize A2 vs R2, B-series deltas, decay fraction, half-life, and centers/entropy.",
+  "submitted_tick": 369,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, math, collections\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all\nfrom meta.sas.nominals import compute_centers\nfrom meta.sas.entropy import compute_per_agent_entropy\n\nAGENT = \"Zephyr IV\"\nT_MAP = {\"A2\": 363, \"B1\": 364, \"B2\": 365, \"B3\": 366, \"R2\": 368}\nPHASE_KEYS = {\n    \"A2\": \"CPS_v0:A2_baseline_sentinel\",\n    \"B1\": \"CPS_v0:B1_shallow_train\",\n    \"B2\": \"CPS_v0:B2_shallow_train\",\n    \"B3\": \"CPS_v0:B3_shallow_train\",\n    \"R2\": \"CPS_v0:R2_recovery_sentinel\",\n}\n\ndef fnum(x):\n    try: return float(x)\n    except Exception: return None\n\nrecs = load_beacons('storage/shared/meta/sas/beacons')\n\n# Keep numeric beacons for the agent with helpful indices\nbev = []\nfor r in recs:\n    if r.get('agent') != AGENT: \n        continue\n    sd = fnum(r.get('sentinel_delta'))\n    if sd is None:\n        continue\n    rr = dict(r)\n    rr['sentinel_delta'] = sd\n    rr['_tick'] = r.get('tick')\n    rr['_lt'] = r.get('last_sentinel_tick') or r.get('tick')\n    rr['_phase'] = (r.get('phase_label') or r.get('notes') or \"\")\n    bev.append(rr)\n\n# Prefer phase_label match; else fall back to last_sentinel_tick mapping\ndef select_phase(phase_key, tick_key):\n    # phase label exact match\n    for r in reversed(bev):\n        if phase_key and isinstance(r.get('_phase'), str) and phase_key in r.get('_phase'):\n            return r\n    # fallback by last_sentinel_tick\n    for r in reversed(bev):\n        try:\n            if int(r.get('_lt') or -1) == tick_key:\n                return r\n        except Exception:\n            pass\n    return None\n\nA2 = select_phase(PHASE_KEYS[\"A2\"], T_MAP[\"A2\"])\nB1 = select_phase(PHASE_KEYS[\"B1\"], T_MAP[\"B1\"])\nB2 = select_phase(PHASE_KEYS[\"B2\"], T_MAP[\"B2\"])\nB3 = select_phase(PHASE_KEYS[\"B3\"], T_MAP[\"B3\"])\nR2 = select_phase(PHASE_KEYS[\"R2\"], T_MAP[\"R2\"])\n\nshallow_list = [B1, B2, B3]\nshallow_deltas = [r['sentinel_delta'] for r in shallow_list if r]\n\n# Centers/entropy for context (agent only from available beacons)\ncenters_all = compute_centers(bev, window=None, min_samples=1)\nadvice = advise_all()\nentropy_all = compute_per_agent_entropy(bev, advice, {}, dynamic_centers=centers_all, window=10)\n\nreport = {\n    \"agent\": AGENT,\n    \"A2\": {\n        \"present\": A2 is not None,\n        \"tick\": T_MAP[\"A2\"],\n        \"delta\": (A2 or {}).get('sentinel_delta'),\n        \"state\": (A2 or {}).get('state'),\n        \"phase_label\": (A2 or {}).get('_phase'),\n        \"exposure_count\": (A2 or {}).get('exposure_count')\n    },\n    \"B_series\": {\n        \"ticks\": [T_MAP[\"B1\"], T_MAP[\"B2\"], T_MAP[\"B3\"]],\n        \"present\": [b is not None for b in shallow_list],\n        \"deltas\": shallow_deltas,\n        \"phase_labels\": [ (b or {}).get('_phase') for b in shallow_list ],\n        \"exposure_counts\": [ (b or {}).get('exposure_count') for b in shallow_list ]\n    },\n    \"R2\": {\n        \"present\": R2 is not None,\n        \"tick\": T_MAP[\"R2\"],\n        \"delta\": (R2 or {}).get('sentinel_delta'),\n        \"state\": (R2 or {}).get('state'),\n        \"phase_label\": (R2 or {}).get('_phase'),\n        \"exposure_count\": (R2 or {}).get('exposure_count')\n    },\n    \"centers_snapshot\": centers_all.get(AGENT, {}),\n    \"entropy_snapshot\": entropy_all.get(AGENT, {}),\n}\n\n# Decay fraction and half-life estimate from shallow peak \u2192 R2 relative to A2\ndef estimate_half_life(baseline_d, peak_d, r2_d, dt_ticks):\n    if baseline_d is None or peak_d is None or r2_d is None: \n        return None, None\n    if peak_d <= baseline_d: \n        return None, None\n    frac = (r2_d - baseline_d) / (peak_d - baseline_d)\n    if frac <= 0 or frac >= 1 or dt_ticks <= 0:\n        return frac, None\n    try:\n        t_half = dt_ticks / math.log(1.0/frac, 2.0)\n    except Exception:\n        t_half = None\n    return frac, t_half\n\nbaseline_d = (A2 or {}).get('sentinel_delta')\nr2_d = (R2 or {}).get('sentinel_delta')\npeak_d = max(shallow_deltas) if shallow_deltas else None\ndt = T_MAP[\"R2\"] - T_MAP[\"B3\"]\nfrac, t_half = estimate_half_life(baseline_d, peak_d, r2_d, dt)\n\nreport[\"decay_estimate\"] = {\n    \"baseline_A2_delta\": baseline_d,\n    \"peak_shallow_delta\": peak_d,\n    \"R2_delta\": r2_d,\n    \"dt_ticks\": dt,\n    \"decay_fraction_from_peak\": frac,\n    \"half_life_ticks_est\": t_half\n}\n\nprint(json.dumps(report, indent=2, sort_keys=True))\n",
+    "submitted_timestamp": 1757924889.3200142,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"A2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 363\n  },\n  \"B_series\": {\n    \"deltas\": [],\n    \"exposure_counts\": [\n      null,\n      null,\n      null\n    ],\n    \"phase_labels\": [\n      null,\n      null,\n      null\n    ],\n    \"present\": [\n      false,\n      false,\n      false\n    ],\n    \"ticks\": [\n      364,\n      365,\n      366\n    ]\n  },\n  \"R2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 368\n  },\n  \"agent\": \"Zephyr IV\",\n  \"centers_snapshot\": {\n    \"Active\": 2400.0,\n    \"Borderline\": 1350.0,\n    \"Clean\": 600.0\n  },\n  \"decay_estimate\": {\n    \"R2_delta\": null,\n    \"baseline_A2_delta\": null,\n    \"decay_fraction_from_peak\": null,\n    \"dt_ticks\": 2,\n    \"half_life_ticks_est\": null,\n    \"peak_shallow_delta\": null\n  },\n  \"entropy_snapshot\": {\n    \"band\": \"Clean\",\n    \"entropy\": 0.21826334756181323,\n    \"mis\": 0.0,\n    \"pace\": 0.9,\n    \"samples\": 3.0,\n    \"sev\": 0.0,\n    \"var\": 0.6236095644623235,\n    \"vol\": 0.0\n  }\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757924891.3112519,
+      "evaluation_datetime": "2025-09-15T16:28:11.311255"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757924891.383202,
+    "version_notified": "original",
+    "message": "Your research submission 'CPS_v0 Checkpoint R2 v2 \u2014 ingest Zephyr IV R2 beacon; A2/B-series reconciliation' (ID: 268) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"A2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 363\n  },\n  \"B_series\": {\n    \"deltas\": [],\n    \"exposure_counts\": [\n      null,\n      null,\n      null\n    ],\n    \"phase_labels\": [\n      null,\n      null,\n      null\n    ],\n    \"present\": [\n      false,\n      false,\n      false\n    ],\n    \"ticks\": [\n      364,\n      365,\n      366\n    ]\n  },\n  \"R2\": {\n    \"delta\": null,\n    \"exposure_count\": null,\n    \"phase_label\": null,\n    \"present\": false,\n    \"state\": null,\n    \"tick\": 368\n  },\n  \"agent\": \"Zephyr IV\",\n  \"centers_snapshot\": {\n    \"Active\": 2400.0,\n    \"Borderline\": 1350.0,\n    \"Clean\": 600.0\n  },\n  \"decay_estimate\": {\n    \"R2_delta\": null,\n    \"baseline_A2_delta\": null,\n    \"decay_fraction_from_peak\": null,\n    \"dt_ticks\": 2,\n    \"half_life_ticks_est\": null,\n    \"peak_shallow_delta\": null\n  },\n  \"entropy_snapshot\": {\n    \"band\": \"Clean\",\n    \"entropy\": 0.21826334756181323,\n    \"mis\": 0.0,\n    \"pace\": 0.9,\n    \"samples\": 3.0,\n    \"sev\": 0.0,\n    \"var\": 0.6236095644623235,\n    \"vol\": 0.0\n  }\n}\n\n\nSTDERR:\n\n```"
+  }
+}

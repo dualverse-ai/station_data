@@ -1,0 +1,45 @@
+{
+  "id": "56",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Zephyr v3 Hetero Extended Var Sweep (r=0.8,0.9; var=0.05,0.3)",
+  "tags": [
+    "adaptive",
+    "sampler v3",
+    "hetero reliability",
+    "tuning"
+  ],
+  "abstract": "Extends heterogeneous-reliability evaluation for v3: means \u2208 {0.8,0.9}, variance \u2208 {0.05,0.3}, servers \u2208 {2,3}, 8 reps. Selects zero-drop best configs by time_to_full and saves a compact summary.",
+  "submitted_tick": 56,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, types, os\nfrom pathlib import Path\nsys.path.append('storage/shared')\n\n# Prefer Zephyr v3 sampler; else v2; else reference\ntry:\n    from utilities.zephyr2_sampler_v3 import Zephyr2AdaptiveSamplerV3 as BaseSampler\nexcept Exception:\n    try:\n        from utilities.zephyr2_sampler_v2 import Zephyr2AdaptiveSamplerV2 as BaseSampler\n    except Exception:\n        from utilities.reference_sampler import ReferenceAdaptiveSampler as BaseSampler\n\nzmod = types.ModuleType('utilities.adaptive_sampler')\nzmod.AdaptiveSampler = BaseSampler\nsys.modules['utilities.adaptive_sampler'] = zmod\n\nfrom coord.hetero_buffered_ring import run_adaptive_hetero_buffered\nfrom utilities.seed_tools import seed_from_str, set_seed, make_rng, mix_seed\n\nbase_seed = seed_from_str(\"Zephyr-v3-hetero-ext-var\")\nset_seed(base_seed); _, _ = make_rng(base_seed)\n\ncfg = {\n    \"N\": 24, \"max_steps\": 500,\n    \"buffer_size\": 8, \"service_rate\": 2,\n    \"servers\": [2, 3],\n    \"serve_after\": False, \"bidirectional\": True,\n    \"reliability_means\": [0.8, 0.9],\n    \"reliability_vars\": [0.05, 0.3],\n    \"p0\": 0.6, \"replicates\": 8,\n    \"sampler_cfg\": {\"initial_rate\": 0.6, \"adjustment_factor\": 1.2},\n    \"targets\": {\n        \"p_min\": 0.6, \"p_max\": 1.0,\n        \"target_delta\": 0.12, \"target_dps\": 12,\n        \"target_drop\": 0.02, \"target_queue_load\": 0.5,\n        \"k_cov\": 0.9, \"k_dps\": 0.06, \"k_drop\": 0.6, \"k_q\": 0.35\n    }\n}\n\ndef summarize(items):\n    tf = [x[\"steps_to_full\"] for x in items if x[\"steps_to_full\"] is not None]\n    drops_ps = [x[\"dropped\"]/max(1,x[\"steps\"]) for x in items]\n    qpeak = [x[\"queue_peak\"] for x in items]\n    def mean(xs): return float(sum(xs)/len(xs)) if xs else None\n    return {\"time_to_full_mean\": mean(tf), \"drops_per_step_mean\": mean(drops_ps), \"queue_peak_mean\": mean(qpeak)}\n\nresults = {}\nfor rmean in cfg[\"reliability_means\"]:\n    rkey = f\"r{rmean}\"\n    results[rkey] = {}\n    for rvar in cfg[\"reliability_vars\"]:\n        vkey = f\"var{rvar}\"\n        results[rkey][vkey] = {}\n        best = None\n        for srv in cfg[\"servers\"]:\n            runs = []\n            for k in range(cfg[\"replicates\"]):\n                seed = mix_seed(base_seed, int(rmean*1000) + int(rvar*1000) + srv*100 + k)\n                runs.append(run_adaptive_hetero_buffered(\n                    N=cfg[\"N\"], max_steps=cfg[\"max_steps\"], base_seed=seed,\n                    buffer_size=cfg[\"buffer_size\"], service_rate=cfg[\"service_rate\"], servers=srv,\n                    serve_after=cfg[\"serve_after\"], reliability_mean=rmean, reliability_var=rvar,\n                    bidirectional=cfg[\"bidirectional\"], p0=cfg[\"p0\"],\n                    sampler_cfg=cfg[\"sampler_cfg\"], targets=cfg[\"targets\"], track_history=False\n                ))\n            met = summarize(runs)\n            entry = {\"servers\": srv, \"metrics\": met}\n            drops = met[\"drops_per_step_mean\"] or 0.0\n            time = met[\"time_to_full_mean\"] or 1e9\n            if (best is None) or (drops < (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0)) or \\\n               (drops == (best[\"metrics\"][\"drops_per_step_mean\"] or 0.0) and time < (best[\"metrics\"][\"time_to_full_mean\"] or 1e9)):\n                best = entry\n        results[rkey][vkey] = {\"best\": best, \"grid_size\": len(cfg[\"servers\"])*cfg[\"replicates\"]}\n\nout_dir = Path(\"storage/shared/coord/results\")\nout_dir.mkdir(parents=True, exist_ok=True)\nout_path = out_dir / \"zephyr2_v3_hetero_buffered_ext_var.json\"\nout_path.write_text(json.dumps({\"config\": cfg, \"results\": results}, indent=2, sort_keys=True), encoding=\"utf-8\")\n\n# Compact print\ncompact = {}\nfor rkey, by_var in results.items():\n    compact[rkey] = {vkey: by_var[vkey][\"best\"] for vkey in by_var}\nprint(\"=== Zephyr v3 Hetero Extended Var Sweep ===\")\nprint(json.dumps({\"artifact\": str(out_path), \"best\": compact}, indent=2))\nprint(\"Extended var sweep complete.\")\n",
+    "submitted_timestamp": 1757849975.8026295,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp52c0at2x/submission.py\", line 60, in <module>\n    runs.append(run_adaptive_hetero_buffered(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp52c0at2x/storage/shared/coord/hetero_buffered_ring.py\", line 73, in run_adaptive_hetero_buffered\n    ctrl = AdaptiveSampler(seed=int(base_seed), initial_rate=float(sampler_cfg.get(\"initial_rate\", p0)),\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: Zephyr2AdaptiveSamplerV3.__init__() got an unexpected keyword argument 'seed'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1757849977.8301063,
+      "evaluation_datetime": "2025-09-14T19:39:37.830110"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757849977.8675306,
+    "version_notified": "original",
+    "message": "Your research submission 'Zephyr v3 Hetero Extended Var Sweep (r=0.8,0.9; var=0.05,0.3)' (ID: 56) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmp52c0at2x/submission.py\", line 60, in <module>\n    runs.append(run_adaptive_hetero_buffered(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp52c0at2x/storage/shared/coord/hetero_buffered_ring.py\", line 73, in run_adaptive_hetero_buffered\n    ctrl = AdaptiveSampler(seed=int(base_seed), initial_rate=float(sampler_cfg.get(\"initial_rate\", p0)),\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: Zephyr2AdaptiveSamplerV3.__init__() got an unexpected keyword argument 'seed'\n\n```"
+  }
+}

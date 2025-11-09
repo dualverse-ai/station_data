@@ -1,0 +1,46 @@
+{
+  "id": "170",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Compute Jaccards @ tol=1e-8: Aletheia(eval155) \u2194 Scientia(latest) and Noesis \u2194 Scientia",
+  "tags": [
+    "analysis",
+    "jaccard",
+    "contact-graph",
+    "tol1e-8",
+    "cross-lineage"
+  ],
+  "abstract": "Reads eval-specific Aletheia(eval155) and Scientia latest (eval167 if present, else generics) active-set CSVs at tol=1e-8, computes boundary/pairs Jaccards, and writes JSON to storage/noesis/exports/. Returns Noesis baseline pack unchanged.",
+  "submitted_tick": 104,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, numpy as np\n\nN = 26\n\ndef load_noesis_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt', dtype=float).reshape(N,2)\n        r = np.loadtxt('storage/noesis/latest_radii.txt', dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        # fallback: grid+hole constructive seed\n        coords = [0.1,0.3,0.5,0.7,0.9]\n        centers = np.array([[x,y] for x in coords for y in coords], float)\n        hole = np.array([0.2,0.2], float)\n        centers = np.vstack([centers, hole])\n        r0 = 0.1 - 1e-8\n        d = float(np.linalg.norm(hole - np.array([0.1,0.1])))\n        r = np.array([r0]*25 + [d - r0 - 1e-8], float)\n        return centers, r\n\ndef read_pairs_csv(path):\n    pairs = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line or line[0].isalpha():\n                    continue\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0]); j = int(parts[1])\n                    except Exception:\n                        continue\n                    if i > j: i, j = j, i\n                    pairs.add((i, j))\n    except Exception:\n        return None\n    return pairs\n\ndef read_boundary_csv(path):\n    aliases = {'xL':'xmin','xR':'xmax','yB':'ymin','yT':'ymax',\n               'xmin':'xmin','xmax':'xmax','ymin':'ymin','ymax':'ymax'}\n    bset = set()\n    try:\n        with open(path, 'r') as f:\n            for line in f:\n                line = line.strip()\n                if not line or line[0].isalpha():\n                    # skip header-like lines\n                    pass\n                parts = [p.strip() for p in line.split(',')]\n                if len(parts) >= 2:\n                    try:\n                        i = int(parts[0])\n                    except Exception:\n                        continue\n                    kind = aliases.get(parts[1], parts[1])\n                    bset.add((i, kind))\n    except Exception:\n        return None\n    return bset\n\ndef jaccard(a, b):\n    if a is None or b is None: return None, None, None\n    inter = len(a & b)\n    uni = len(a | b)\n    return (inter/uni if uni else 1.0), inter, uni\n\ndef first_existing(paths):\n    for p in paths:\n        try:\n            with open(p, 'r'):\n                return p\n        except Exception:\n            continue\n    return None\n\ndef write_json(path, obj):\n    try:\n        os.makedirs(os.path.dirname(path), exist_ok=True)\n        with open(path, 'w') as f:\n            json.dump(obj, f, indent=2)\n    except Exception:\n        pass\n\ndef construct_packing():\n    # Aletheia eval155 (required)\n    a_b_path = 'storage/Aletheia/exports/active_boundary_tol1e8_eval155.csv'\n    a_p_path = 'storage/Aletheia/exports/active_pairs_tol1e8_eval155.csv'\n    aB = read_boundary_csv(a_b_path)\n    aP = read_pairs_csv(a_p_path)\n\n    # Scientia latest: try eval167-specific, else generics\n    s_b_path = first_existing([\n        'storage/Scientia/exports/active_boundary_tol1e8_eval167.csv',\n        'storage/Scientia/exports/active_boundary_tol1e8.csv'\n    ])\n    s_p_path = first_existing([\n        'storage/Scientia/exports/active_pairs_tol1e8_eval167.csv',\n        'storage/Scientia/exports/active_pairs_tol1e8.csv'\n    ])\n    sB = read_boundary_csv(s_b_path) if s_b_path else None\n    sP = read_pairs_csv(s_p_path) if s_p_path else None\n\n    # Noesis own exports (for Noesis\u2194Scientia)\n    n_b_path = 'storage/noesis/exports/active_boundary_tol1e8.csv'\n    n_p_path = 'storage/noesis/exports/active_pairs_tol1e8.csv'\n    nB = read_boundary_csv(n_b_path)\n    nP = read_pairs_csv(n_p_path)\n\n    # Compute Jaccards\n    jaB, jaBi, jaBu = jaccard(aB, sB)\n    jaP, jaPi, jaPu = jaccard(aP, sP)\n    jnB, jnBi, jnBu = jaccard(nB, sB)\n    jnP, jnPi, jnPu = jaccard(nP, sP)\n\n    out_ai = {\n        'lhs': 'aletheia_eval155',\n        'rhs': 'scientia_latest',\n        'rhs_paths': {'boundary': s_b_path, 'pairs': s_p_path},\n        'tol': 1e-8,\n        'boundary_jaccard': jaB,\n        'pairs_jaccard': jaP,\n        'intersection_counts': {'boundary': jaBi, 'pairs': jaPi},\n        'union_counts': {'boundary': jaBu, 'pairs': jaPu}\n    }\n    out_ns = {\n        'lhs': 'noesis',\n        'rhs': 'scientia_latest',\n        'rhs_paths': {'boundary': s_b_path, 'pairs': s_p_path},\n        'tol': 1e-8,\n        'boundary_jaccard': jnB,\n        'pairs_jaccard': jnP,\n        'intersection_counts': {'boundary': jnBi, 'pairs': jnPi},\n        'union_counts': {'boundary': jnBu, 'pairs': jnPu}\n    }\n    write_json('storage/noesis/exports/jaccard_aletheia_eval155_scientia_tol1e8.json', out_ai)\n    write_json('storage/noesis/exports/jaccard_noesis_scientia_latest_tol1e8.json', out_ns)\n\n    # Return baseline pack unchanged\n    c, r = load_noesis_best()\n    return c.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760877207.121062,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.622405384,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.622405",
+      "evaluation_timestamp": 1760877208.7551403,
+      "evaluation_datetime": "2025-10-19T20:33:28.755143"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.622405384,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760877208.801993,
+    "version_notified": "original",
+    "message": "Your research submission 'Compute Jaccards @ tol=1e-8: Aletheia(eval155) \u2194 Scientia(latest) and Noesis \u2194 Scientia' (ID: 170) has been evaluated.\n\n**Score:** 2.622405384\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.622405\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

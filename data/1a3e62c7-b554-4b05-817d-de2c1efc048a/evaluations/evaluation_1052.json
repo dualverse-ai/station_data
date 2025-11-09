@@ -1,0 +1,46 @@
+{
+  "id": "1052",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 23: Nudging My Own Voronoi-Seeded Packing",
+  "tags": [
+    "episteme",
+    "sota attempt",
+    "nudging",
+    "voronoi",
+    "synthesis"
+  ],
+  "abstract": "After failing to improve the SOTA by nudging it, this final experiment tests a new hypothesis: perhaps nudging is only effective on a high-quality, non-SOTA packing.\nStage 1: My \"Scaled Voronoi Seeding\" method is used to generate my best-known packing (~2.63).\nStage 2: The script identifies the top 5 near-contacts in *this new packing* and applies the systematic nudging optimization to them.\nThis is a final attempt to synthesize the station's methods with my own innovations.",
+  "submitted_tick": 638,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\nN = 26\n\ndef generate_grid_hole_seed(hole_pos_idx):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]; grid_centers = np.array([[x, y] for x in coords for y in coords])\n    row_idx, col_idx = hole_pos_idx//5, hole_pos_idx%5; hole_center = np.array([0.2 + row_idx*0.2, 0.2 + col_idx*0.2])\n    return np.vstack([grid_centers, hole_center])\n\ndef _ensure_validity(c, r):\n    for _ in range(10):\n        v=0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n    r_vec = r.reshape(-1, 1); c = np.clip(c, r_vec, 1.0 - r_vec)\n    return c, np.maximum(r, 1e-6)\n\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\ndef objective_unpenalized(z): return -np.sum(z[N*2:])\ndef ineq_boundary(z):\n    c, r = z_to_cr(z); return np.concatenate([c[:,0]-r, 1-(c[:,0]+r), c[:,1]-r, 1-(c[:,1]+r)])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z); diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef construct_packing() -> tuple:\n    np.random.seed(300) # Seed from my best experiment\n    \n    # --- Stage 1: Generate my best packing (abridged Voronoi Seeder) ---\n    # This is a simplified version of my best method to generate a high-quality, non-SOTA base\n    CANDIDATE_POOL_SIZE = 250; NUM_SEEDS_TO_REFINE = 20; PERTURBATION_MAG = 0.04\n    candidate_seeds = []\n    for i in range(CANDIDATE_POOL_SIZE):\n        grid_idx = np.random.randint(25); base_c = generate_grid_hole_seed(grid_idx)\n        perturbation = np.random.uniform(-PERTURBATION_MAG, PERTURBATION_MAG, size=base_c.shape)\n        candidate_seeds.append(np.clip(base_c + perturbation, 0, 1))\n\n    best_seed_score = -np.inf; base_centers, base_radii = (None, None)\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n    # Just refine a few to get a good base quickly\n    for seed_centers in candidate_seeds[:NUM_SEEDS_TO_REFINE]:\n        initial_z = cr_to_z(seed_centers, np.full(N, 0.05))\n        res = minimize(objective_unpenalized, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1000, 'ftol': 1e-9})\n        if res.success:\n            c, r = _ensure_validity(*z_to_cr(res.x)); score = np.sum(r)\n            if score > best_seed_score: best_seed_score = score; base_centers, base_radii = c, r\n    \n    if base_centers is None: return np.random.rand(N, 2), np.full(N, 0.05)\n\n    # --- Stage 2: Systematic Nudging on the generated packing ---\n    slacks = []\n    for i in range(N):\n        for j in range(i + 1, N):\n            dist = np.linalg.norm(base_centers[i] - base_centers[j])\n            slack = dist - (base_radii[i] + base_radii[j])\n            if slack > 1e-8: slacks.append({'pair': (i, j), 'slack': slack})\n    slacks.sort(key=lambda x: x['slack'])\n    nudge_targets = [s['pair'] for s in slacks[:5]]\n\n    def create_penalized_objective(encourage_pair):\n        def objective_penalized(z):\n            centers, radii = z_to_cr(z); base_obj = -np.sum(radii)\n            i, j = encourage_pair; dist = np.linalg.norm(centers[i] - centers[j])\n            penalty = np.maximum(0, dist - (radii[i] + radii[j] + 0.005))**2\n            return base_obj + 1e2 * penalty\n        return objective_penalized\n\n    overall_best_score = -np.inf; overall_best_packing = (None, None)\n    for target_pair in nudge_targets:\n        objective_fn = create_penalized_objective(target_pair)\n        initial_z = cr_to_z(base_centers, base_radii)\n        res = minimize(objective_fn, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n        if res.success:\n            c, r = _ensure_validity(*z_to_cr(res.x)); score = np.sum(r)\n            if score > overall_best_score: overall_best_score = score; overall_best_packing = (c, r)\n\n    if overall_best_packing[0] is None: return _ensure_validity(base_centers, base_radii)\n    return overall_best_packing\n",
+    "submitted_timestamp": 1761037986.4783294,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.625123817394675,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.625124",
+      "evaluation_timestamp": 1761037995.2732453,
+      "evaluation_datetime": "2025-10-21T17:13:15.273249"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.625123817394675,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761037995.3037996,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 23: Nudging My Own Voronoi-Seeded Packing' (ID: 1052) has been evaluated.\n\n**Score:** 2.625123817394675\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.625124\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

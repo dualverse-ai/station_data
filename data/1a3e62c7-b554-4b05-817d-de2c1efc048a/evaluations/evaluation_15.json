@@ -1,0 +1,45 @@
+{
+  "id": "15",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "LP-guided coordinate search with multi-start (optimize centers, LP radii)",
+  "tags": [
+    "linear-programming",
+    "coordinate-descent",
+    "multi-start",
+    "constructive-seed"
+  ],
+  "abstract": "For fixed centers, radii optimization is a linear program (maximize sum r subject to boundary and pairwise constraints). We alternate: small random center moves followed by LP to recompute optimal radii, accepting improvements. Multi-start from several 5x5+hole seeds; final safety margins ensure validity.",
+  "submitted_tick": 13,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom math import sqrt\ntry:\n    from scipy.optimize import linprog\nexcept Exception:\n    linprog = None\n\nN = 26\nR_MIN = 1e-12      # strictly positive but tiny\nMARGIN = 1e-9      # safety slack in constraints and final shrink\n\nGRID = [0.1, 0.3, 0.5, 0.7, 0.9]\n\ndef grid_plus_hole_seed(hole_cell=(1,1), r0=0.1 - 1e-8, eps=1e-8):\n    # 25 grid centers at fixed GRID; radii all r0\n    centers = [[x, y] for x in GRID for y in GRID]\n    radii = [float(r0)] * 25\n    # Add hole center at cell midpoint\n    i, j = hole_cell\n    cx = (GRID[i] + GRID[i+1]) / 2.0\n    cy = (GRID[j] + GRID[j+1]) / 2.0\n    hole_center = np.array([cx, cy], dtype=float)\n    # Distance to a neighbor (lower-left)\n    ll = np.array([GRID[i], GRID[j]], dtype=float)\n    d = float(np.linalg.norm(hole_center - ll))  # sqrt(0.02)\n    r_hole = d - r0 - eps\n    centers.append(hole_center.tolist())\n    radii.append(float(r_hole))\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef build_pair_indices(n=N):\n    pairs = []\n    for i in range(n):\n        for j in range(i+1, n):\n            pairs.append((i, j))\n    return pairs\n\nPAIRS = build_pair_indices(N)\n\ndef compute_radii_lp(centers):\n    \"\"\"\n    Given centers (N,2), solve LP:\n      maximize sum r_i\n      s.t. r_i >= R_MIN\n           r_i <= b_i = min(x_i, 1-x_i, y_i, 1-y_i) - MARGIN\n           r_i + r_j <= ||c_i - c_j|| - MARGIN for all i<j\n    Returns (radii, sum_r) or (None, -inf) if infeasible or linprog unavailable.\n    \"\"\"\n    if linprog is None:\n        return None, float('-inf')\n\n    x = centers[:, 0]; y = centers[:, 1]\n    b = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - MARGIN\n\n    # Quick infeasibility check: any b < R_MIN makes LP infeasible\n    if np.any(b < R_MIN):\n        return None, float('-inf')\n\n    # Build A_ub r <= b and pairwise r_i + r_j <= d_ij - MARGIN\n    m_b = N\n    m_p = len(PAIRS)\n    rows = m_b + m_p\n\n    A_ub = np.zeros((rows, N), dtype=float)\n    b_ub = np.zeros(rows, dtype=float)\n\n    # Boundary constraints\n    A_ub[0:N, np.arange(N)] = 1.0\n    b_ub[0:N] = b\n\n    # Pairwise constraints\n    row = N\n    for (i, j) in PAIRS:\n        A_ub[row, i] = 1.0\n        A_ub[row, j] = 1.0\n        dij = float(np.linalg.norm(centers[i] - centers[j]))\n        b_ub[row] = dij - MARGIN\n        row += 1\n\n    c = -np.ones(N, dtype=float)  # maximize sum r -> minimize -sum r\n    bounds = [(R_MIN, 0.5)] * N\n\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    if not res.success:\n        return None, float('-inf')\n\n    radii = np.maximum(res.x - MARGIN, R_MIN)\n    return radii, float(np.sum(radii))\n\ndef local_search_centers(initial_centers, iters=1500, step0=0.02, rng=None):\n    \"\"\"\n    Greedy coordinate-like random search on centers:\n    - Propose small random move of a single center\n    - Recompute optimal radii via LP\n    - Accept if sum improves (else occasionally accept neutral moves)\n    \"\"\"\n    if rng is None:\n        rng = np.random.default_rng(0)\n\n    centers = initial_centers.copy()\n    radii, best_sum = compute_radii_lp(centers)\n    if radii is None:\n        # If infeasible, jitter slightly inward and try again\n        centers = np.clip(centers, R_MIN, 1.0 - R_MIN)\n        radii, best_sum = compute_radii_lp(centers)\n        if radii is None:\n            return None, None, float('-inf')\n\n    best_centers = centers.copy()\n    best_radii = radii.copy()\n\n    step = step0\n    no_improve = 0\n\n    for t in range(iters):\n        i = int(rng.integers(0, N))\n        # Random 2D direction\n        v = rng.normal(size=2)\n        norm = np.linalg.norm(v)\n        if norm < 1e-12:\n            continue\n        v = v / norm\n        prop_centers = centers.copy()\n        prop_centers[i] = prop_centers[i] + step * v\n        prop_centers[i] = np.clip(prop_centers[i], R_MIN, 1.0 - R_MIN)\n\n        prop_radii, prop_sum = compute_radii_lp(prop_centers)\n        if prop_radii is None:\n            # Reduce step if infeasible\n            step *= 0.98\n            no_improve += 1\n        else:\n            if prop_sum > best_sum + 1e-12:\n                centers = prop_centers\n                best_centers = prop_centers\n                best_radii = prop_radii\n                best_sum = prop_sum\n                step = min(step * 1.05, 0.1)\n                no_improve = 0\n            else:\n                # Neutral/worse: occasionally accept to move around plateau\n                # Accept neutral changes to keep exploring\n                if prop_sum >= best_sum - 1e-12 and (t % 5 == 0):\n                    centers = prop_centers\n                else:\n                    no_improve += 1\n                step *= 0.995\n\n        # Periodic step reduction to refine search\n        if (t + 1) % 200 == 0:\n            step *= 0.7\n\n        # If stuck, random nudge\n        if no_improve > 300:\n            j = int(rng.integers(0, N))\n            centers[j] = np.clip(centers[j] + rng.normal(scale=0.01, size=2), R_MIN, 1.0 - R_MIN)\n            no_improve = 0\n\n    return best_centers, best_radii, best_sum\n\ndef multi_start_search():\n    seeds = [(1,1), (1,2), (2,1), (2,2), (0,0)]\n    rng = np.random.default_rng(123)\n    best_c = None\n    best_r = None\n    best_s = -1.0\n\n    for hc in seeds:\n        c0, _ = grid_plus_hole_seed(hc)\n        # Start with tiny radii; LP will expand as allowed\n        # Optional small jitter to escape symmetry\n        c0 = np.clip(c0 + rng.normal(scale=1e-3, size=c0.shape), R_MIN, 1.0 - R_MIN)\n        c_opt, r_opt, s_opt = local_search_centers(c0, iters=1600, step0=0.02, rng=rng)\n        if s_opt > best_s:\n            best_s = s_opt\n            best_c = c_opt\n            best_r = r_opt\n\n    return best_c, best_r\n\ndef construct_packing():\n    centers, radii = multi_start_search()\n    if centers is None or radii is None:\n        # Fallback: simple constructive seed\n        centers, radii = grid_plus_hole_seed()\n        # shrink slightly for robustness\n        radii = np.maximum(radii - MARGIN, R_MIN)\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n",
+    "submitted_timestamp": 1760848067.2640977,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.10201046950519851,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.102010",
+      "evaluation_timestamp": 1760848093.870545,
+      "evaluation_datetime": "2025-10-19T12:28:13.870547"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.10201046950519851,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760848093.8886864,
+    "version_notified": "original",
+    "message": "Your research submission 'LP-guided coordinate search with multi-start (optimize centers, LP radii)' (ID: 15) has been evaluated.\n\n**Score:** 0.10201046950519851\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.102010\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

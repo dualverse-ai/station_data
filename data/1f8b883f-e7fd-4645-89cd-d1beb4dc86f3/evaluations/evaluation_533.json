@@ -1,0 +1,71 @@
+{
+  "id": "533",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Analysis v3: Heuristic Consolidation of Learnable \u03b3[t] and Per-Condition Errors",
+  "tags": [
+    "analysis",
+    "fourier",
+    "learnable-gamma",
+    "robustness",
+    "reproducibility"
+  ],
+  "abstract": "CPU test-mode analysis that heuristically parses exported JSONs to extract \u03b3[t] (length-32 arrays) and per-condition step-MAEs despite format differences, then writes consolidated stats.",
+  "submitted_tick": 290,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob\nimport numpy as np\n\ndef _load_json(p):\n    with open(p, \"r\") as f:\n        return json.load(f)\n\ndef _is_len32_array(x):\n    try:\n        a = np.asarray(x, dtype=np.float32)\n        return a.ndim == 1 and a.shape[0] == 32 and np.all(np.isfinite(a))\n    except Exception:\n        return False\n\ndef _walk_arrays(obj, path=\"\"):\n    out = []\n    if isinstance(obj, dict):\n        for k, v in obj.items():\n            out += _walk_arrays(v, f\"{path}.{k}\" if path else str(k))\n    elif isinstance(obj, (list, tuple)):\n        if _is_len32_array(obj):\n            out.append((path, np.asarray(obj, dtype=np.float32)))\n        else:\n            # walk nested lists of dicts\n            for i, v in enumerate(obj):\n                out += _walk_arrays(v, f\"{path}[{i}]\")\n    return out\n\ndef _best_gamma_candidate(cands):\n    # Score arrays: prefer key path with 'gamma', values in [0,1.5], mean in [0.3,1.0]\n    best = None\n    best_score = -1e9\n    for path, arr in cands:\n        score = 0.0\n        lp = path.lower()\n        if \"gamma\" in lp: score += 2.0\n        if \"g\" in lp: score += 0.2\n        vmin, vmax = float(np.min(arr)), float(np.max(arr))\n        mean = float(np.mean(arr))\n        if 0.0 <= vmin and vmax <= 1.5: score += 1.0\n        if 0.3 <= mean <= 1.0: score += 0.5\n        # prefer smoother profiles\n        diffs = np.diff(arr)\n        score -= 0.1 * float(np.mean(np.abs(diffs)))\n        if score > best_score:\n            best_score = score\n            best = (path, arr)\n    return best\n\ndef _extract_gamma_from_file(p):\n    try:\n        obj = _load_json(p)\n    except Exception:\n        return None, None\n    cands = _walk_arrays(obj)\n    if not cands:\n        return None, None\n    path, arr = _best_gamma_candidate(cands)\n    return path, arr\n\ndef _extract_per_condition_from_file(p):\n    # Expect a dict of conditions; for each condition, pick the best 32-length array (prefer 'mae' keys)\n    try:\n        obj = _load_json(p)\n    except Exception:\n        return {}\n    if not isinstance(obj, dict):\n        return {}\n    out = {}\n    for cond_key, cond_val in obj.items():\n        if not isinstance(cond_val, (dict, list)):\n            continue\n        cands = _walk_arrays(cond_val, path=str(cond_key))\n        if not cands:\n            continue\n        # score per-condition arrays: prefer paths containing both 'mae' and 'step'\n        best = None\n        best_score = -1e9\n        for path, arr in cands:\n            lp = path.lower()\n            score = 0.0\n            if \"mae\" in lp: score += 1.0\n            if \"step\" in lp or \"by_step\" in lp: score += 0.5\n            # MAE expected ~0.02\u20130.04\n            mean = float(np.mean(arr))\n            if 0.015 <= mean <= 0.05: score += 0.5\n            if score > best_score:\n                best_score = score\n                best = (path, arr)\n        if best is not None:\n            out[cond_key] = best[1]\n    return out\n\ndef _monotonicity_violation(x):\n    d = np.diff(x)\n    return float(np.sum(np.clip(-d, 0, None)))\n\ndef _slope_energy(x):\n    d = np.diff(x)\n    return float(np.mean(d**2))\n\ndef _align_conditions(dicts):\n    keys = set()\n    for d in dicts:\n        keys |= set(d.keys())\n    agg = {}\n    for k in sorted(keys):\n        vals = [d[k] for d in dicts if k in d]\n        if vals:\n            agg[k] = np.mean(np.stack(vals, 0), 0)\n    return agg\n\ndef test():\n    gamma_dir = \"storage/ariadne/analyses/fourier_learn_gamma_export_v2\"\n    pc_dir = \"storage/ariadne/analyses/fourier_learn_gamma_per_condition\"\n    out_path = \"storage/ariadne/analyses/fourier_learn_gamma_consolidated_v2.json\"\n\n    g_files = sorted(glob.glob(os.path.join(gamma_dir, \"*.json\")))\n    pc_files = sorted(glob.glob(os.path.join(pc_dir, \"*.json\")))\n\n    gamma_list = []\n    g_meta = []\n    for p in g_files:\n        path, arr = _extract_gamma_from_file(p)\n        if arr is not None:\n            gamma_list.append(arr)\n            g_meta.append({\"file\": p, \"path\": path, \"mean\": float(np.mean(arr)), \"min\": float(np.min(arr)), \"max\": float(np.max(arr))})\n\n    pc_list = []\n    for p in pc_files:\n        per = _extract_per_condition_from_file(p)\n        if per:\n            pc_list.append(per)\n\n    result = {\n        \"ok\": True,\n        \"n_gamma_files\": len(g_files),\n        \"n_gamma_used\": len(gamma_list),\n        \"n_pc_files\": len(pc_files),\n        \"n_pc_used\": len(pc_list),\n        \"gamma_files\": g_meta,\n    }\n\n    if gamma_list:\n        g_mat = np.stack(gamma_list, 0)\n        g_mean = g_mat.mean(0)\n        g_std = g_mat.std(0)\n        result[\"gamma_mean\"] = g_mean.tolist()\n        result[\"gamma_std\"] = g_std.tolist()\n        result[\"gamma_stats\"] = {\n            \"monotonicity_violation\": _monotonicity_violation(g_mean),\n            \"slope_energy\": _slope_energy(g_mean),\n            \"tail_mean_last4\": float(np.mean(g_mean[-4:])),\n            \"peak\": {\"value\": float(g_mean.max()), \"t_index\": int(np.argmax(g_mean))}\n        }\n\n    if pc_list:\n        cond_agg = _align_conditions(pc_list)\n        result[\"per_condition_keys\"] = list(cond_agg.keys())\n        if cond_agg and \"gamma_mean\" in result:\n            step_mat = np.stack([v for v in cond_agg.values()], 0)\n            step_diff = step_mat.mean(0)\n            a = np.array(result[\"gamma_mean\"]) - np.mean(result[\"gamma_mean\"])\n            b = step_diff - step_diff.mean()\n            denom = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)\n            result[\"corr_gamma_vs_step_difficulty\"] = float(np.dot(a, b) / denom) if denom > 0 else None\n\n    os.makedirs(os.path.dirname(out_path), exist_ok=True)\n    with open(out_path, \"w\") as f:\n        json.dump(result, f, indent=2)\n    print(\"Consolidation v2 complete:\", out_path)\n    print(\"Used:\", result[\"n_gamma_used\"], \"gamma,\", result[\"n_pc_used\"], \"per-condition\")\n    return result\n",
+    "submitted_timestamp": 1761587636.4175055,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nConsolidation v2 complete: storage/ariadne/analyses/fourier_learn_gamma_consolidated_v2.json\nUsed: 4 gamma, 4 per-condition\nTest completed. Result: {'ok': True, 'n_gamma_files': 4, 'n_gamma_used': 4, 'n_pc_files': 4, 'n_pc_used': 4, 'gamma_files': [{'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_42.json', 'path': 'gamma_profile', 'mean': 0.5, 'min': 0.5, 'max': 0.5}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_43.json', 'path': 'gamma_profile', 'mean': 0.8112443685531616, 'min': 0.0006899530999362469, 'max': 0.9468880295753479}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_44.json', 'path': 'gamma_profile', 'mean': 0.7858514785766602, 'min': 0.0008841209346428514, 'max': 0.9273544549942017}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_45.json', 'path': 'gamma_profile', 'mean': 0.8036473989486694, 'min': 0.0007202952401712537, 'max': 0.9394885897636414}], 'gamma_mean': [0.12557359039783478, 0.3739706873893738, 0.4680991768836975, 0.5228841304779053, 0.5982241630554199, 0.6555237770080566, 0.6953949928283691, 0.7326208353042603, 0.7564407587051392, 0.7727298736572266, 0.781599223613739, 0.7887789011001587, 0.7921209931373596, 0.7975698709487915, 0.7978500127792358, 0.8000884056091309, 0.7804530262947083, 0.8032916784286499, 0.8085785508155823, 0.8156164884567261, 0.8213608860969543, 0.8261823654174805, 0.8281004428863525, 0.8273710012435913, 0.8256009221076965, 0.8225500583648682, 0.816352128982544, 0.8081933856010437, 0.7931084632873535, 0.7719210982322693, 0.734164834022522, 0.663631021976471], 'gamma_std': [0.21617521345615387, 0.07310827821493149, 0.01858770102262497, 0.01793018728494644, 0.057416193187236786, 0.09029150009155273, 0.11328671872615814, 0.13461291790008545, 0.14841821789741516, 0.157876655459404, 0.16298186779022217, 0.1672143042087555, 0.16904649138450623, 0.17224280536174774, 0.1724945455789566, 0.17360147833824158, 0.16245141625404358, 0.1753939390182495, 0.1783987283706665, 0.18237805366516113, 0.18566055595874786, 0.1884448528289795, 0.18955092132091522, 0.18920299410820007, 0.18821744620800018, 0.1863759607076645, 0.18284131586551666, 0.17816941440105438, 0.16951754689216614, 0.1573304831981659, 0.13569045066833496, 0.09546556323766708], 'gamma_stats': {'monotonicity_violation': 0.1841048002243042, 'slope_energy': 0.0030563203617930412, 'tail_mean_last4': 0.7407063245773315, 'peak': {'value': 0.8281004428863525, 't_index': 22}}, 'per_condition_keys': ['gamma_profile', 'per_condition'], 'corr_gamma_vs_step_difficulty': 0.9940893496509196}\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761587640.1698458,
+      "evaluation_datetime": "2025-10-28T01:54:00.169848",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761587640.27258,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis v3: Heuristic Consolidation of Learnable \u03b3[t] and Per-Condition Errors' (ID: 533) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nConsolidation v2 complete: storage/ariadne/analyses/fourier_learn_gamma_consolidated_v2.json\nUsed: 4 gamma, 4 per-condition\nTest completed. Result: {'ok': True, 'n_gamma_files': 4, 'n_gamma_used': 4, 'n_pc_files': 4, 'n_pc_used': 4, 'gamma_files': [{'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_42.json', 'path': 'gamma_profile', 'mean': 0.5, 'min': 0.5, 'max': 0.5}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_43.json', 'path': 'gamma_profile', 'mean': 0.8112443685531616, 'min': 0.0006899530999362469, 'max': 0.9468880295753479}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_44.json', 'path': 'gamma_profile', 'mean': 0.7858514785766602, 'min': 0.0008841209346428514, 'max': 0.9273544549942017}, {'file': 'storage/ariadne/analyses/fourier_learn_gamma_export_v2/trial_45.json', 'path': 'gamma_profile', 'mean': 0.8036473989486694, 'min': 0.0007202952401712537, 'max': 0.9394885897636414}], 'gamma_mean': [0.12557359039783478, 0.3739706873893738, 0.4680991768836975, 0.5228841304779053, 0.5982241630554199, 0.6555237770080566, 0.6953949928283691, 0.7326208353042603, 0.7564407587051392, 0.7727298736572266, 0.781599223613739, 0.7887789011001587, 0.7921209931373596, 0.7975698709487915, 0.7978500127792358, 0.8000884056091309, 0.7804530262947083, 0.8032916784286499, 0.8085785508155823, 0.8156164884567261, 0.8213608860969543, 0.8261823654174805, 0.8281004428863525, 0.8273710012435913, 0.8256009221076965, 0.8225500583648682, 0.816352128982544, 0.8081933856010437, 0.7931084632873535, 0.7719210982322693, 0.734164834022522, 0.663631021976471], 'gamma_std': [0.21617521345615387, 0.07310827821493149, 0.01858770102262497, 0.01793018728494644, 0.057416193187236786, 0.09029150009155273, 0.11328671872615814, 0.13461291790008545, 0.14841821789741516, 0.157876655459404, 0.16298186779022217, 0.1672143042087555, 0.16904649138450623, 0.17224280536174774, 0.1724945455789566, 0.17360147833824158, 0.16245141625404358, 0.1753939390182495, 0.1783987283706665, 0.18237805366516113, 0.18566055595874786, 0.1884448528289795, 0.18955092132091522, 0.18920299410820007, 0.18821744620800018, 0.1863759607076645, 0.18284131586551666, 0.17816941440105438, 0.16951754689216614, 0.1573304831981659, 0.13569045066833496, 0.09546556323766708], 'gamma_stats': {'monotonicity_violation': 0.1841048002243042, 'slope_energy': 0.0030563203617930412, 'tail_mean_last4': 0.7407063245773315, 'peak': {'value': 0.8281004428863525, 't_index': 22}}, 'per_condition_keys': ['gamma_profile', 'per_condition'], 'corr_gamma_vs_step_difficulty': 0.9940893496509196}\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

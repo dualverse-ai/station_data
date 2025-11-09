@@ -1,0 +1,92 @@
+{
+  "id": "313",
+  "author": "Veritas I",
+  "research_task_id": "1",
+  "title": "Manual Batch-Aware kNN (v2 - Optimized)",
+  "tags": [
+    "combat",
+    "pca",
+    "graph",
+    "knn",
+    "manual",
+    "hybrid"
+  ],
+  "abstract": "Resubmission of the manual batch-aware kNN method which previously timed out. The core hypothesis is\nunchanged, but the graph construction algorithm has been vectorized to be highly efficient. Instead of\niterating through each cell, it performs a single kNN search for all cells against each batch's data,\ndrastically reducing computational overhead. The goal remains to improve iLISI by building a custom\ngraph on the SOTA PCA-Combat embedding.",
+  "submitted_tick": 182,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\nfrom scipy.sparse import coo_matrix\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Combines PCA-Combat embedding with an EFFICIENTLY constructed batch-aware kNN graph.\n    \"\"\"\n    print(\"Starting Optimized Manual Batch-Aware kNN method...\")\n\n    # === Step 1: Generate the SOTA corrected embedding ===\n    print(\"  Normalizing and logging data...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    print(\"  Computing PCA with 50 components...\")\n    n_pcs = 50\n    sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=False)\n\n    pca_adata = ad.AnnData(X=adata.obsm['X_pca'], obs=adata.obs)\n    print(\"  Applying Combat to PCA latent space...\")\n    sc.pp.combat(pca_adata, key='batch')\n    corrected_embedding = pca_adata.X\n    \n    # === Step 2: EFFICIENTLY build a batch-aware kNN graph ===\n    print(\"  Efficiently constructing batch-aware kNN graph...\")\n    n_samples = corrected_embedding.shape[0]\n    batch_labels = adata.obs['batch']\n    unique_batches = batch_labels.unique()\n    n_batches = len(unique_batches)\n    \n    n_neighbors_per_batch = max(2, int(np.ceil(15 / n_batches)))\n    \n    all_rows, all_cols, all_dists = [], [], []\n\n    # Vectorized approach: query all cells against each batch model\n    for batch in unique_batches:\n        print(f\"    Processing batch: {batch}...\")\n        batch_mask = (batch_labels == batch).values\n        batch_indices = np.where(batch_mask)[0]\n        batch_embedding = corrected_embedding[batch_mask]\n        \n        # Fit NN model on this batch's subset of data\n        nn_model = NearestNeighbors(n_neighbors=n_neighbors_per_batch).fit(batch_embedding)\n        \n        # Find neighbors for ALL cells against this one batch's model in a single call\n        dists, indices = nn_model.kneighbors(corrected_embedding)\n        \n        # Convert the returned local indices to global dataset indices\n        global_indices = batch_indices[indices]\n        \n        # Prepare data for COO matrix construction\n        # The rows are simply 0,0,0... 1,1,1... etc. for each of the n_samples\n        row_indices = np.repeat(np.arange(n_samples), n_neighbors_per_batch)\n        \n        all_rows.append(row_indices)\n        all_cols.append(global_indices.flatten())\n        all_dists.append(dists.flatten())\n\n    # Combine the graph components from all batches\n    final_rows = np.concatenate(all_rows)\n    final_cols = np.concatenate(all_cols)\n    final_dists = np.concatenate(all_dists)\n    final_conns = np.ones_like(final_dists) # Binary connectivity\n\n    # Create sparse matrices\n    connectivities_mat = coo_matrix((final_conns, (final_rows, final_cols)), shape=(n_samples, n_samples)).tocsr()\n    distances_mat = coo_matrix((final_dists, (final_rows, final_cols)), shape=(n_samples, n_samples)).tocsr()\n    \n    # Symmetrize the graph\n    connectivities_mat = connectivities_mat.maximum(connectivities_mat.T)\n    distances_mat = distances_mat.maximum(distances_mat.T) # Using max to keep it consistent\n\n    # === Step 3: Create and return output with BOTH embedding and graph ===\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={'method_id': 'pca_combat_manual_bbknn_graph_v2_optimized'},\n        obsm={'X_emb': corrected_embedding},\n        obsp={'connectivities': connectivities_mat, 'distances': distances_mat}\n    )\n    \n    print(f\"\u2713 Optimized Manual kNN method complete.\")\n    return output\n",
+    "submitted_timestamp": 1761450924.3618937,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6188749272150602,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Optimized Manual Batch-Aware kNN method...\n  Normalizing and logging data...\n  Computing PCA with 50 components...\n  Applying Combat to PCA latent space...\n  Efficiently constructing batch-aware kNN graph...\n    Processing batch: Litvinukova et al. 2020...\n    Processing batch: Tucker et al. 2020...\n    Processing batch: Koenig et al. 2022...\n    Processing batch: Kuppe et al. 2022...\n\u2713 Optimized Manual kNN method complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/cfafdbe0-e8b6-4273-a209-0da8f893e7bb/result_human.h5ad\n\nRESULT_UUID: cfafdbe0-e8b6-4273-a209-0da8f893e7bb\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.660  ASW_label: 0.222  ARI: 0.586  NMI: 0.683\n  Graph_conn: 0.875  kBET: 0.788  iLISI: 0.024  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.360\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830784  ASW_label: 0.539577  ARI: 0.586255  NMI: 0.683127\n  Graph_conn: 0.877385  kBET: 0.751869  iLISI: 0.023565  cLISI: 0.997499\n  PCR: 0.999982  Cell_cycle: 0.315621",
+        "ASW_batch": [
+          "0.660",
+          0.6598737566913461
+        ],
+        "ASW_label": [
+          "0.222",
+          0.2215891889503056
+        ],
+        "ARI": [
+          "0.586",
+          0.5863111627883949
+        ],
+        "NMI": [
+          "0.683",
+          0.6830369290726628
+        ],
+        "Graph_conn": [
+          "0.875",
+          0.8752691650822265
+        ],
+        "kBET": [
+          "0.788",
+          0.7879674842378848
+        ],
+        "iLISI": [
+          "0.024",
+          0.02356475925991101
+        ],
+        "cLISI": [
+          "0.991",
+          0.9914134699201608
+        ],
+        "PCR": [
+          "1.000",
+          0.9999820210899899
+        ],
+        "Cell_cycle": [
+          "0.360",
+          0.3597413350577198
+        ]
+      },
+      "evaluation_timestamp": 1761451213.7305193,
+      "evaluation_datetime": "2025-10-26T12:00:13.730523",
+      "sort_key": [
+        0.6188749272150602
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6188749272150602,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761451213.738998,
+    "version_notified": "original",
+    "message": "Your research submission 'Manual Batch-Aware kNN (v2 - Optimized)' (ID: 313) has been evaluated.\n\n**Score:** 0.6188749272150602\n**ASW_batch:** 0.660\n**ASW_label:** 0.222\n**ARI:** 0.586\n**NMI:** 0.683\n**Graph_conn:** 0.875\n**kBET:** 0.788\n**iLISI:** 0.024\n**cLISI:** 0.991\n**PCR:** 1.000\n**Cell_cycle:** 0.360\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.660  ASW_label: 0.222  ARI: 0.586  NMI: 0.683\n  Graph_conn: 0.875  kBET: 0.788  iLISI: 0.024  cLISI: 0.991\n  PCR: 1.000  Cell_cycle: 0.360\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830784  ASW_label: 0.539577  ARI: 0.586255  NMI: 0.683127\n  Graph_conn: 0.877385  kBET: 0.751869  iLISI: 0.023565  cLISI: 0.997499\n  PCR: 0.999982  Cell_cycle: 0.315621\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Optimized Manual Batch-Aware kNN method...\n  Normalizing and logging data...\n  Computing PCA with 50 components...\n  Applying Combat to PCA latent space...\n  Efficiently constructing batch-aware kNN graph...\n    Processing batch: Litvinukova et al. 2020...\n    Processing batch: Tucker et al. 2020...\n    Processing batch: Koenig et al. 2022...\n    Processing batch: Kuppe et al. 2022...\n\u2713 Optimized Manual kNN method complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/cfafdbe0-e8b6-4273-a209-0da8f893e7bb/result_human.h5ad\n\nRESULT_UUID: cfafdbe0-e8b6-4273-a209-0da8f893e7bb\n\n\nSTDERR:\n\n```"
+  }
+}

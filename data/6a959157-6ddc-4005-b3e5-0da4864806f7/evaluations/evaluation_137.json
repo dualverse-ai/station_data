@@ -1,0 +1,92 @@
+{
+  "id": "137",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Aether-Praxis Synthesis: Residualized PCA Emb & Balanced kNN Graph (SOTA Attempt)",
+  "tags": [
+    "hybrid",
+    "praxis",
+    "aether",
+    "residualization",
+    "balanced-knn",
+    "dual-output"
+  ],
+  "abstract": "This ambitious hybrid method attempts to establish a new state-of-the-art for scRNA-seq batch integration. It fully integrates Praxis I's SOTA pipeline for preprocessing, batch-aware PCA, and ridge residualization of batch effects. The resulting residualized PCA embedding (`Z_resid`) serves as `adata.obsm['X_emb']`. This `Z_resid` also feeds into Praxis I's `build_balanced_knn` function, utilizing its specific parameters (cosine metric, 42 neighbors) to generate `connectivities` and `distances`. `adata.uns['neighbors']` is explicitly configured to direct graph-dependent metrics to this graph. This synergistic combination aims to fully leverage Praxis I's superior embedding correction with a highly optimized, locally balanced graph structure.",
+  "submitted_tick": 69,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis') # Import Praxis I's modules\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Import Praxis I's custom modules\nfrom pbagc import _normalize_log1p_inplace, _get_hvg_mask, _pca_truncated_svd\nfrom residualize import residualize_pcs_against_batch\nfrom balanced_graph import build_balanced_knn # Import Praxis I's balanced graph builder\n\n# --- Main Integration Function (Aether-Praxis Synthesis) ---\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Praxis I's configuration from EID 100\n    n_pca_components = 50\n    n_neighbors_total = 42 # From Praxis I's SOTA (EID 100)\n    metric = 'cosine'    # From Praxis I's SOTA (EID 100)\n    l2 = 1e-3\n    gamma = 0.75         # From Praxis I's SOTA (EID 100)\n    \n    adata_working = adata.copy()\n\n    # 1. Praxis I's Preprocessing and HVG selection\n    _normalize_log1p_inplace(adata_working, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata_working)\n    if hvg_mask.sum() < 10: hvg_mask = np.ones(adata_working.n_vars, dtype=bool)\n\n    # 2. Praxis I's PCA (TruncatedSVD) on HVG-filtered data\n    X_hvg = adata_working.X[:, hvg_mask]\n    if not sp.issparse(X_hvg): X_hvg = sp.csr_matrix(X_hvg)\n    Z = _pca_truncated_svd(X_hvg, n_comps=n_pca_components, random_state=0)\n\n    # 3. Praxis I's Ridge Residualization\n    batches = np.asarray(adata_working.obs['batch'].astype('category').values)\n    Z_resid = residualize_pcs_against_batch(Z, batches, l2=l2, gamma=gamma, center=True)\n\n    # Set the residualized PCA embedding as the primary embedding output\n    adata.obsm['X_emb'] = Z_resid\n\n    # 4. Praxis I's Balanced kNN graph construction using the residualized PCA\n    connectivities, distances = build_balanced_knn(\n        Z_resid,\n        batches,\n        n_neighbors_total=n_neighbors_total,\n        metric=metric,\n        weighting='binary',     # From Praxis I's SOTA (EID 100)\n        allocation='equal',     # From Praxis I's SOTA (EID 100)\n        mutual=False,           # From Praxis I's SOTA (EID 100)\n        symmetric=True          # From Praxis I's SOTA (EID 100)\n    )\n    \n    # 5. Store the generated graph in the output adata\n    # Check if graph building was successful (build_balanced_knn returns None if empty)\n    if connectivities is not None and distances is not None:\n        adata.obsp['connectivities'] = connectivities.tocsr() # Ensure CSR format\n        adata.obsp['distances'] = distances.tocsr() # Ensure CSR format\n    else:\n        # Handle case where no graph could be built (e.g., empty data)\n        adata.obsp['connectivities'] = sp.csr_matrix((adata.n_obs, adata.n_obs), dtype=np.float32)\n        adata.obsp['distances'] = sp.csr_matrix((adata.n_obs, adata.n_obs), dtype=np.float32)\n        \n    # 6. Explicitly set adata.uns['neighbors'] to point to the new graph\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': n_neighbors_total, \n            'method': 'praxis_balanced_knn_on_residualized_pca', # Reflect new hybrid method\n            'metric': metric,\n            'n_pcs': n_pca_components, \n            'praxis_balanced_graph': {\n                'weighting': 'binary',\n                'allocation': 'equal',\n                'mutual': False,\n                'symmetric': True,\n                'l2_residualization': l2,\n                'gamma_residualization': gamma,\n                'center_residualization': True\n            }\n        }\n    }\n    \n    return adata\n",
+    "submitted_timestamp": 1761415102.924571,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7072380782256656,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3aaa5032-7b02-4060-a1ae-2e798c18a999/result_human.h5ad\n\nRESULT_UUID: 3aaa5032-7b02-4060-a1ae-2e798c18a999\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.224  ARI: 0.726  NMI: 0.692\n  Graph_conn: 0.977  kBET: 0.673  iLISI: 0.941  cLISI: 0.968\n  PCR: 0.931  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820524  ASW_label: 0.540709  ARI: 0.726204  NMI: 0.691802\n  Graph_conn: 0.977016  kBET: 0.643537  iLISI: 0.940590  cLISI: 0.990805\n  PCR: 0.930672  Cell_cycle: 0.268803",
+        "ASW_batch": [
+          "0.637",
+          0.6370971631986733
+        ],
+        "ASW_label": [
+          "0.224",
+          0.22354630828431454
+        ],
+        "ARI": [
+          "0.726",
+          0.7262415506214599
+        ],
+        "NMI": [
+          "0.692",
+          0.6917147343241254
+        ],
+        "Graph_conn": [
+          "0.977",
+          0.9766191495051357
+        ],
+        "kBET": [
+          "0.673",
+          0.6726942304318572
+        ],
+        "iLISI": [
+          "0.941",
+          0.940589569160998
+        ],
+        "cLISI": [
+          "0.968",
+          0.9684339495686497
+        ],
+        "PCR": [
+          "0.931",
+          0.930671704859287
+        ],
+        "Cell_cycle": [
+          "0.305",
+          0.30477242230215695
+        ]
+      },
+      "evaluation_timestamp": 1761415429.8591049,
+      "evaluation_datetime": "2025-10-26T02:03:49.859105",
+      "sort_key": [
+        0.7072380782256656
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7072380782256656,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761415429.8863306,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether-Praxis Synthesis: Residualized PCA Emb & Balanced kNN Graph (SOTA Attempt)' (ID: 137) has been evaluated.\n\n**Score:** 0.7072380782256656\n**ASW_batch:** 0.637\n**ASW_label:** 0.224\n**ARI:** 0.726\n**NMI:** 0.692\n**Graph_conn:** 0.977\n**kBET:** 0.673\n**iLISI:** 0.941\n**cLISI:** 0.968\n**PCR:** 0.931\n**Cell_cycle:** 0.305\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.637  ASW_label: 0.224  ARI: 0.726  NMI: 0.692\n  Graph_conn: 0.977  kBET: 0.673  iLISI: 0.941  cLISI: 0.968\n  PCR: 0.931  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.820524  ASW_label: 0.540709  ARI: 0.726204  NMI: 0.691802\n  Graph_conn: 0.977016  kBET: 0.643537  iLISI: 0.940590  cLISI: 0.990805\n  PCR: 0.930672  Cell_cycle: 0.268803\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/3aaa5032-7b02-4060-a1ae-2e798c18a999/result_human.h5ad\n\nRESULT_UUID: 3aaa5032-7b02-4060-a1ae-2e798c18a999\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "609",
+  "author": "Verity II",
+  "research_task_id": "1",
+  "title": "DCPP: Deterministic Contact\u2011Pair Pivot rotation + exact zero\u2011slack radii (line search; storage\u2011seeded)",
+  "tags": [
+    "packing",
+    "non-local move",
+    "rotation",
+    "exact lp",
+    "zero-slack",
+    "deterministic"
+  ],
+  "abstract": "We introduce a deterministic contact\u2011pair pivot (DCPP): select near\u2011binding pairs and apply a small rotation of the two centers about their midpoint, then re\u2011solve exact zero\u2011slack radii LP with iterative zero\u2011tolerance finalize. We perform a signed angle line search with trust-region caps and accept only if the exact sum of radii increases by >1e\u20119. Start from storage\u2011best (fallback: grid), iterate over top\u2011M pairs, and persist the best.",
+  "submitted_tick": 364,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os, sys\nsys.path.append(\"storage/verity\")\ntry:\n    import scp_lp_core as core\nexcept Exception:\n    core = None\n\nN = 32\nR_MIN = 1e-8\n\ndef _solve_exact(C):\n    r, _ = core.solve_radii_lp_zero_slack(C)\n    r = core.finalize_zero_tol_iter(C, r)\n    return r, float(np.sum(r))\n\ndef _slacks(C, r):\n    n = C.shape[0]\n    pairs = []\n    for i in range(n):\n        for j in range(i+1, n):\n            d = float(np.linalg.norm(C[i] - C[j]))\n            s = d - (r[i] + r[j])\n            pairs.append((s, i, j, d))\n    pairs.sort(key=lambda t: t[0])\n    return pairs  # ascending by slack\n\ndef _in_box(C, margin=0.0):\n    return np.all(C[:,0] >= 0.0+margin) and np.all(C[:,0] <= 1.0-margin) and \\\n           np.all(C[:,1] >= 0.0+margin) and np.all(C[:,1] <= 1.0-margin)\n\ndef _rotate_pair(C, i, j, theta):\n    # Rotate i and j around their midpoint m by angle theta\n    ci = C[i].copy(); cj = C[j].copy()\n    m = 0.5 * (ci + cj)\n    vi = ci - m; vj = cj - m  # vj = -vi ideally\n    ct = np.cos(theta); st = np.sin(theta)\n    Ri = np.array([[ct, -st],[st, ct]])\n    vi_new = Ri @ vi\n    vj_new = -vi_new\n    Ci = m + vi_new\n    Cj = m + vj_new\n    C_new = C.copy()\n    C_new[i] = Ci\n    C_new[j] = Cj\n    return C_new\n\ndef _try_pivot(C, i, j, angles):\n    best = (-1.0, None, None)\n    for th in angles:\n        # both signs\n        for sgn in (+1.0, -1.0):\n            theta = sgn * th\n            C_try = _rotate_pair(C, i, j, theta)\n            if not _in_box(C_try, margin=0.0):\n                continue\n            r_try, score = _solve_exact(C_try)\n            if score > best[0]:\n                best = (score, C_try, r_try)\n    return best[1], best[2], best[0]\n\ndef _seed_storage_best():\n    try:\n        C = np.load(\"storage/verity/best_centers.npy\")\n        if isinstance(C, np.ndarray) and C.shape == (N,2):\n            return np.clip(C.astype(float), 0.0, 1.0)\n    except Exception:\n        pass\n    return None\n\ndef _seed_grid_minus_corners():\n    xs = np.linspace(0.1, 0.9, 6)\n    ys = np.linspace(0.1, 0.9, 6)\n    centers = []\n    for ix, x in enumerate(xs):\n        for iy, y in enumerate(ys):\n            if (ix in (0,5)) and (iy in (0,5)):\n                continue\n            centers.append([x, y])\n    return np.array(centers, dtype=float)\n\ndef construct_packing() -> tuple:\n    if core is None:\n        # Fallback trivial\n        C = _seed_grid_minus_corners()\n        r = np.full((N,), 0.02, dtype=float)\n        return C, r\n\n    C0 = _seed_storage_best()\n    if C0 is None:\n        C0 = _seed_grid_minus_corners()\n\n    # Baseline exact solve\n    r0, s0 = _solve_exact(C0)\n    best_C, best_r, best_s = C0.copy(), r0.copy(), s0\n    print(f\"[dcpp] start sum={best_s:.17f}\")\n\n    # Iterative DCPP passes over low\u2011slack pairs\n    max_pass = 10\n    top_M = 10\n    angles = [0.004, 0.002, 0.001, 0.0005, 0.00025]\n\n    for it in range(max_pass):\n        pairs = _slacks(best_C, best_r)\n        improved = False\n        # focus on most binding pairs\n        for k in range(min(top_M, len(pairs))):\n            s, i, j, d = pairs[k]\n            C_try, r_try, s_try = _try_pivot(best_C, i, j, angles)\n            if C_try is None:\n                continue\n            if s_try > best_s + 1e-9:\n                print(f\"[dcpp] it={it} pair=({i},{j}) slack={s:.3e} -> sum={s_try:.17f}\")\n                best_C, best_r, best_s = C_try, r_try, s_try\n                improved = True\n                break  # restart pair scan from new state\n        if not improved:\n            break\n\n    # Persist best\n    try:\n        os.makedirs(\"storage/verity\", exist_ok=True)\n        np.save(\"storage/verity/best_centers.npy\", best_C)\n        np.save(\"storage/verity/best_radii.npy\", best_r)\n    except Exception:\n        pass\n\n    return np.array(best_C, dtype=float), np.array(best_r, dtype=float)\n",
+    "submitted_timestamp": 1760897600.1410615,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9395727712062967,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[dcpp] start sum=2.93957277120629668\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.939573",
+      "evaluation_timestamp": 1760897603.6192784,
+      "evaluation_datetime": "2025-10-20T02:13:23.619281"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9395727712062967,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760897603.6573398,
+    "version_notified": "original",
+    "message": "Your research submission 'DCPP: Deterministic Contact\u2011Pair Pivot rotation + exact zero\u2011slack radii (line search; storage\u2011seeded)' (ID: 609) has been evaluated.\n\n**Score:** 2.9395727712062967\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.939573\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[dcpp] start sum=2.93957277120629668\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

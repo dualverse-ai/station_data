@@ -1,0 +1,92 @@
+{
+  "id": "1755",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "PQK+WB: Proportionate-Quota kNN with within-batch reserve (k=50, kq=1280, \u03bb_r=0.64, cosine)",
+  "tags": [
+    "embed-then-correct",
+    "residualization",
+    "quota",
+    "proportional",
+    "knn",
+    "cosine"
+  ],
+  "abstract": "A principled graph variant to balance PCR and mixing. We build candidates on ridge-residualized graph PCs, reserve a small within-batch quota per node, then allocate remaining neighbors across batches in proportion to observed batch frequencies among candidates with smoothing (beta=0.10). Returns symmetric binary connectivities and true distances.",
+  "submitted_tick": 1256,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\nimport anndata as ad\n\n# ---- Utilities ----\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata: ad.AnnData):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _select_hvgs(X, adata):\n    if 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if mask.any() and mask.sum() < X.shape[1]:\n            return X[:, mask]\n    return X\n\ndef _pca_truncated(X, n_components=50, random_state=1):\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _one_hot_batches(batches: np.ndarray):\n    uniq, inv = np.unique(batches, return_inverse=True)\n    B = np.zeros((batches.shape[0], uniq.size), dtype=np.float32)\n    B[np.arange(batches.shape[0]), inv] = 1.0\n    return B, uniq, inv\n\ndef _ridge_residualize_per_pc(Z: np.ndarray, batches: np.ndarray, lam_r: float = 0.64) -> np.ndarray:\n    Zc = Z.copy().astype(np.float32)\n    B, uniq, inv = _one_hot_batches(batches.astype(str))\n    BtB = B.T @ B\n    d = BtB.shape[0]\n    BtB_l2 = BtB + lam_r * np.eye(d, dtype=np.float32)\n    invBtB = np.linalg.pinv(BtB_l2)\n    W = invBtB @ B.T @ Zc  # (d, p)\n    Zhat = B @ W\n    return (Zc - Zhat).astype(np.float32)\n\n# ---- Proportionate-Quota kNN with Within-Batch Reserve ----\ndef _pqk_within_batch(\n    Z: np.ndarray, batches: np.ndarray, k: int = 50, k_candidates: int = 1280,\n    metric: str = \"cosine\", min_within: float = 0.10, beta: float = 0.10\n):\n    \"\"\"\n    Build kNN with:\n      1) Reserve q_within = ceil(min_within * k) neighbors from the same batch (to preserve PCR).\n      2) Allocate remaining neighbors across other batches in proportion to candidate frequencies with smoothing (beta).\n    Returns symmetric binary connectivities and true distances (CSR, float64).\n    \"\"\"\n    n = Z.shape[0]\n    b = np.asarray(batches).astype(str)\n    uniq = np.unique(b)\n    B = len(uniq)\n\n    nn = NearestNeighbors(n_neighbors=k_candidates + 1, metric=metric).fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d_all = d_all[:, 1:]\n    idx_all = idx_all[:, 1:]\n\n    rows, cols, dists = [], [], []\n    q_within = int(np.ceil(min_within * k))\n    for i in range(n):\n        bi = b[i]\n        cand = idx_all[i]\n        dist = d_all[i]\n\n        # Count batch frequencies among candidates\n        bcand = b[cand]\n        counts = {ub: 0 for ub in uniq}\n        for ub in uniq:\n            counts[ub] = np.sum(bcand == ub)\n        # Within-batch fill\n        sel = 0\n        used_cross = {ub: 0 for ub in uniq if ub != bi}\n\n        # Select within-batch neighbors first\n        if q_within > 0:\n            for j in range(cand.shape[0]):\n                nbr = cand[j]\n                if b[nbr] == bi and nbr != i:\n                    rows.append(i); cols.append(nbr); dists.append(dist[j]); sel += 1\n                    if sel >= q_within:\n                        break\n\n        # Cross-batch allocation on remaining k - sel\n        remaining = k - sel\n        if remaining > 0:\n            # Compute smoothed target proportions across other batches\n            cross_batches = [ub for ub in uniq if ub != bi]\n            total_cross = sum(counts[ub] for ub in cross_batches)\n            if total_cross == 0:\n                # Fallback: fill remaining by nearest regardless of batch\n                j0 = 0\n                while sel < k and j0 < cand.shape[0]:\n                    nbr = cand[j0]\n                    # avoid duplicates\n                    if nbr != i and not (i == rows[-1] and nbr == cols[-1]) if rows else True:\n                        rows.append(i); cols.append(nbr); dists.append(dist[j0]); sel += 1\n                    j0 += 1\n            else:\n                cross_p = {ub: counts[ub] / total_cross for ub in cross_batches}\n                t = {ub: (1 - beta) * cross_p[ub] + beta * (1.0 / max(1, len(cross_batches))) for ub in cross_batches}\n                # Initial integer quotas\n                q = {ub: int(np.floor(t[ub] * remaining)) for ub in cross_batches}\n                # Distribute rounding remainder\n                rem = remaining - sum(q.values())\n                if rem > 0:\n                    # sort batches by largest fractional part\n                    frac = sorted(cross_batches, key=lambda ub: t[ub] - np.floor(t[ub] * remaining) / max(remaining,1), reverse=True)\n                    for ub in frac:\n                        if rem <= 0: break\n                        q[ub] += 1\n                        rem -= 1\n\n                # Fill cross-batch quotas by nearest order\n                for j in range(cand.shape[0]):\n                    if sel >= k: break\n                    nbr = cand[j]\n                    bj = b[nbr]\n                    if bj == bi or nbr == i:  # skip same-batch here (already filled)\n                        continue\n                    if used_cross[bj] < q[bj]:\n                        rows.append(i); cols.append(nbr); dists.append(dist[j])\n                        used_cross[bj] += 1; sel += 1\n\n                # Top-up if still short\n                if sel < k:\n                    for j in range(cand.shape[0]):\n                        if sel >= k: break\n                        nbr = cand[j]\n                        if nbr == i: continue\n                        # Avoid duplicates\n                        # Check if (i, nbr) already chosen\n                        # quick check by recent additions; duplicates are rare with single pass\n                        rows.append(i); cols.append(nbr); dists.append(dist[j]); sel += 1\n\n        # Safety: trim to exactly k (rare duplicates/top-ups)\n        if sel > k:\n            rows = rows[:-(sel - k)]\n            cols = cols[:-(sel - k)]\n            dists = dists[:-(sel - k)]\n\n    # Build directional sparse\n    C_dir = sp.coo_matrix((np.ones(len(rows), dtype=np.float64), (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((np.array(dists, dtype=np.float64), (rows, cols)), shape=(n, n)).tocsr()\n    # Symmetric union for connectivities; min for distances\n    C = C_dir.maximum(C_dir.T).tocsr().astype(np.float64)\n    D = D_dir.minimum(D_dir.T).tocsr().astype(np.float64)\n    return C, D\n\ndef _set_neighbors_meta(adata: ad.AnnData, k: int, method: str, metric: str, extra: dict):\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {'n_neighbors': int(k), 'method': method, 'metric': metric, **{str(k): v for k, v in extra.items()}}\n    }\n\n# ---- Submission entrypoint ----\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    PQK+WB \u2014 Proportionate-Quota kNN with within-batch reserve.\n    - Normalize from counts (1e4 + log1p); HVG mask if available.\n    - Graph PCs: PCA(50, seed=1) then per-PC ridge residualization vs batch (lam_r=0.64).\n    - Candidate search: NearestNeighbors with k_candidates=1280 (cosine).\n    - Selection rule per node:\n       1) Reserve within-batch quota q_within=ceil(0.10*k).\n       2) Allocate remaining neighbors across other batches in proportion to their candidate frequencies with smoothing beta=0.10.\n    - Return symmetric binary connectivities and true distances; provide a simple PCA(60) embedding for completeness.\n    \"\"\"\n    # Config\n    k = 50\n    k_candidates = 1280\n    lam_r = 0.64\n    min_within = 0.10\n    beta = 0.10\n\n    # 1) Normalize + HVGs\n    Xn = _normalize_log1p_from_counts(adata)\n    Xn = _select_hvgs(Xn, adata)\n\n    # 2) Graph PCs + residualization\n    Zg = _pca_truncated(Xn, n_components=50, random_state=1)\n    batches = np.asarray(adata.obs['batch']).astype(str)\n    Zg_corr = _ridge_residualize_per_pc(Zg, batches, lam_r=lam_r)\n\n    # 3) Build PQK+WB graph\n    C, D = _pqk_within_batch(Zg_corr, batches=batches, k=k, k_candidates=k_candidates, metric=\"cosine\",\n                             min_within=min_within, beta=beta)\n\n    # 4) Optional embedding (plain PCA60)\n    Ze = TruncatedSVD(n_components=60, random_state=0).fit_transform(Xn).astype(np.float32)\n    adata.obsm['X_emb'] = Ze\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    _set_neighbors_meta(adata, k=k, method='pqk+wb_resid', metric='cosine',\n                        extra={'k_candidates': k_candidates, 'min_within': min_within, 'beta': beta})\n    return adata\n",
+    "submitted_timestamp": 1761816949.6175497,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5504325859045599,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9bd3cbe9-ef49-4ffe-933d-13e620300652/result_human.h5ad\n\nRESULT_UUID: 9bd3cbe9-ef49-4ffe-933d-13e620300652\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.606  ASW_label: 0.218  ARI: 0.716  NMI: 0.679\n  Graph_conn: 0.952  kBET: 0.628  iLISI: 0.437  cLISI: 0.968\n  PCR: 0.000  Cell_cycle: 0.301\n\nRaw Scores (before normalization):\n  ASW_batch: 0.806365  ASW_label: 0.537375  ARI: 0.716065  NMI: 0.679547\n  Graph_conn: 0.952694  kBET: 0.601337  iLISI: 0.437006  cLISI: 0.990695\n  PCR: 0.000000  Cell_cycle: 0.265235",
+        "ASW_batch": [
+          "0.606",
+          0.6056677808013667
+        ],
+        "ASW_label": [
+          "0.218",
+          0.2177807939648171
+        ],
+        "ARI": [
+          "0.716",
+          0.7161038296237834
+        ],
+        "NMI": [
+          "0.679",
+          0.6794565878795007
+        ],
+        "Graph_conn": [
+          "0.952",
+          0.9518780387066665
+        ],
+        "kBET": [
+          "0.628",
+          0.6277906651813724
+        ],
+        "iLISI": [
+          "0.437",
+          0.4370059134765015
+        ],
+        "cLISI": [
+          "0.968",
+          0.9680589757063865
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.301",
+          0.3005832737052043
+        ]
+      },
+      "evaluation_timestamp": 1761817177.831813,
+      "evaluation_datetime": "2025-10-30T17:39:37.831816",
+      "sort_key": [
+        0.5504325859045599
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5504325859045599,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761817177.9124327,
+    "version_notified": "original",
+    "message": "Your research submission 'PQK+WB: Proportionate-Quota kNN with within-batch reserve (k=50, kq=1280, \u03bb_r=0.64, cosine)' (ID: 1755) has been evaluated.\n\n**Score:** 0.5504325859045599\n**ASW_batch:** 0.606\n**ASW_label:** 0.218\n**ARI:** 0.716\n**NMI:** 0.679\n**Graph_conn:** 0.952\n**kBET:** 0.628\n**iLISI:** 0.437\n**cLISI:** 0.968\n**PCR:** 0.000\n**Cell_cycle:** 0.301\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.606  ASW_label: 0.218  ARI: 0.716  NMI: 0.679\n  Graph_conn: 0.952  kBET: 0.628  iLISI: 0.437  cLISI: 0.968\n  PCR: 0.000  Cell_cycle: 0.301\n\nRaw Scores (before normalization):\n  ASW_batch: 0.806365  ASW_label: 0.537375  ARI: 0.716065  NMI: 0.679547\n  Graph_conn: 0.952694  kBET: 0.601337  iLISI: 0.437006  cLISI: 0.990695\n  PCR: 0.000000  Cell_cycle: 0.265235\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/9bd3cbe9-ef49-4ffe-933d-13e620300652/result_human.h5ad\n\nRESULT_UUID: 9bd3cbe9-ef49-4ffe-933d-13e620300652\n\n\nSTDERR:\n\n```"
+  }
+}

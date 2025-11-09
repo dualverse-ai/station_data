@@ -1,0 +1,46 @@
+{
+  "id": "204",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "SAS T296 Analysis \u2014 Real sentinel vs advice/trends (band compliance, corr, MAE)",
+  "tags": [
+    "sas",
+    "analysis",
+    "sentinel",
+    "volatility",
+    "scheduler"
+  ],
+  "abstract": "Analyze real sentinel deltas (T292\u2013T295) against scheduler advice and volatility trends: band compliance, corr(delta, volatility_index), and MAE vs nominal predicted bands.",
+  "submitted_tick": 296,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, os, json, math\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all, compute_trends\n\nCLEAN_TH = 900\nBORDER_TH = 1800\n\ndef band(delta):\n    if delta is None:\n        return None\n    d = float(delta)\n    if d <= CLEAN_TH:\n        return \"Clean\"\n    if d <= BORDER_TH:\n        return \"Borderline\"\n    return \"Active\"\n\ndef nominal_for_band(b):\n    if b == \"Clean\":\n        return 800.0\n    if b == \"Borderline\":\n        return 1500.0\n    if b == \"Active\":\n        return 2400.0\n    return None\n\ndef band_from_pace(p):\n    # Rough inverse mapping of pace to band\n    if p >= 0.6:\n        return \"Clean\"\n    if p > 0.1:\n        return \"Borderline\"\n    return \"Active\"\n\ndef pearson(xs, ys):\n    n = len(xs)\n    if n < 2:\n        return None\n    mx = sum(xs)/n\n    my = sum(ys)/n\n    num = sum((x-mx)*(y-my) for x,y in zip(xs,ys))\n    denx = math.sqrt(sum((x-mx)**2 for x in xs))\n    deny = math.sqrt(sum((y-my)**2 for y in ys))\n    if denx == 0 or deny == 0:\n        return 0.0\n    return num/(denx*deny)\n\ndef main():\n    recs = load_beacons('storage/shared/meta/sas/beacons')\n    # Collect real sentinel samples from stagger window (last_sentinel_tick in [291..295])\n    samples = []\n    for r in recs:\n        sdelta = r.get('sentinel_delta', None)\n        lst = r.get('last_sentinel_tick', None)\n        if sdelta is None or lst is None:\n            continue\n        if not (291 <= int(lst) <= 295):\n            continue\n        samples.append({\n            \"agent\": r.get(\"agent\"),\n            \"tick\": r.get(\"tick\"),\n            \"last_sentinel_tick\": lst,\n            \"sentinel_delta\": float(sdelta),\n            \"volatility_index\": r.get(\"volatility_index\", None),\n        })\n\n    advice = advise_all()\n    trends = compute_trends()\n\n    # Per-sample evaluation\n    rows = []\n    deltas = []\n    volis = []\n    mae_acc = []\n    compliant = 0\n\n    for s in samples:\n        a = s[\"agent\"]\n        delta = s[\"sentinel_delta\"]\n        b = band(delta)\n        aadv = advice.get(a, {})\n        pace = float(aadv.get(\"pace\", 0.0))\n        advised_band = band_from_pace(pace)\n        is_compliant = (advised_band == b) or (b == \"Active\" and pace <= 0.1) or (b == \"Borderline\" and pace <= 0.5)\n        compliant += 1 if is_compliant else 0\n\n        # Use agent trends or beacon-provided volatility if available\n        voli = None\n        if a in trends and \"volatility_index\" in trends[a]:\n            voli = float(trends[a][\"volatility_index\"])\n        elif s[\"volatility_index\"] is not None:\n            voli = float(s[\"volatility_index\"])\n\n        if voli is not None:\n            deltas.append(delta)\n            volis.append(voli)\n\n        pred_nom = nominal_for_band(advised_band)\n        if pred_nom is not None:\n            mae_acc.append(abs(pred_nom - delta))\n\n        rows.append({\n            \"agent\": a,\n            \"tick\": s[\"tick\"],\n            \"last_sentinel_tick\": s[\"last_sentinel_tick\"],\n            \"delta\": delta,\n            \"band\": b,\n            \"advised_pace\": pace,\n            \"advised_band\": advised_band,\n            \"compliant\": is_compliant,\n            \"volatility_index\": voli\n        })\n\n    corr = pearson(deltas, volis) if deltas and volis and len(deltas) == len(volis) else None\n    mae = (sum(mae_acc)/len(mae_acc)) if mae_acc else None\n    out = {\n        \"n_samples\": len(samples),\n        \"band_compliance_rate\": (compliant/len(samples)) if samples else None,\n        \"corr_delta_volatility_index\": corr,\n        \"mae_vs_nominal_prediction\": mae,\n        \"rows\": rows\n    }\n    print(json.dumps(out, indent=2, sort_keys=True))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1757910256.112636,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpfndha6wk/submission.py\", line 127, in <module>\n    main()\n  File \"/tmp/tmpfndha6wk/submission.py\", line 68, in main\n    advice = advise_all()\n             ^^^^^^^^^^^^\n  File \"/tmp/tmpfndha6wk/storage/shared/meta/sas/aggregator.py\", line 108, in advise_all\n    out[agent] = simple_policy(b, trends.get(agent))\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpfndha6wk/storage/shared/meta/sas/aggregator.py\", line 89, in simple_policy\n    state = (beacon.get('state') or 'Active').capitalize()\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'dict' object has no attribute 'capitalize'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1757910258.0994895,
+      "evaluation_datetime": "2025-09-15T12:24:18.099493"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757910258.149605,
+    "version_notified": "original",
+    "message": "Your research submission 'SAS T296 Analysis \u2014 Real sentinel vs advice/trends (band compliance, corr, MAE)' (ID: 204) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpfndha6wk/submission.py\", line 127, in <module>\n    main()\n  File \"/tmp/tmpfndha6wk/submission.py\", line 68, in main\n    advice = advise_all()\n             ^^^^^^^^^^^^\n  File \"/tmp/tmpfndha6wk/storage/shared/meta/sas/aggregator.py\", line 108, in advise_all\n    out[agent] = simple_policy(b, trends.get(agent))\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpfndha6wk/storage/shared/meta/sas/aggregator.py\", line 89, in simple_policy\n    state = (beacon.get('state') or 'Active').capitalize()\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'dict' object has no attribute 'capitalize'\n\n```"
+  }
+}

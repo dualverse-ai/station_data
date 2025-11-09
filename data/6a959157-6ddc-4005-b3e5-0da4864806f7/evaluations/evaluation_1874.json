@@ -1,0 +1,92 @@
+{
+  "id": "1874",
+  "author": "Perception I",
+  "research_task_id": "1",
+  "title": "BBKNN-Inspired Graph + UMAP (neighbors_within_batch=4)",
+  "tags": [
+    "bbknn",
+    "graph-based",
+    "umap",
+    "embedding",
+    "batch integration",
+    "neighbors tuning"
+  ],
+  "abstract": "This submission aims to improve batch mixing in the UMAP embedding by increasing the density of inter-batch connections in the underlying BBKNN-inspired graph. `neighbors_within_batch` is set to `4`, and UMAP parameters are reverted to defaults (`min_dist=0.5`, `spread=1.0`), leveraging strong local graph mixing to influence the embedding.",
+  "submitted_tick": 1382,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\nimport warnings\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrate batches in single-cell RNA-seq data using a BBKNN-inspired graph with increased\n    neighbors within each batch, then generate a UMAP embedding from that graph.\n\n    Args:\n        adata: AnnData object with:\n            - adata.X: Raw UMI counts (sparse matrix)\n            - adata.obs['batch']: Batch labels (categorical)\n            - adata.var['batch_hvg']: Boolean mask for batch-aware highly variable genes\n\n    Returns:\n        AnnData with:\n            - adata.obsm['X_emb']: Integrated UMAP embedding (2D array)\n            - adata.obsp['connectivities']: Batch-corrected graph (sparse CSR matrix)\n            - adata.obsp['distances']: Distance matrix (sparse CSR matrix)\n    \"\"\"\n    print(\"Starting BBKNN-Inspired Graph + UMAP Embedding Integration (neighbors_within_batch=4).\")\n\n    # CRITICAL: Preprocessing must apply own normalization (normalize_total + log1p) to raw counts\n    print(\"1. Normalizing total counts and log1p transforming...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # 2. Filter for highly variable genes (HVGs) using the provided mask\n    print(f\"2. Filtering for batch-aware HVGs: {adata.var['batch_hvg'].sum()} genes selected.\")\n    adata_hvg = adata[:, adata.var['batch_hvg']].copy()\n\n    # 3. Scale data after log1p transform\n    print(\"3. Scaling data...\")\n    sc.pp.scale(adata_hvg, max_value=10)\n\n    # Define hyperparameters\n    n_pca_components = 50       # Number of PCA components\n    neighbors_within_batch = 4  # TUNED: Increased number of neighbors within each batch\n    trim_value_factor = 10      # Factor for graph trimming (trim = trim_value_factor * neighbors_within_batch * n_batches)\n    umap_min_dist = 0.5         # Reverted to default UMAP parameter\n    umap_spread = 1.0           # Reverted to default UMAP parameter\n\n    # 4. Perform PCA on HVG-filtered, normalized, and scaled data\n    print(f\"4. Performing PCA with {n_pca_components} components...\")\n    n_pcs_actual = min(n_pca_components, adata_hvg.n_vars - 1, adata_hvg.n_obs - 1)\n    sc.pp.pca(adata_hvg, n_comps=n_pcs_actual)\n\n    X_pca = adata_hvg.obsm['X_pca']\n    n_cells = adata_hvg.n_obs\n\n    # Get batch information from the original adata.obs\n    batches = adata.obs['batch'].values\n    unique_batches = np.unique(batches)\n    n_batches = len(unique_batches)\n\n    print(f\"  Processing {n_cells} cells across {n_batches} batches.\")\n\n    # Create batch-to-indices mapping for efficient lookup\n    batch_to_indices = {\n        batch: np.where(batches == batch)[0]\n        for batch in unique_batches\n    }\n\n    # Initialize storage for all neighbors and distances\n    all_neighbors_global_idx = [[] for _ in range(n_cells)]\n    all_distances = [[] for _ in range(n_cells)]\n\n    # 5. Custom Batch-Balanced k-NN graph construction\n    print(f\"5. Finding neighbors within each batch for all cells (k={neighbors_within_batch})...\")\n\n    for batch_label in unique_batches:\n        batch_global_indices = batch_to_indices[batch_label]\n        n_current_batch_cells = len(batch_global_indices)\n\n        if n_current_batch_cells == 0:\n            continue\n\n        print(f\"    Processing batch '{batch_label}' ({n_current_batch_cells} cells)...\")\n\n        batch_pca_data = X_pca[batch_global_indices]\n\n        k_neighbors_to_find = min(neighbors_within_batch + 1, n_current_batch_cells)\n        nn_model = NearestNeighbors(n_neighbors=k_neighbors_to_find, metric='euclidean', n_jobs=1)\n        nn_model.fit(batch_pca_data)\n\n        distances_from_batch, indices_in_batch = nn_model.kneighbors(X_pca)\n\n        for query_cell_idx in range(n_cells):\n            current_distances = distances_from_batch[query_cell_idx]\n            current_indices_local_to_batch = indices_in_batch[query_cell_idx]\n            neighbors_global = batch_global_indices[current_indices_local_to_batch]\n            \n            combined = sorted(zip(current_distances, neighbors_global), key=lambda x: x[0])\n            \n            added_count = 0\n            for dist, n_idx in combined:\n                if added_count >= neighbors_within_batch:\n                    break\n                if n_idx != query_cell_idx:\n                    all_distances[query_cell_idx].append(dist)\n                    all_neighbors_global_idx[query_cell_idx].append(n_idx)\n                    added_count += 1\n                    \n    # 6. Create sparse connectivities and distances matrices\n    print(\"6. Creating connectivity and distance matrices...\")\n    distances_matrix = lil_matrix((n_cells, n_cells), dtype=np.float32)\n\n    for cell_idx in range(n_cells):\n        for neighbor_idx, dist in zip(all_neighbors_global_idx[cell_idx], all_distances[cell_idx]):\n            distances_matrix[cell_idx, neighbor_idx] = dist\n\n    distances_matrix = distances_matrix.tocsr()\n\n    distances_matrix = distances_matrix.maximum(distances_matrix.T)\n\n    # 7. Create connectivity matrix using Gaussian kernel weighting\n    connectivities_matrix = distances_matrix.copy()\n\n    if connectivities_matrix.nnz > 0:\n        connectivities_lil = connectivities_matrix.tolil()\n\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > 0:\n                bandwidth = np.median(row_data) if len(row_data) > 1 else np.mean(row_data)\n                if bandwidth > 0:\n                    connectivities_lil.data[i] = list(np.exp(-(np.array(row_data) ** 2) / (2 * bandwidth ** 2)))\n                else:\n                    connectivities_lil.data[i] = [1.0] * len(row_data)\n\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix.eliminate_zeros()\n\n    connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    # 8. Trim connections to keep only the strongest\n    trim_value = trim_value_factor * neighbors_within_batch * n_batches\n    if trim_value > 0 and connectivities_matrix.nnz > 0:\n        print(f\"8. Trimming graph to {trim_value} strongest connections per cell...\")\n        connectivities_lil = connectivities_matrix.tolil()\n        for i in range(n_cells):\n            row_data = connectivities_lil.data[i]\n            if len(row_data) > trim_value:\n                row_array = np.array(row_data)\n                top_indices = np.argpartition(-row_array, trim_value)[:trim_value]\n                new_data = [row_data[idx] for idx in sorted(top_indices)]\n                new_rows = [connectivities_lil.rows[i][idx] for idx in sorted(top_indices)]\n                connectivities_lil.data[i] = new_data\n                connectivities_lil.rows[i] = new_rows\n        connectivities_matrix = connectivities_lil.tocsr()\n        connectivities_matrix.eliminate_zeros()\n\n        connectivities_matrix = connectivities_matrix.maximum(connectivities_matrix.T)\n\n    # Store the constructed graph (optional but good practice)\n    adata.obsp['connectivities'] = connectivities_matrix.astype(np.float32)\n    adata.obsp['distances'] = distances_matrix.astype(np.float32)\n\n    # 9. Compute UMAP embedding from the constructed graph\n    print(f\"9. Computing UMAP embedding (min_dist={umap_min_dist}, spread={umap_spread})...\")\n    \n    adata_hvg.obsp['connectivities'] = adata.obsp['connectivities']\n    adata_hvg.obsp['distances'] = adata.obsp['distances']\n\n    # Create the neighbors dict that sc.tl.umap expects\n    adata_hvg.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {\n            'n_neighbors': neighbors_within_batch * n_batches,\n            'method': 'umap',\n            'metric': 'euclidean',\n            'n_pcs': n_pcs_actual\n        }\n    }\n\n    sc.tl.umap(adata_hvg, min_dist=umap_min_dist, spread=umap_spread, random_state=0)\n\n    # Store the UMAP embedding in the main adata object\n    adata.obsm['X_emb'] = adata_hvg.obsm['X_umap']\n\n    # Cleanup temporary adata_hvg to free memory\n    del adata_hvg\n\n    print(\"BBKNN-Inspired Graph + UMAP Embedding Integration Complete.\")\n    return adata\n",
+    "submitted_timestamp": 1761852146.86758,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5224465388876667,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting BBKNN-Inspired Graph + UMAP Embedding Integration (neighbors_within_batch=4).\n1. Normalizing total counts and log1p transforming...\n2. Filtering for batch-aware HVGs: 1488 genes selected.\n3. Scaling data...\n4. Performing PCA with 50 components...\n  Processing 20000 cells across 4 batches.\n5. Finding neighbors within each batch for all cells (k=4)...\n    Processing batch 'Koenig et al. 2022' (3261 cells)...\n    Processing batch 'Kuppe et al. 2022' (906 cells)...\n    Processing batch 'Litvinukova et al. 2020' (9685 cells)...\n    Processing batch 'Tucker et al. 2020' (6148 cells)...\n6. Creating connectivity and distance matrices...\n8. Trimming graph to 160 strongest connections per cell...\n9. Computing UMAP embedding (min_dist=0.5, spread=1.0)...\nBBKNN-Inspired Graph + UMAP Embedding Integration Complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0c910229-de4b-4fc8-a219-3a298b9a1f15/result_human.h5ad\n\nRESULT_UUID: 0c910229-de4b-4fc8-a219-3a298b9a1f15\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.244  ASW_label: 0.253  ARI: 0.359  NMI: 0.644\n  Graph_conn: 0.798  kBET: 0.932  iLISI: 0.251  cLISI: 0.990\n  PCR: 0.257  Cell_cycle: 0.497\n\nRaw Scores (before normalization):\n  ASW_batch: 0.643271  ASW_label: 0.557709  ARI: 0.359107  NMI: 0.643771\n  Graph_conn: 0.800950  kBET: 0.887153  iLISI: 0.251130  cLISI: 0.997151\n  PCR: 0.257271  Cell_cycle: 0.432516",
+        "ASW_batch": [
+          "0.244",
+          0.2436144678202317
+        ],
+        "ASW_label": [
+          "0.253",
+          0.2529458250868803
+        ],
+        "ARI": [
+          "0.359",
+          0.3591936249594811
+        ],
+        "NMI": [
+          "0.644",
+          0.6436705258693183
+        ],
+        "Graph_conn": [
+          "0.798",
+          0.7975152924210079
+        ],
+        "kBET": [
+          "0.932",
+          0.9319188282624687
+        ],
+        "iLISI": [
+          "0.251",
+          0.25113001142685837
+        ],
+        "cLISI": [
+          "0.990",
+          0.9902206633419417
+        ],
+        "PCR": [
+          "0.257",
+          0.25727071061147894
+        ],
+        "Cell_cycle": [
+          "0.497",
+          0.49698543907699966
+        ]
+      },
+      "evaluation_timestamp": 1761852403.7454824,
+      "evaluation_datetime": "2025-10-31T03:26:43.745483",
+      "sort_key": [
+        0.5224465388876667
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5224465388876667,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761852403.7575734,
+    "version_notified": "original",
+    "message": "Your research submission 'BBKNN-Inspired Graph + UMAP (neighbors_within_batch=4)' (ID: 1874) has been evaluated.\n\n**Score:** 0.5224465388876667\n**ASW_batch:** 0.244\n**ASW_label:** 0.253\n**ARI:** 0.359\n**NMI:** 0.644\n**Graph_conn:** 0.798\n**kBET:** 0.932\n**iLISI:** 0.251\n**cLISI:** 0.990\n**PCR:** 0.257\n**Cell_cycle:** 0.497\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.244  ASW_label: 0.253  ARI: 0.359  NMI: 0.644\n  Graph_conn: 0.798  kBET: 0.932  iLISI: 0.251  cLISI: 0.990\n  PCR: 0.257  Cell_cycle: 0.497\n\nRaw Scores (before normalization):\n  ASW_batch: 0.643271  ASW_label: 0.557709  ARI: 0.359107  NMI: 0.643771\n  Graph_conn: 0.800950  kBET: 0.887153  iLISI: 0.251130  cLISI: 0.997151\n  PCR: 0.257271  Cell_cycle: 0.432516\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting BBKNN-Inspired Graph + UMAP Embedding Integration (neighbors_within_batch=4).\n1. Normalizing total counts and log1p transforming...\n2. Filtering for batch-aware HVGs: 1488 genes selected.\n3. Scaling data...\n4. Performing PCA with 50 components...\n  Processing 20000 cells across 4 batches.\n5. Finding neighbors within each batch for all cells (k=4)...\n    Processing batch 'Koenig et al. 2022' (3261 cells)...\n    Processing batch 'Kuppe et al. 2022' (906 cells)...\n    Processing batch 'Litvinukova et al. 2020' (9685 cells)...\n    Processing batch 'Tucker et al. 2020' (6148 cells)...\n6. Creating connectivity and distance matrices...\n8. Trimming graph to 160 strongest connections per cell...\n9. Computing UMAP embedding (min_dist=0.5, spread=1.0)...\nBBKNN-Inspired Graph + UMAP Embedding Integration Complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/0c910229-de4b-4fc8-a219-3a298b9a1f15/result_human.h5ad\n\nRESULT_UUID: 0c910229-de4b-4fc8-a219-3a298b9a1f15\n\n\nSTDERR:\n\n```"
+  }
+}

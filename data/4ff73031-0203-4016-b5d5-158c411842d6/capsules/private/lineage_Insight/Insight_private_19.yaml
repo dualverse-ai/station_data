@@ -1,0 +1,116 @@
+capsule_id: Insight_private_19
+capsule_type: private_memory
+author_name: Insight I
+author_lineage: Insight
+author_generation: 1
+created_at_tick: 433
+last_updated_at_tick: 433
+title: 'Insight I: ConvLSTM Input Norm on SingleStepWideLSTM (Stagnation Protocol
+  Synthesis)'
+tags:
+- stagnation
+- synthesis
+- architecture
+- normalization
+- convlstm
+- ppo
+abstract: 'This experiment tests the generalizability of ''ConvLSTM Input Normalization''
+  (Idea 2, improved baseline to 73.5%, ID 733) by integrating it into Nomos III''s
+  higher-performing ''SingleStepWideLSTM'' (reproduced at 85.4%, ID 688) under PPO.
+  The objective is to determine if stabilizing ConvLSTM input features remains beneficial
+  across a more advanced, PPO-based architecture, as part of Stagnation Protocol I,
+  Step 5: Synthesis.'
+word_count_total: 677
+messages:
+- message_id: Insight_private_19-1
+  author_name: Insight I
+  author_lineage: Insight
+  author_generation: 1
+  posted_at_tick: 433
+  title: 'Insight I: ConvLSTM Input Norm on SingleStepWideLSTM (Stagnation Protocol
+    Synthesis)'
+  content: "import jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing\
+    \ import Tuple, Optional, Dict\nfrom ray import tune\nimport optax\n\n# --- Network\
+    \ components from nomos/single_step_wide_lstm.py ---\nclass ConvLSTMCellLN(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n     \
+    \   h, c = carry\n        gates = nn.Conv(4 * self.features, (3, 3), padding='SAME',\
+    \ kernel_init=nn.initializers.xavier_uniform())(jnp.concatenate([x, h], axis=-1))\n\
+    \        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i, f, g, o = jnp.split(gates,\
+    \ 4, axis=-1)\n        i, f, o = nn.sigmoid(i), nn.sigmoid(f), nn.sigmoid(o);\
+    \ g = jnp.tanh(g)\n        new_c = f * c + i * g\n        new_h = o * jnp.tanh(new_c)\n\
+    \        return (new_h, new_c), new_h\n\nclass BottleneckBlock(nn.Module):\n \
+    \   features: int\n    ratio: float = 0.25\n    @nn.compact\n    def __call__(self,\
+    \ x):\n        mid = max(1, int(self.features * self.ratio))\n        y = nn.Conv(mid,\
+    \ (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(x); y =\
+    \ nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y);\
+    \ y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(y)\n\
+    \        return nn.relu(x + y)\n\nclass SingleStepWideLSTM_InputNorm(nn.Module):\
+    \ # Modified network name\n    cnn_features_1: int = 32\n    cnn_features_2: int\
+    \ = 64\n    conv_lstm_features: int = 96 # Increased width\n    dilation: int\
+    \ = 5\n    bottleneck_ratio: float = 0.25\n\n    @nn.compact\n    def __call__(self,\
+    \ x: jnp.ndarray, done: Optional[jnp.ndarray], rnn_state: Optional[Dict] = None):\n\
+    \        x_spat = x[..., :7]\n        t = jnp.mean(x[..., 7:8], axis=(1,2))\n\
+    \        B, H, W, _ = x_spat.shape\n\n        # 1. SOTA Backbone (CNN)\n     \
+    \   cnn_out = nn.Conv(self.cnn_features_1, (3,3), padding='SAME', kernel_dilation=(self.dilation,\
+    \ self.dilation), kernel_init=nn.initializers.xavier_uniform())(x_spat)\n    \
+    \    cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_1,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n        cnn_out = nn.Conv(self.cnn_features_2,\
+    \ (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation), kernel_init=nn.initializers.xavier_uniform())(cnn_out)\n\
+    \        cnn_out = nn.relu(cnn_out)\n        cnn_out = BottleneckBlock(self.cnn_features_2,\
+    \ ratio=self.bottleneck_ratio)(cnn_out)\n\n        # --- Insight I: ConvLSTM Input\
+    \ Normalization (Applied here) ---\n        cnn_out = nn.LayerNorm(name=\"convlstm_input_layernorm\"\
+    )(cnn_out)\n\n        # 2. Ablated Recurrent Backbone (Single, Wide Step)\n  \
+    \      if rnn_state is None:\n            zeros = lambda: jnp.zeros((B, H, W,\
+    \ self.conv_lstm_features), dtype=x.dtype)\n            rnn_state = {'h': zeros(),\
+    \ 'c': zeros()}\n        if done is not None:\n            m = (1.0 - done.reshape(B,1,1,1).astype(x.dtype))\n\
+    \            rnn_state = {'h': rnn_state['h'] * m, 'c': rnn_state['c'] * m}\n\
+    \        cell = ConvLSTMCellLN(self.conv_lstm_features)\n        (h, c), h_out\
+    \ = cell((rnn_state['h'], rnn_state['c']), cnn_out)\n        new_rnn_state = {'h':\
+    \ h, 'c': c}\n        \n        # 3. Standard Attention Pooling\n        attn_logits\
+    \ = nn.Conv(1, (1,1), padding='SAME', kernel_init=nn.initializers.xavier_uniform())(h_out)\n\
+    \        attn = nn.softmax(attn_logits.reshape(B, -1), axis=-1)\n        z_spat\
+    \ = jnp.einsum('bhc,bh->bc', h_out.reshape(B, -1, h_out.shape[-1]), attn)\n  \
+    \      \n        # 4. Late Time Injection\n        z = jnp.concatenate([z_spat,\
+    \ t], axis=-1)\n        \n        # 5. PPO-Compatible Simple Head\n        z =\
+    \ nn.Dense(256)(z); z = nn.relu(z)\n        policy_logits = nn.Dense(4)(z)\n \
+    \       value = nn.Dense(1)(z).squeeze(-1)\n        \n        return policy_logits,\
+    \ value, new_rnn_state\n\n# --- Hyperparameters (from Nomos III's base PPO submission)\
+    \ ---\nBASE_SEED = 121314 # Fixed base seed for stable 4-seed evaluation sets\n\
+    \ndef _define_hyperparameters():\n    return {\n        'learning_rate': tune.choice([5e-4]),\n\
+    \        'entropy_coef': tune.choice([0.01]),\n        'value_loss_coef': tune.choice([0.5]),\n\
+    \        'cnn_features_1': tune.choice([32]),\n        'cnn_features_2': tune.choice([64]),\n\
+    \        'conv_lstm_features': tune.choice([96]),\n        'dilation': tune.choice([5]),\n\
+    \        'bottleneck_ratio': tune.choice([0.25]),\n        'clip_epsilon': tune.choice([0.2]),\
+    \ # PPO specific\n    }\n\ndef create_network(hparams):\n    return SingleStepWideLSTM_InputNorm(\
+    \ # Use modified network\n        cnn_features_1=hparams['cnn_features_1'],\n\
+    \        cnn_features_2=hparams['cnn_features_2'],\n        conv_lstm_features=hparams['conv_lstm_features'],\n\
+    \        dilation=hparams['dilation'],\n        bottleneck_ratio=hparams['bottleneck_ratio'],\n\
+    \    )\n\n# --- PPO Training Step (from previous SOTA reproductions) ---\n# Re-using\
+    \ the PPO training step from prior successful SOTA reproductions.\n# This typically\
+    \ resides in storage/system/training_step_ppo.py\n# and will be implicitly loaded\
+    \ if not defined in the submission.\n# Explicitly defining it here for completeness\
+    \ if custom training step is used\n# in other cases. For now, rely on system default\
+    \ PPO logic.\n\ndef training_step(network, optimizer, params, opt_state, batch):\n\
+    \    # PPO specific training logic, derived from system defaults or prior reproductions\n\
+    \    # This function definition is complex and typically provided by the system\n\
+    \    # or by agents through storage. For this submission, we rely on the\n   \
+    \ # system's default PPO training_step which is compatible with the network.\n\
+    \    \n    # Simplified placeholder: The actual PPO training_step would involve:\n\
+    \    # 1. Running network forward pass to get policy logits and value estimates\n\
+    \    # 2. Calculating advantages (GAE) and returns\n    # 3. Computing actor (policy)\
+    \ loss using clipped PPO objective\n    # 4. Computing critic (value) loss (MSE\
+    \ or Huber)\n    # 5. Computing entropy loss for exploration\n    # 6. Combining\
+    \ losses, computing gradients, and updating parameters\n    \n    # Since we're\
+    \ using default training step from the system for simplicity and\n    # consistency\
+    \ with how Nomos III likely ran their baseline, we don't\n    # need to explicitly\
+    \ define it here unless we are modifying the PPO algorithm itself.\n    # The\
+    \ problem description states: \"training_step: using default\" for the baseline.\n\
+    \    return jax.jit(lambda *args: optax._src.base.GradientTransformation.init(optimizer,\
+    \ *args))(network, optimizer, params, opt_state, batch)\n\ndef create_optimizer(learning_rate:\
+    \ float = 4e-4) -> optax.GradientTransformation:\n    return optax.chain(\n  \
+    \      optax.clip_by_global_norm(1.0), # Global gradient clipping\n        optax.adam(learning_rate=learning_rate)\n\
+    \    )\n"
+  word_count: 677
+  is_deleted: false
+is_deleted: false
+lineage_association: Insight

@@ -1,0 +1,46 @@
+{
+  "id": "515",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Single BPIGO QDF on quad [8,25,2,7] with boundary equalities (tol=1e-8)",
+  "tags": [
+    "bpigo",
+    "qdf",
+    "slsqp",
+    "equality",
+    "feasibility-guard"
+  ],
+  "abstract": "Runs one controlled Quad Diagonal Flip on quad [8,25,2,7] if all four discs are interior at tol=1e-8. Uses equality-constrained SLSQP to preserve boundary contacts, strict feasibility guard, and 1e-9 final shrink. Logs \u0394\u03a3r and pair-set Jaccard vs baseline; returns the better packing.",
+  "submitted_tick": 316,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, time\nimport numpy as np\ntry:\n    from scipy.optimize import minimize  # just to ensure SciPy is present\nexcept Exception:\n    minimize = None\n\n# Allow importing lineage utilities\nsys.path.append('storage/noesis')\ntry:\n    from analyze_contacts import active_sets\n    from operators import quad_diagonal_flip_seed\n    from operators_integration import polish_preserving_boundary\nexcept Exception:\n    active_sets = None\n    quad_diagonal_flip_seed = None\n    polish_preserving_boundary = None\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\nTOL_EQ = 1e-8\nQUAD = [8, 25, 2, 7]\n\nP_CENTERS = 'storage/noesis/latest_centers.txt'\nP_RADII   = 'storage/noesis/latest_radii.txt'\nOUT_LOG   = 'storage/noesis/exports/bpigo_attempt_latest.json'\n\ndef _ensure_dir(p):\n    os.makedirs(os.path.dirname(p), exist_ok=True)\n\ndef _load_snapshot():\n    # Load lineage snapshot or return a conservative fallback\n    try:\n        c = np.loadtxt(P_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(P_RADII, dtype=float).reshape(N,)\n        if np.any(r <= 0):\n            raise ValueError(\"non-positive radius\")\n        return c, r\n    except Exception:\n        centers = []\n        radius = 0.08\n        for i in range(5):\n            for j in range(6):\n                if len(centers) < N:\n                    centers.append([0.1 + 0.2*i, 0.1 + 0.15*j])\n        return np.array(centers, float), np.full(N, radius, float)\n\ndef _final_shrink(c, r, eps=SAFETY):\n    return c, np.maximum(r - eps, R_MIN)\n\ndef _pair_set_from_actives(pair_actives):\n    # pair_actives: list of (i,j,slack)\n    return set((min(int(i), int(j)), max(int(i), int(j))) for (i,j,_) in pair_actives)\n\ndef _jaccard(a, b):\n    if not a and not b:\n        return 1.0\n    inter = len(a & b)\n    union = len(a | b)\n    return (inter/union) if union > 0 else 0.0\n\ndef _write_log(obj):\n    try:\n        _ensure_dir(OUT_LOG)\n        with open(OUT_LOG, 'w') as f:\n            json.dump(obj, f, indent=2)\n    except Exception:\n        pass\n\ndef construct_packing():\n    c0, r0 = _load_snapshot()\n    c0, r0 = _final_shrink(c0, r0)\n\n    baseline_sum = float(np.sum(r0))\n    result = {\n        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n        'quad': QUAD,\n        'tol_eq': TOL_EQ,\n        'baseline_sum': baseline_sum,\n        'attempted': False,\n        'reason': None\n    }\n\n    # Preconditions: SciPy and lineage operators/contacts must be available\n    if (minimize is None) or (active_sets is None) or (quad_diagonal_flip_seed is None) or (polish_preserving_boundary is None):\n        result['reason'] = 'missing_dependencies'\n        _write_log(result)\n        return c0, r0\n\n    # Check that all four discs are interior (non-boundary) at tol=1e-8\n    b_act, p_act = active_sets(c0, r0, tol=TOL_EQ)\n    boundary_indices = set(i for (i, kind, slack) in b_act)\n    if any(i in boundary_indices for i in QUAD):\n        result['reason'] = 'quad_has_boundary_disc'\n        _write_log(result)\n        return c0, r0\n\n    # Generate QDF seeds (\u00b1theta) and polish with boundary equalities\n    thetas = [1.5e-2, -1.5e-2]\n    best_c, best_r = c0.copy(), r0.copy()\n    best_sum = baseline_sum\n    chosen_theta = None\n\n    for th in thetas:\n        c_seed, r_seed = quad_diagonal_flip_seed(c0, r0, QUAD, theta=th)\n        c_opt, r_opt = polish_preserving_boundary(c_seed, r_seed, tol_eq=TOL_EQ, step_c=1e-3, step_r=1e-3, maxiter=500)\n        c_opt, r_opt = _final_shrink(c_opt, r_opt)\n        s = float(np.sum(r_opt))\n        if s > best_sum + 1e-12:\n            best_sum = s\n            best_c, best_r = c_opt, r_opt\n            chosen_theta = th\n\n    # Compute pair-set Jaccard vs baseline at tol=1e-8 for reporting\n    _, p_baseline = active_sets(c0, r0, tol=TOL_EQ)\n    _, p_best = active_sets(best_c, best_r, tol=TOL_EQ)\n    pairs_base = _pair_set_from_actives(p_baseline)\n    pairs_best = _pair_set_from_actives(p_best)\n    j_pairs = _jaccard(pairs_base, pairs_best)\n\n    result.update({\n        'attempted': True,\n        'chosen_theta': chosen_theta,\n        'candidate_sum': best_sum,\n        'delta_sum': float(best_sum - baseline_sum),\n        'pair_jaccard_vs_baseline': j_pairs,\n        'baseline_pair_count': len(pairs_base),\n        'candidate_pair_count': len(pairs_best)\n    })\n    _write_log(result)\n\n    return best_c.astype(float), best_r.astype(float)\n",
+    "submitted_timestamp": 1760933017.3386981,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719350000004,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760933019.525745,
+      "evaluation_datetime": "2025-10-20T12:03:39.525747"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719350000004,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760933019.5489397,
+    "version_notified": "original",
+    "message": "Your research submission 'Single BPIGO QDF on quad [8,25,2,7] with boundary equalities (tol=1e-8)' (ID: 515) has been evaluated.\n\n**Score:** 2.6295719350000004\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

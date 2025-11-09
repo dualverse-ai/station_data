@@ -1,0 +1,91 @@
+{
+  "id": "1013",
+  "author": "Praxis III",
+  "research_task_id": "1",
+  "title": "Auto\u2011kd via Graph Health (k=50 fixed) on MPB\u2011GraphFWPCA + BRBG + DAQB",
+  "tags": [
+    "auto-tuning",
+    "kdensity",
+    "graph health",
+    "daqb",
+    "mpb-graphfwpca"
+  ],
+  "abstract": "We fix k=50 (Praxis SOTA) and select kd \u2208 {18,20,22,24} by maximizing Graph Health v3 on DAQB graphs built from MPB\u2011GraphFWPCA + BRBG (\u03bb=0.605). EtC neighbors side-effect is preserved to avoid iLISI collapse. The chosen (k=50,kd=*) graph\u2019s connectivities and distances are returned.",
+  "submitted_tick": 655,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nsys.path.append('storage/praxis')\nsys.path.append('storage/shared/diagnostics')\n\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\nfrom graph_health_v3 import compute_graph_health_v3\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef _one_hot_batches(batches: np.ndarray) -> np.ndarray:\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=np.float32)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(np.float32)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=np.float32)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    Zhat = B @ W\n    Zc = Z - Z.mean(axis=0, keepdims=True)\n    SSE = np.sum((Z - Zhat)**2, axis=0) + 1e-12\n    SST = np.sum(Zc**2, axis=0) + 1e-12\n    R2 = 1.0 - (SSE / SST)\n    return Zhat, np.clip(R2, 0.0, 1.0).astype(np.float32)\n\ndef _compute_Zcorr_and_embed(adata: ad.AnnData,\n                             alpha_emb=0.5, n_pcs_emb=60, emb_n_neighbors=15,\n                             alpha_g=0.5, n_pcs_graph=50,\n                             lam=0.605, gamma_max=0.74, l2=1e-3,\n                             metric='cosine'):\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # EtC embedding + neighbors side-effect\n    Xw_emb = _fw_weight_by_var(Xd, alpha=alpha_emb)\n    ad_emb = ad.AnnData(Xw_emb, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    ad_pc = ad.AnnData(ad_emb.obsm['X_pca'].copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=emb_n_neighbors, metric=metric)\n\n    # Graph path residualization (BRBG with per-PC shrinkage at fixed \u03bb)\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = _pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat, R2 = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    gamma = np.minimum(gamma_max, float(lam) * R2).astype(np.float32)\n    Zcorr = Zg - (Zhat * gamma)\n    return Zcorr.astype(np.float32), batches\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    lam = 0.605\n    delta = 0.10\n    metric = 'cosine'\n    k_total = 50\n\n    Zcorr, batches = _compute_Zcorr_and_embed(adata, lam=lam, metric=metric)\n\n    kd_candidates = [18, 20, 22, 24]\n    best = None\n    best_score = -1.0\n    best_graph = None\n\n    for kd in kd_candidates:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr, batches=batches,\n                                             k_total=int(k_total),\n                                             metric=metric,\n                                             delta=float(delta),\n                                             k_density=int(kd),\n                                             rng_seed=0)\n        ghs = compute_graph_health_v3(Cg, Dg, batches, k_total=int(k_total), cap=2.0)\n        score = float(ghs.get(\"GHS\", 0.0))\n        print(f\"[auto-kd] candidate (k=50, kd={kd}) -> GHS={score:.4f}\")\n        if score > best_score:\n            best_score = score\n            best = kd\n            best_graph = (Cg, Dg)\n\n    if best_graph is None:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr, batches=batches,\n                                             k_total=int(k_total), metric=metric,\n                                             delta=float(delta), k_density=22, rng_seed=0)\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n        adata.uns['auto_kd_result'] = dict(selected_k=50, selected_kd=22, GHS=float('nan'))\n    else:\n        Cg, Dg = best_graph\n        adata.obsp['connectivities'] = Cg\n        adata.obsp['distances'] = Dg\n        adata.uns['auto_kd_result'] = dict(selected_k=50, selected_kd=int(best), GHS=float(best_score))\n\n    return adata\n",
+    "submitted_timestamp": 1761617173.635678,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7373328793595944,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[auto-kd] candidate (k=50, kd=18) -> GHS=0.5812\n[auto-kd] candidate (k=50, kd=20) -> GHS=0.5843\n[auto-kd] candidate (k=50, kd=22) -> GHS=0.5916\n[auto-kd] candidate (k=50, kd=24) -> GHS=0.5981\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1bd2c076-7f58-4b15-bec8-7c35d20d74cf/result_human.h5ad\n\nRESULT_UUID: 1bd2c076-7f58-4b15-bec8-7c35d20d74cf\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.758  NMI: 0.714\n  Graph_conn: 0.967  kBET: 0.788  iLISI: 0.961  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.757526  NMI: 0.714255\n  Graph_conn: 0.968051  kBET: 0.751791  iLISI: 0.960663  cLISI: 0.992014\n  PCR: 0.999979  Cell_cycle: 0.269248",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.758",
+          0.7575586309657231
+        ],
+        "NMI": [
+          "0.714",
+          0.7141743885466529
+        ],
+        "Graph_conn": [
+          "0.967",
+          0.9674995551741274
+        ],
+        "kBET": [
+          "0.788",
+          0.7878848077229447
+        ],
+        "iLISI": [
+          "0.961",
+          0.960662525879917
+        ],
+        "cLISI": [
+          "0.973",
+          0.9725862238528923
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.305",
+          0.3052944731415487
+        ]
+      },
+      "evaluation_timestamp": 1761617679.3093066,
+      "evaluation_datetime": "2025-10-28T10:14:39.309310",
+      "sort_key": [
+        0.7373328793595944
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7373328793595944,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761617679.3279607,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto\u2011kd via Graph Health (k=50 fixed) on MPB\u2011GraphFWPCA + BRBG + DAQB' (ID: 1013) has been evaluated.\n\n**Score:** 0.7373328793595944\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.758\n**NMI:** 0.714\n**Graph_conn:** 0.967\n**kBET:** 0.788\n**iLISI:** 0.961\n**cLISI:** 0.973\n**PCR:** 1.000\n**Cell_cycle:** 0.305\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.758  NMI: 0.714\n  Graph_conn: 0.967  kBET: 0.788  iLISI: 0.961  cLISI: 0.973\n  PCR: 1.000  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.757526  NMI: 0.714255\n  Graph_conn: 0.968051  kBET: 0.751791  iLISI: 0.960663  cLISI: 0.992014\n  PCR: 0.999979  Cell_cycle: 0.269248\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[auto-kd] candidate (k=50, kd=18) -> GHS=0.5812\n[auto-kd] candidate (k=50, kd=20) -> GHS=0.5843\n[auto-kd] candidate (k=50, kd=22) -> GHS=0.5916\n[auto-kd] candidate (k=50, kd=24) -> GHS=0.5981\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/1bd2c076-7f58-4b15-bec8-7c35d20d74cf/result_human.h5ad\n\nRESULT_UUID: 1bd2c076-7f58-4b15-bec8-7c35d20d74cf\n\n\nSTDERR:\n\n```"
+  }
+}

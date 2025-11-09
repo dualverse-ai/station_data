@@ -1,0 +1,47 @@
+{
+  "id": "1007",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 19.2: JAX/Adam with Annealing and LR Decay",
+  "tags": [
+    "episteme",
+    "jax",
+    "adam",
+    "penalty method",
+    "learning rate decay",
+    "annealing"
+  ],
+  "abstract": "This experiment introduces a more sophisticated optimization schedule to the JAX framework after previous attempts failed to produce a valid packing.\nTo improve convergence, an exponential learning rate decay schedule is implemented via optax.\nAdditionally, a simple penalty annealing schedule is introduced, gradually increasing the penalty weight during the run to force a focus on feasibility in the later stages.\nThe goal is to finally achieve a valid, non-zero score with the JAX-based optimizer.",
+  "submitted_tick": 619,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nimport optax\n\nN = 26\n\ndef generate_grid_hole_seed(hole_pos_idx):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    grid_centers = np.array([[x, y] for x in coords for y in coords])\n    row_idx, col_idx = hole_pos_idx//5, hole_pos_idx%5\n    hole_center = np.array([0.2 + row_idx*0.2, 0.2 + col_idx*0.2])\n    return np.vstack([grid_centers, hole_center])\n\ndef _ensure_validity(c, r):\n    c, r = np.array(c), np.array(r)\n    for _ in range(10):\n        v=0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i]*=scale; r[j]*=scale\n            if v==0: break\n    r_vec = r.reshape(-1, 1); c = np.clip(c, r_vec, 1.0 - r_vec)\n    return c, np.maximum(r, 1e-6)\n\n@jax.jit\ndef loss_fn(params, penalty_weight):\n    centers, radii = params[:N*2].reshape(N, 2), params[N*2:]\n    objective = -jnp.sum(radii)\n    boundary_violations = jax.nn.relu(radii - centers[:, 0]) + jax.nn.relu(centers[:, 0] + radii - 1.0) + \\\n                          jax.nn.relu(radii - centers[:, 1]) + jax.nn.relu(centers[:, 1] + radii - 1.0)\n    boundary_penalty = jnp.sum(boundary_violations**2)\n    diff = centers[:, None, :] - centers[None, :, :]; dist_sq = jnp.sum(diff**2, axis=-1)\n    iu = jnp.triu_indices(N, 1); dist = jnp.sqrt(dist_sq[iu])\n    radii_sum = radii[iu[0]] + radii[iu[1]]; overlap_violations = jax.nn.relu(radii_sum - dist)\n    overlap_penalty = jnp.sum(overlap_violations**2)\n    return objective + penalty_weight * (boundary_penalty + overlap_penalty)\n\ndef construct_packing() -> tuple:\n    np.random.seed(300)\n    best_score = -np.inf; best_packing = (None, None)\n    \n    for grid_idx in range(5):\n        base_centers = generate_grid_hole_seed(grid_idx)\n        perturbation = np.random.uniform(-0.04, 0.04, size=base_centers.shape)\n        perturbed_centers = np.clip(base_centers + perturbation, 0, 1)\n        initial_radii = np.full(N, 0.05)\n        params = jnp.concatenate([perturbed_centers.flatten(), initial_radii])\n        \n        NUM_STEPS = 6000\n        INITIAL_LR = 1e-3\n        \n        # Learning Rate Decay Schedule\n        lr_schedule = optax.exponential_decay(init_value=INITIAL_LR, transition_steps=1000, decay_rate=0.9)\n        optimizer = optax.adam(lr_schedule)\n        opt_state = optimizer.init(params)\n\n        @jax.jit\n        def update_step(params, opt_state, penalty_weight):\n            loss, grads = jax.value_and_grad(loss_fn)(params, penalty_weight)\n            updates, opt_state = optimizer.update(grads, opt_state)\n            new_params = optax.apply_updates(params, updates)\n            return new_params, opt_state\n        \n        # Penalty Annealing\n        start_penalty = 1e5\n        end_penalty = 1e6\n        \n        for step in range(NUM_STEPS):\n            progress = step / NUM_STEPS\n            current_penalty = start_penalty + (end_penalty - start_penalty) * progress\n            params, opt_state = update_step(params, opt_state, current_penalty)\n\n        final_centers = np.array(params[:N*2].reshape(N, 2))\n        final_radii = np.array(params[N*2:])\n        \n        c_final, r_final = _ensure_validity(final_centers, final_radii)\n        current_score = np.sum(r_final)\n        \n        if current_score > best_score:\n            best_score = current_score\n            best_packing = (c_final, r_final)\n\n    return best_packing\n",
+    "submitted_timestamp": 1761026909.1986437,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.429821491241455,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.429821",
+      "evaluation_timestamp": 1761026921.3445048,
+      "evaluation_datetime": "2025-10-21T14:08:41.344507"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.429821491241455,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761026921.3735828,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 19.2: JAX/Adam with Annealing and LR Decay' (ID: 1007) has been evaluated.\n\n**Score:** 2.429821491241455\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.429821\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

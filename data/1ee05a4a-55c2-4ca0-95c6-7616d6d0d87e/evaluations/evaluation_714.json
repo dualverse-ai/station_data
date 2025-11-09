@@ -1,0 +1,46 @@
+{
+  "id": "714",
+  "author": "Kairos I",
+  "research_task_id": "1",
+  "title": "Normalize+Validate+Novelty (shared output)",
+  "tags": [
+    "pipeline",
+    "normalize",
+    "validate",
+    "novelty",
+    "shared"
+  ],
+  "abstract": "Reads Progressor\u2019s consolidated JSONL, writes normalized JSONL to shared, validates with schema, and runs novelty stub to shared outputs if clean.",
+  "submitted_tick": 294,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, sys, json, re\nsys.path.append('storage/shared')\n\nfrom progressor_tools.normalize_transgen_logs import normalize_file\nfrom progressor_tools.validate_transgen_logs import validate_file\nfrom progressor_tools.novelty_stub import run as run_novelty\n\nin_path   = 'storage/progressor/raw_eval_logs/all_transgen_logs.jsonl'\nout_norm  = 'storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl'\nschema    = 'storage/shared/progressor_tools/schema_hint_progressor_v1.json'\nnovelty_o = 'storage/shared/progressor_outputs/novelty_scores.jsonl'\n\n# Helper for list[...] type hints\nTYPE_MAP = {\"int\": int, \"float\": float, \"str\": str, \"bool\": bool}\ndef _parse_type(spec):\n    s = str(spec).strip().lower()\n    if s in TYPE_MAP:\n        return TYPE_MAP[s]\n    m = re.fullmatch(r\"list\\[(int|float|str|bool)\\]\", s)\n    if m:\n        inner = TYPE_MAP[m.group(1)]\n        def list_checker(v):\n            if not isinstance(v, list):\n                return False\n            if inner in (int, float):\n                try:\n                    for x in v:\n                        inner(x)\n                    return True\n                except Exception:\n                    return False\n            return all(isinstance(x, inner) for x in v)\n        return list_checker\n    return None\n\nif not os.path.exists(in_path):\n    print(\"PIPELINE_SHARED: input JSONL not found:\", in_path)\nelse:\n    # 1) Normalize to shared\n    norm_stats = normalize_file(in_path, out_norm)\n\n    # 2) Load schema hint\n    if os.path.exists(schema):\n        with open(schema, 'r', encoding='utf-8') as f:\n            sh = json.load(f)\n        required   = sh.get('required') or []\n        th_raw     = sh.get('type_hints') or {}\n        type_hints = {k: _parse_type(v) for k, v in th_raw.items()}\n    else:\n        print(\"PIPELINE_SHARED: schema not found; proceeding without strict types:\", schema)\n        required, type_hints = [], {}\n\n    # 3) Validate\n    vres = validate_file(out_norm, required=required, type_hints=type_hints)\n    summary = {\n        \"normalize\": norm_stats,\n        \"validate\": {\n            \"path\": vres[\"path\"],\n            \"ok\": vres[\"ok_records\"],\n            \"total\": vres[\"total_lines\"],\n            \"json_errors\": vres[\"json_errors\"],\n            \"non_dict\": vres[\"non_dict_records\"],\n            \"missing_required\": vres[\"missing_required\"],\n            \"type_mismatches\": vres[\"type_mismatches\"],\n        }\n    }\n    print(\"PIPELINE_SHARED_SUMMARY:\", json.dumps(summary))\n\n    # 4) Run novelty if clean\n    clean = (\n        summary[\"validate\"][\"ok\"] == summary[\"validate\"][\"total\"] and\n        summary[\"validate\"][\"json_errors\"] == 0 and\n        summary[\"validate\"][\"non_dict\"] == 0 and\n        summary[\"validate\"][\"missing_required\"] == 0 and\n        summary[\"validate\"][\"type_mismatches\"] == 0\n    )\n    if clean:\n        print(\"PIPELINE_SHARED: validation clean -> running novelty stub to\", novelty_o)\n        # Ensure output dir exists\n        os.makedirs(os.path.dirname(novelty_o), exist_ok=True)\n        run_novelty(in_path=out_norm, out_path=novelty_o)\n    else:\n        print(\"PIPELINE_SHARED: validation not clean; skipping novelty.\")\n",
+    "submitted_timestamp": 1761207824.5178716,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nNORMALIZE_OK read: 1 written: 0 json_errors: 1 non_dict: 0\nVALIDATION_OK\npath: storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\ntotal_lines: 0 ok: 0 json_errors: 0 non_dict: 0\nmissing_required_count: 0\ntype_mismatches_count: 0\ntop_keys: []\nPIPELINE_SHARED_SUMMARY: {\"normalize\": {\"in_path\": \"storage/progressor/raw_eval_logs/all_transgen_logs.jsonl\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"read_lines\": 1, \"written_lines\": 0, \"json_errors\": 1, \"non_dict_records\": 0}, \"validate\": {\"path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"ok\": 0, \"total\": 0, \"json_errors\": 0, \"non_dict\": 0, \"missing_required\": 0, \"type_mismatches\": 0}}\nPIPELINE_SHARED: validation clean -> running novelty stub to storage/shared/progressor_outputs/novelty_scores.jsonl\nNOVELTY_STUB_FAIL no_records\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761207828.2388508,
+      "evaluation_datetime": "2025-10-23T16:23:48.238861"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761207828.3859723,
+    "version_notified": "original",
+    "message": "Your research submission 'Normalize+Validate+Novelty (shared output)' (ID: 714) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nNORMALIZE_OK read: 1 written: 0 json_errors: 1 non_dict: 0\nVALIDATION_OK\npath: storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\ntotal_lines: 0 ok: 0 json_errors: 0 non_dict: 0\nmissing_required_count: 0\ntype_mismatches_count: 0\ntop_keys: []\nPIPELINE_SHARED_SUMMARY: {\"normalize\": {\"in_path\": \"storage/progressor/raw_eval_logs/all_transgen_logs.jsonl\", \"out_path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"read_lines\": 1, \"written_lines\": 0, \"json_errors\": 1, \"non_dict_records\": 0}, \"validate\": {\"path\": \"storage/shared/progressor_outputs/all_transgen_logs.normalized.jsonl\", \"ok\": 0, \"total\": 0, \"json_errors\": 0, \"non_dict\": 0, \"missing_required\": 0, \"type_mismatches\": 0}}\nPIPELINE_SHARED: validation clean -> running novelty stub to storage/shared/progressor_outputs/novelty_scores.jsonl\nNOVELTY_STUB_FAIL no_records\n\n\nSTDERR:\n\n```"
+  }
+}

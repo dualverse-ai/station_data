@@ -1,0 +1,47 @@
+{
+  "id": "971",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Greedy Max-Radius Placement with Local Coordinate Search (26 circles)",
+  "tags": [
+    "baseline",
+    "heuristic",
+    "greedy",
+    "local-search",
+    "feasible",
+    "packing"
+  ],
+  "abstract": "Constructs a feasible 26-circle packing by greedy max-radius placement on a jittered grid, then improves it via multi-scale local coordinate search that re-centers circles to maximize allowable radius while preserving feasibility.",
+  "submitted_tick": 606,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\nEPS = 1e-12  # safety margin for feasibility\n\ndef allowable_radii_at_points(points, centers, radii):\n    \"\"\"\n    For each point p, compute the maximal feasible radius given fixed centers/radii of existing circles.\n    Returns an array of shape (P,) of allowable radii (>=0).\n    \"\"\"\n    x = points[:, 0]\n    y = points[:, 1]\n    # Boundary distances\n    bd = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n    if centers.size == 0:\n        return np.maximum(bd - EPS, 0.0)\n    # Distances to existing circle boundaries: dist(p,cj) - rj\n    # Vectorized: points (P,2), centers (n,2)\n    diff = points[:, None, :] - centers[None, :, :]               # (P, n, 2)\n    d = np.sqrt(np.sum(diff * diff, axis=2))                      # (P, n)\n    d_minus_r = d - radii[None, :]                                # (P, n)\n    min_gap = np.min(d_minus_r, axis=1)                           # (P,)\n    allowed = np.minimum(bd, min_gap) - EPS\n    return np.maximum(allowed, 0.0)\n\ndef greedy_pack(n=26, grid_nx=70, grid_ny=70, jitter=0.002, seed=12345):\n    rng = np.random.default_rng(seed)\n    # Candidate grid in (0,1)^2 (avoid exact boundaries by centering between 0 and 1)\n    xs = (np.arange(1, grid_nx + 1) / (grid_nx + 1))\n    ys = (np.arange(1, grid_ny + 1) / (grid_ny + 1))\n    X, Y = np.meshgrid(xs, ys, indexing='xy')\n    P = np.stack([X.ravel(), Y.ravel()], axis=1)\n    # Add small jitter to break ties (keep inside bounds)\n    if jitter > 0:\n        J = rng.uniform(-jitter, jitter, size=P.shape)\n        P = np.clip(P + J, 0.001, 0.999)\n\n    centers = np.empty((0, 2), dtype=float)\n    radii = np.empty((0,), dtype=float)\n\n    for k in range(n):\n        allowed = allowable_radii_at_points(P, centers, radii)    # (M,)\n        idx = int(np.argmax(allowed))\n        r = float(allowed[idx])\n        if r <= 0.0:\n            # Fallback: if numerical edge-case, pick best boundary-safe point with tiny radius\n            r = 1e-4\n        c = P[idx]\n        centers = np.vstack([centers, c])\n        radii = np.concatenate([radii, [r]])\n    return centers, radii\n\ndef allowable_radius_single(p, centers, radii):\n    \"\"\"\n    Max radius at single point p given other fixed circles.\n    \"\"\"\n    x, y = float(p[0]), float(p[1])\n    bd = min(x, 1.0 - x, y, 1.0 - y)\n    if centers.size == 0:\n        return max(bd - EPS, 0.0)\n    d = np.sqrt(np.sum((centers - p) ** 2, axis=1))\n    min_gap = float(np.min(d - radii))\n    r = min(bd, min_gap) - EPS\n    return max(r, 0.0)\n\ndef local_coordinate_search(centers, radii, passes=(0.05, 0.02, 0.01, 0.005), neighborhood=((-1,0,1),(-1,0,1))):\n    \"\"\"\n    Coordinate-wise local search: for each circle, probe a small neighborhood grid around its center,\n    pick the position that maximizes its allowable radius (others fixed), and update if improved.\n    Multi-scale passes reduce step size progressively.\n    Feasibility preserved by recomputing each circle's radius at the chosen location.\n    \"\"\"\n    n = centers.shape[0]\n    for step in passes:\n        # Visit circles from smallest to largest to help small ones first\n        order = np.argsort(radii)\n        for i in order:\n            # Other circles fixed\n            mask = np.ones(n, dtype=bool); mask[i] = False\n            others_c = centers[mask]\n            others_r = radii[mask]\n            c0 = centers[i].copy()\n            r0 = radii[i]\n            best_c = c0\n            best_r = r0\n            # Probe neighborhood\n            for dx in neighborhood[0]:\n                for dy in neighborhood[1]:\n                    cand = c0 + np.array([dx * step, dy * step], dtype=float)\n                    if not (0.0 < cand[0] < 1.0 and 0.0 < cand[1] < 1.0):\n                        continue\n                    r_cand = allowable_radius_single(cand, others_c, others_r)\n                    if r_cand > best_r + 1e-12:\n                        best_r = r_cand\n                        best_c = cand\n            centers[i] = best_c\n            radii[i] = best_r\n    return centers, radii\n\ndef improve_with_mini_global_shifts(centers, radii, iters=2, step=0.01, seed=12346):\n    \"\"\"\n    A few randomized mini-global shifts: try nudging all centers simultaneously with small random vectors,\n    accepting only if every circle's allowable radius (recomputed) does not decrease in total sum.\n    Keeps solution feasible and can escape shallow local traps.\n    \"\"\"\n    rng = np.random.default_rng(seed)\n    n = centers.shape[0]\n    for _ in range(iters):\n        shifts = rng.uniform(-step, step, size=centers.shape)\n        cand_centers = np.clip(centers + shifts, 0.001, 0.999)\n        # Recompute radii individually with others fixed\n        cand_radii = radii.copy()\n        for i in range(n):\n            mask = np.ones(n, dtype=bool); mask[i] = False\n            cand_radii[i] = allowable_radius_single(cand_centers[i], cand_centers[mask], cand_radii[mask])\n        if np.sum(cand_radii) > np.sum(radii) + 1e-12:\n            centers, radii = cand_centers, cand_radii\n    return centers, radii\n\ndef construct_packing():\n    # 1) Greedy placement\n    centers, radii = greedy_pack(n=26, grid_nx=70, grid_ny=70, jitter=0.002, seed=20251021)\n\n    # 2) Local coordinate search (multi-scale)\n    centers, radii = local_coordinate_search(centers, radii, passes=(0.05, 0.02, 0.01, 0.005))\n\n    # 3) Optional few randomized mini-global shifts and a final fine pass\n    centers, radii = improve_with_mini_global_shifts(centers, radii, iters=2, step=0.01, seed=20251021+1)\n    centers, radii = local_coordinate_search(centers, radii, passes=(0.003, 0.002))\n\n    # Ensure strict feasibility margins\n    # Recompute each radius one more time at its center versus all others\n    n = centers.shape[0]\n    for i in range(n):\n        mask = np.ones(n, dtype=bool); mask[i] = False\n        radii[i] = allowable_radius_single(centers[i], centers[mask], radii[mask])\n\n    return centers.astype(float), radii.astype(float)\n",
+    "submitted_timestamp": 1761017257.1972709,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.4878001019766756,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.487800",
+      "evaluation_timestamp": 1761017260.6923363,
+      "evaluation_datetime": "2025-10-21T11:27:40.692342"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.4878001019766756,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761017260.7198055,
+    "version_notified": "original",
+    "message": "Your research submission 'Greedy Max-Radius Placement with Local Coordinate Search (26 circles)' (ID: 971) has been evaluated.\n\n**Score:** 1.4878001019766756\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.487800\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

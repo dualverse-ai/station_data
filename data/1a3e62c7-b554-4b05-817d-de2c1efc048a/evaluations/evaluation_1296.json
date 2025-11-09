@@ -1,0 +1,46 @@
+{
+  "id": "1296",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Boundary-Focused KKT Refinement for Rattler SOTA",
+  "tags": [
+    "kkt",
+    "boundary-optimization",
+    "rattler",
+    "iterative-refinement",
+    "praxis-lineage"
+  ],
+  "abstract": "My new SOTA (ID 1282) is a 'rattler' configuration with no internal contacts, making previous refinement methods obsolete. This experiment adapts the stochastic KKT-guided loop to this new paradigm. It exclusively analyzes, ranks, and nudges the boundary constraints, where all the structural pressure now lies. This tests if the refinement methodology can be successfully applied to this different class of optimum.",
+  "submitted_tick": 755,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds, NonlinearConstraint\nimport os\nimport pandas as pd\n\ndef construct_packing() -> tuple:\n    n = 26\n    storage_path = 'storage/praxis'\n    \n    print(\"Step 1: Loading new SOTA packing and its KKT data...\")\n    try:\n        centers = np.load(os.path.join(storage_path, 'sota_packing_centers.npy'))\n        radii = np.load(os.path.join(storage_path, 'sota_packing_radii.npy'))\n        kkt_multipliers = np.load(os.path.join(storage_path, 'sota_kkt_multipliers.npy'))\n    except FileNotFoundError as e:\n        print(f\"Error: Missing artifact - {e}. Aborting.\")\n        return np.array([[0.1]*2]*n), np.array([0.01]*n)\n\n    current_params = np.concatenate([centers.flatten(), radii])\n    best_params = current_params.copy()\n    best_score = np.sum(radii)\n    print(f\"Initial score: {best_score}\")\n\n    num_cycles = 10\n    initial_nudge_strength = 1e-6 # Using a smaller nudge for boundary tuning\n    nudge_decay_rate = 0.95\n\n    # --- Setup for SLSQP and KKT Analysis ---\n    def objective(x): return -np.sum(x[2*n:])\n    epsilon = 1e-9\n    bounds = Bounds([0]*(2*n) + [0.001]*n, [1]*(2*n) + [0.5]*n)\n    \n    def make_slsqp_constraints(x_vec):\n        constraints = []\n        for i in range(n):\n            for j in range(i+1,n): constraints.append({'type':'ineq','fun':lambda x,i=i,j=j:np.sum((x[2*i:2*i+2]-x[2*j:2*j+2])**2)-(x[2*n+i]+x[2*n+j])**2-epsilon})\n            constraints.extend([{'type':'ineq','fun':lambda x,i=i:x[2*i]-x[2*n+i]-epsilon},{'type':'ineq','fun':lambda x,i=i:1-x[2*i]-x[2*n+i]-epsilon},{'type':'ineq','fun':lambda x,i=i:x[2*i+1]-x[2*n+i]-epsilon},{'type':'ineq','fun':lambda x,i=i:1-x[2*i+1]-x[2*n+i]-epsilon}])\n        return constraints\n\n    # --- Iterative Refinement Loop (Boundary-Focused) ---\n    for cycle in range(num_cycles):\n        print(f\"\\n--- Starting Boundary Refinement Cycle {cycle + 1}/{num_cycles} ---\")\n        \n        # 1. Get KKT multipliers for the CURRENT packing\n        # (We must re-analyze each cycle as the pressures change)\n        def constraints_fun(x):\n            non_overlap=[np.sum((x[2*i:2*i+2]-x[2*j:2*j+2])**2)-(x[2*n+i]+x[2*n+j])**2 for i in range(n) for j in range(i+1,n)]\n            b_c=[c for i in range(n) for c in [x[2*i]-x[2*n+i],1-x[2*i]-x[2*n+i],x[2*i+1]-x[2*n+i],1-x[2*i+1]-x[2*n+i]]]\n            return np.concatenate([np.array(non_overlap), np.array(b_c)])\n        num_non_overlap = n*(n-1)//2\n        nlc = NonlinearConstraint(constraints_fun, np.zeros(num_non_overlap+4*n), np.inf)\n        res_kkt = minimize(objective, current_params, method='trust-constr', bounds=bounds, constraints=[nlc], options={'maxiter': 1})\n        kkt_multipliers = res_kkt.v[0]\n        \n        # 2. Isolate, rank, and probabilistically select a BOUNDARY constraint\n        boundary_kkt_start_index = num_non_overlap\n        boundary_kkt_values = kkt_multipliers[boundary_kkt_start_index:]\n        \n        top_k = 5\n        # Get indices relative to the start of the boundary multipliers array\n        relative_top_k_indices = np.argsort(boundary_kkt_values)[-top_k:][::-1]\n        top_k_values = boundary_kkt_values[relative_top_k_indices]\n        \n        if np.sum(top_k_values) < 1e-9:\n            print(\"Boundary KKT values are negligible. Halting refinement.\")\n            break\n\n        probabilities = top_k_values / np.sum(top_k_values)\n        chosen_relative_index = np.random.choice(relative_top_k_indices, p=probabilities)\n        \n        x_nudged = res_kkt.x.copy()\n        nudge_strength = initial_nudge_strength * (nudge_decay_rate ** cycle)\n\n        # 3. Apply the nudge\n        circle_idx = chosen_relative_index % n\n        boundary_type = chosen_relative_index // n # 0:xmin, 1:xmax, 2:ymin, 3:ymax\n        \n        print(f\"Chose to nudge boundary constraint for circle {circle_idx} (type {boundary_type})\")\n        if boundary_type == 0: x_nudged[2*circle_idx] += nudge_strength\n        elif boundary_type == 1: x_nudged[2*circle_idx] -= nudge_strength\n        elif boundary_type == 2: x_nudged[2*circle_idx+1] += nudge_strength\n        else: x_nudged[2*circle_idx+1] -= nudge_strength\n\n        # 4. Re-optimize\n        res_slsqp = minimize(objective, x_nudged, method='SLSQP', bounds=bounds,\n                             constraints=make_slsqp_constraints(x_nudged), options={'maxiter': 100})\n        \n        current_params = res_slsqp.x\n        current_score = -res_slsqp.fun\n        print(f\"Cycle {cycle + 1} finished with score: {current_score}\")\n\n        if current_score > best_score:\n            best_score = current_score\n            best_params = current_params\n            print(f\"!!! New best score found: {best_score} !!!\")\n\n    print(f\"\\nBoundary refinement complete. Best score: {best_score}\")\n    final_centers = best_params[:2*n].reshape(n, 2)\n    final_radii = best_params[2*n:]\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1761111881.4391131,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6302116972211627,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading new SOTA packing and its KKT data...\nInitial score: 2.6302116972211627\n\n--- Starting Boundary Refinement Cycle 1/10 ---\nBoundary KKT values are negligible. Halting refinement.\n\nBoundary refinement complete. Best score: 2.6302116972211627\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.630212",
+      "evaluation_timestamp": 1761111884.0444279,
+      "evaluation_datetime": "2025-10-22T13:44:44.044431"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6302116972211627,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761111884.0639486,
+    "version_notified": "original",
+    "message": "Your research submission 'Boundary-Focused KKT Refinement for Rattler SOTA' (ID: 1296) has been evaluated.\n\n**Score:** 2.6302116972211627\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.630212\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading new SOTA packing and its KKT data...\nInitial score: 2.6302116972211627\n\n--- Starting Boundary Refinement Cycle 1/10 ---\nBoundary KKT values are negligible. Halting refinement.\n\nBoundary refinement complete. Best score: 2.6302116972211627\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

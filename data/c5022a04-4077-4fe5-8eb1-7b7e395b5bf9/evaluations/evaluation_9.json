@@ -1,0 +1,45 @@
+{
+  "id": "9",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Alternating 5-4 triangular rows + LP radii with micro-jitter (fallback to 6x6 r=1/12)",
+  "tags": [
+    "construction",
+    "linear programming",
+    "heuristic search",
+    "triangular lattice"
+  ],
+  "abstract": "We generate structured center layouts using 7 alternating rows (5/4/5/4/5/4/5), evaluate radii via a HiGHS LP, and perform a brief micro-jitter local search to boost the LP objective. We compare against a strong fallback (6\u00d76 grid minus corners with exact r=1/12) and return whichever yields the higher sum of radii, ensuring we never regress below 2.6667.",
+  "submitted_tick": 10,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom math import sqrt\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# ---------------- Utilities ----------------\n\ndef _boundary_margins(C: np.ndarray) -> np.ndarray:\n    x = C[:, 0]; y = C[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _solve_lp_for_radii(C: np.ndarray):\n    \"\"\"\n    Maximize sum r_i subject to:\n      0 <= r_i <= b_i (boundary margins)\n      r_i + r_j <= ||c_i - c_j|| for all i<j\n    Returns (r, obj, ok)\n    \"\"\"\n    n = C.shape[0]\n    b = _boundary_margins(C)\n\n    if not SCIPY_AVAILABLE:\n        # Conservative fallback: equal to min boundary margin, tiny shrink\n        r = np.minimum(b, 1.0/12.0) * 0.999\n        return r, float(np.sum(r)), True\n\n    # Build pairwise constraints\n    I = []\n    J = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            I.append(i); J.append(j)\n    I = np.array(I, dtype=int)\n    J = np.array(J, dtype=int)\n    D = np.linalg.norm(C[I] - C[J], axis=1)\n\n    m = len(I)\n    A_ub = np.zeros((m, n), dtype=float)\n    A_ub[np.arange(m), I] = 1.0\n    A_ub[np.arange(m), J] = 1.0\n    b_ub = D\n\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not hasattr(res, \"success\") or not res.success:\n        return np.zeros(n, dtype=float), 0.0, False\n\n    r = res.x.astype(float)\n    return r, float(-res.fun), True\n\ndef _safety_shrink(C: np.ndarray, r: np.ndarray) -> np.ndarray:\n    r2 = r.astype(float).copy()\n    r2 *= 0.999\n    r2 = np.maximum(r2, 1e-12)\n    # Bound by margins\n    r2 = np.minimum(r2, _boundary_margins(C))\n    return r2\n\ndef _validate(C: np.ndarray, r: np.ndarray) -> bool:\n    if C.shape != (32, 2) or r.shape != (32,):\n        return False\n    if np.any(~np.isfinite(C)) or np.any(~np.isfinite(r)):\n        return False\n    if np.any(r <= 0):\n        return False\n    # Inside box\n    x = C[:,0]; y = C[:,1]\n    if np.any(x - r < 0) or np.any(x + r > 1) or np.any(y - r < 0) or np.any(y + r > 1):\n        return False\n    # Pairwise non-overlap\n    diff = C[:, None, :] - C[None, :, :]\n    D = np.sqrt(np.sum(diff*diff, axis=-1))\n    R = r[:, None] + r[None, :]\n    iu = np.triu_indices(32, 1)\n    if np.any(D[iu] < R[iu] - 1e-12):\n        return False\n    return True\n\n# ---------------- Baseline (guaranteed >= 2.6667) ----------------\n\ndef _baseline_grid_6x6_minus_corners():\n    # 6x6 centers evenly spaced with spacing s=1/6; remove four corners -> 32 centers\n    s = 1.0 / 6.0\n    r0 = 0.5 * s\n    xs = r0 + s * np.arange(6, dtype=float)  # 0.0833.. + k*(1/6)\n    ys = r0 + s * np.arange(6, dtype=float)\n    centers = []\n    for i in range(6):\n        for j in range(6):\n            if (i == 0 and j == 0) or (i == 0 and j == 5) or (i == 5 and j == 0) or (i == 5 and j == 5):\n                continue\n            centers.append([xs[j], ys[i]])\n    C = np.array(centers, dtype=float)\n    r = np.full(32, r0 * (1.0 - 1e-12), dtype=float)\n    return C, r, float(np.sum(r))\n\n# ---------------- Alternating 5/4 row constructors ----------------\n\ndef _rows_y_positions(rows: int, margin: float):\n    # Evenly space 'rows' y-positions between [margin, 1-margin]\n    if rows == 1:\n        return np.array([0.5], dtype=float)\n    ymin = margin\n    ymax = 1.0 - margin\n    return np.linspace(ymin, ymax, rows)\n\ndef _row_x_positions(k: int, kind: str):\n    # kind options for diversity\n    if k == 5:\n        if kind == \"tight\":\n            return np.array([0.12, 0.32, 0.52, 0.72, 0.92])\n        else:  # \"wide\"\n            return np.array([0.10, 0.30, 0.50, 0.70, 0.90])\n    elif k == 4:\n        if kind == \"phase0\":\n            return np.array([0.125, 0.375, 0.625, 0.875])\n        elif kind == \"phase1\":\n            return np.array([0.175, 0.425, 0.675, 0.925])\n        else:  # \"aligned\"\n            return np.array([0.20, 0.40, 0.60, 0.80])\n    else:\n        raise ValueError(\"Only k in {4,5} supported here.\")\n\ndef _make_alt_rows(counts, y_margin, five_kind, four_kind):\n    ys = _rows_y_positions(len(counts), y_margin)\n    C = []\n    for idx, k in enumerate(counts):\n        if k == 5:\n            xs = _row_x_positions(5, five_kind)\n        else:\n            xs = _row_x_positions(4, four_kind)\n        for x in xs:\n            C.append([x, ys[idx]])\n    C = np.array(C, dtype=float)\n    return C\n\n# ---------------- Micro-jitter local search ----------------\n\ndef _micro_jitter_search(C0: np.ndarray, steps: int = 120, sigma: float = 0.01, seed: int = 123):\n    rng = np.random.default_rng(seed)\n    C_best = C0.copy()\n    r_best, obj_best, ok = _solve_lp_for_radii(C_best)\n    if not ok:\n        return C0, r_best, obj_best\n    for _ in range(steps):\n        C_try = C_best.copy()\n        i = int(rng.integers(0, C_try.shape[0]))\n        delta = rng.normal(0.0, sigma, size=2)\n        C_try[i] = np.clip(C_try[i] + delta, 1e-6, 1.0 - 1e-6)\n        r_try, obj_try, ok = _solve_lp_for_radii(C_try)\n        if ok and obj_try > obj_best + 1e-10:\n            C_best, r_best, obj_best = C_try, r_try, obj_try\n    return C_best, r_best, obj_best\n\n# ---------------- Main entry ----------------\n\ndef construct_packing() -> tuple:\n    n = 32\n\n    # Strong baseline\n    C_base, r_base, obj_base = _baseline_grid_6x6_minus_corners()\n\n    # Generate alternating-row candidates\n    patterns = [\n        ([5,4,5,4,5,4,5], 0.10, \"wide\", \"phase0\"),\n        ([5,4,5,4,5,4,5], 0.10, \"wide\", \"aligned\"),\n        ([5,4,5,4,5,4,5], 0.12, \"tight\", \"phase0\"),\n        ([5,4,5,4,5,4,5], 0.12, \"tight\", \"aligned\"),\n        ([4,5,4,5,4,5,5], 0.10, \"wide\", \"phase1\"),\n        ([4,5,4,5,4,5,5], 0.12, \"tight\", \"phase1\"),\n    ]\n\n    best_C = C_base\n    best_r = r_base\n    best_obj = obj_base\n\n    for counts, y_margin, five_kind, four_kind in patterns:\n        C = _make_alt_rows(counts, y_margin, five_kind, four_kind)\n        # Quick LP evaluate\n        r, obj, ok = _solve_lp_for_radii(C)\n        if ok and obj > best_obj + 1e-9:\n            best_C, best_r, best_obj = C, r, obj\n        # Micro-jitter refinement\n        C2, r2, obj2 = _micro_jitter_search(C, steps=160, sigma=0.008, seed=2025)\n        if obj2 > best_obj + 1e-9:\n            best_C, best_r, best_obj = C2, r2, obj2\n\n    # Final safety shrink and validation; ensure non-regression against baseline\n    best_r = _safety_shrink(best_C, best_r)\n    if best_obj < obj_base - 1e-9 or not _validate(best_C, best_r):\n        # Return proven strong baseline\n        C, r, _ = _baseline_grid_6x6_minus_corners()\n        return C, r\n    return best_C, best_r\n",
+    "submitted_timestamp": 1760775009.2021468,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.7971999999999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.797200",
+      "evaluation_timestamp": 1760775014.29787,
+      "evaluation_datetime": "2025-10-18T16:10:14.297872"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.7971999999999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760775014.318929,
+    "version_notified": "original",
+    "message": "Your research submission 'Alternating 5-4 triangular rows + LP radii with micro-jitter (fallback to 6x6 r=1/12)' (ID: 9) has been evaluated.\n\n**Score:** 2.7971999999999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.797200\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

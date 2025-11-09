@@ -1,0 +1,50 @@
+{
+  "id": "1459",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "Diagnostics: \u03c3_kd distributions \u2014 Ridge at \u03b4\u2208{0.10,0.12} (kd=22, k=50)",
+  "tags": [
+    "analysis",
+    "diagnostics",
+    "ridge",
+    "kd",
+    "delta",
+    "density"
+  ],
+  "abstract": "Analysis-only test for ridge (GraphFWPCA+BRBG+DAQB). Runs the same variant with kd=22, k=50 at \u03b4=0.10 and \u03b4=0.12 (seed=0) and computes kd-th neighbor distance (\u03c3_kd) distributions from the final distance graphs. Reports global and per-batch summaries (median, mean, CV, Gini) and contrasts.",
+  "submitted_tick": 1037,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, numpy as np\nimport anndata as ad\nimport scipy.sparse as sp\n\nsys.path.append('storage/praxis')\nfrom ridge_kd_d_variant import run_variant\n\ndef _kd_stat_from_distances(D: sp.csr_matrix, kd: int) -> np.ndarray:\n    if not sp.isspmatrix_csr(D):\n        D = D.tocsr()\n    n = D.shape[0]\n    sigma = np.full(n, np.nan, dtype=np.float64)\n    idx_ptr = D.indptr\n    data = D.data\n    for i in range(n):\n        start, end = idx_ptr[i], idx_ptr[i+1]\n        row = data[start:end]\n        if row.size >= kd:\n            kth = np.partition(row, kd-1)[kd-1]\n            sigma[i] = float(kth)\n    return sigma\n\ndef _gini(x):\n    x = np.asarray(x, dtype=np.float64)\n    x = x[np.isfinite(x)]\n    if x.size == 0:\n        return np.nan\n    x = np.abs(x)\n    if np.allclose(x.sum(), 0):\n        return 0.0\n    x.sort()\n    n = x.size\n    cumx = np.cumsum(x)\n    return (n + 1 - 2 * np.sum(cumx) / cumx[-1]) / n\n\ndef _summaries(sigma: np.ndarray, batches: np.ndarray, label: str):\n    mask = np.isfinite(sigma)\n    s = sigma[mask]\n    out = {\n        \"label\": label,\n        \"n\": int(s.size),\n        \"median\": float(np.median(s)) if s.size else np.nan,\n        \"mean\": float(np.mean(s)) if s.size else np.nan,\n        \"std\": float(np.std(s, ddof=1)) if s.size > 1 else np.nan,\n        \"cv\": float(np.std(s, ddof=1) / np.mean(s)) if s.size > 1 and np.mean(s) > 0 else np.nan,\n        \"gini\": float(_gini(s)),\n    }\n    per_batch = {}\n    for b in np.unique(batches):\n        mb = mask & (batches == b)\n        sb = sigma[mb]\n        sb = sb[np.isfinite(sb)]\n        per_batch[str(b)] = float(np.median(sb)) if sb.size else np.nan\n    out[\"per_batch_median\"] = per_batch\n    return out\n\ndef test(adata: ad.AnnData):\n    kdensity = 22\n    k_total = 50\n    seed = 0\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Ridge \u03b4=0.10\n    ad_d010 = adata.copy()\n    ad_d010 = run_variant(ad_d010, kdensity=kdensity, delta=0.10, seed=seed)\n    D010 = ad_d010.obsp.get('distances', None)\n\n    # Ridge \u03b4=0.12\n    ad_d012 = adata.copy()\n    ad_d012 = run_variant(ad_d012, kdensity=kdensity, delta=0.12, seed=seed)\n    D012 = ad_d012.obsp.get('distances', None)\n\n    results = {}\n    if D010 is not None:\n        sig010 = _kd_stat_from_distances(D010, kdensity)\n        results[\"ridge_d010\"] = _summaries(sig010, batches, \"ridge_d010\")\n    else:\n        results[\"ridge_d010\"] = {\"label\": \"ridge_d010\", \"error\": \"no_distances\"}\n\n    if D012 is not None:\n        sig012 = _kd_stat_from_distances(D012, kdensity)\n        results[\"ridge_d012\"] = _summaries(sig012, batches, \"ridge_d012\")\n    else:\n        results[\"ridge_d012\"] = {\"label\": \"ridge_d012\", \"error\": \"no_distances\"}\n\n    if \"ridge_d010\" in results and \"ridge_d012\" in results and \"median\" in results[\"ridge_d010\"] and \"median\" in results[\"ridge_d012\"]:\n        m010 = results[\"ridge_d010\"].get(\"median\", np.nan)\n        m012 = results[\"ridge_d012\"].get(\"median\", np.nan)\n        cv010 = results[\"ridge_d010\"].get(\"cv\", np.nan)\n        cv012 = results[\"ridge_d012\"].get(\"cv\", np.nan)\n        results[\"diff\"] = {\n            \"median_ratio_d012_over_d010\": (m012 / m010) if (np.isfinite(m010) and np.isfinite(m012) and m010 != 0) else np.nan,\n            \"cv_delta\": (cv012 - cv010) if (np.isfinite(cv010) and np.isfinite(cv012)) else np.nan\n        }\n\n    print(json.dumps(results, indent=2, sort_keys=True))\n    return \"\u03c3_kd diagnostics completed (Ridge)\"\n",
+    "submitted_timestamp": 1761741882.8981159,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[ridge-kd22-d0.100] lam=0.605, kd=22, delta=0.1, k=50, alpha_g=0.50, rng_seed=0\n[ridge-kd22-d0.120] lam=0.605, kd=22, delta=0.12, k=50, alpha_g=0.50, rng_seed=0\n{\n  \"diff\": {\n    \"cv_delta\": -0.012862031854269762,\n    \"median_ratio_d012_over_d010\": 1.0152165788731404\n  },\n  \"ridge_d010\": {\n    \"cv\": 0.4613703906306688,\n    \"gini\": 0.25629651650147434,\n    \"label\": \"ridge_d010\",\n    \"mean\": 0.23800521442592143,\n    \"median\": 0.22631746530532837,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.16523891687393188,\n      \"Kuppe et al. 2022\": 0.22312715649604797,\n      \"Litvinukova et al. 2020\": 0.22498422861099243,\n      \"Tucker et al. 2020\": 0.28179436922073364\n    },\n    \"std\": 0.10980855875182347\n  },\n  \"ridge_d012\": {\n    \"cv\": 0.44850835877639905,\n    \"gini\": 0.24912249297390582,\n    \"label\": \"ridge_d012\",\n    \"mean\": 0.2412440867036581,\n    \"median\": 0.2297612428665161,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.16801989078521729,\n      \"Kuppe et al. 2022\": 0.2259419858455658,\n      \"Litvinukova et al. 2020\": 0.2299555540084839,\n      \"Tucker et al. 2020\": 0.2833024561405182\n    },\n    \"std\": 0.10819998939196901\n  }\n}\nTest result: \u03c3_kd diagnostics completed (Ridge)\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761741973.441413,
+      "evaluation_datetime": "2025-10-29T20:46:13.441420",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761741973.4779658,
+    "version_notified": "original",
+    "message": "Your research submission 'Diagnostics: \u03c3_kd distributions \u2014 Ridge at \u03b4\u2208{0.10,0.12} (kd=22, k=50)' (ID: 1459) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n[ridge-kd22-d0.100] lam=0.605, kd=22, delta=0.1, k=50, alpha_g=0.50, rng_seed=0\n[ridge-kd22-d0.120] lam=0.605, kd=22, delta=0.12, k=50, alpha_g=0.50, rng_seed=0\n{\n  \"diff\": {\n    \"cv_delta\": -0.012862031854269762,\n    \"median_ratio_d012_over_d010\": 1.0152165788731404\n  },\n  \"ridge_d010\": {\n    \"cv\": 0.4613703906306688,\n    \"gini\": 0.25629651650147434,\n    \"label\": \"ridge_d010\",\n    \"mean\": 0.23800521442592143,\n    \"median\": 0.22631746530532837,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.16523891687393188,\n      \"Kuppe et al. 2022\": 0.22312715649604797,\n      \"Litvinukova et al. 2020\": 0.22498422861099243,\n      \"Tucker et al. 2020\": 0.28179436922073364\n    },\n    \"std\": 0.10980855875182347\n  },\n  \"ridge_d012\": {\n    \"cv\": 0.44850835877639905,\n    \"gini\": 0.24912249297390582,\n    \"label\": \"ridge_d012\",\n    \"mean\": 0.2412440867036581,\n    \"median\": 0.2297612428665161,\n    \"n\": 20000,\n    \"per_batch_median\": {\n      \"Koenig et al. 2022\": 0.16801989078521729,\n      \"Kuppe et al. 2022\": 0.2259419858455658,\n      \"Litvinukova et al. 2020\": 0.2299555540084839,\n      \"Tucker et al. 2020\": 0.2833024561405182\n    },\n    \"std\": 0.10819998939196901\n  }\n}\nTest result: \u03c3_kd diagnostics completed (Ridge)\n\n\nSTDERR:\n\n```"
+  }
+}

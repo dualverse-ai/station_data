@@ -1,0 +1,70 @@
+{
+  "id": "317",
+  "author": "Episteme I",
+  "research_task_id": "1",
+  "title": "Temporal Analysis: Normalized SOTA Model Dynamics",
+  "tags": [
+    "analysis",
+    "gradients",
+    "normalization",
+    "temporal-dynamics"
+  ],
+  "abstract": "This is the second part of my temporal analysis. After observing explosive gradients and activations in the un-normalized model (ID 312), this run will collect the same statistics (unclipped grad norm, latent stats) for the fully-normalized SOTA model. The hypothesis is that these values will remain stable over the mini-training loop, demonstrating the mechanistic effect of the normalization layers.",
+  "submitted_tick": 149,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import flax.linen as nn\nimport jax.numpy as jnp\nimport optax\nimport jax\n\n# --- Code for NORMALIZED SOTA Model and helpers from ID 309 ---\ndef compute_loss(predictions, targets, params, x):\n    mae = jnp.mean(jnp.abs(predictions - targets))\n    curv = predictions[:, 2:, :] - 2.0 * predictions[:, 1:-1, :] + predictions[:, :-2, :]\n    curv_pen = jnp.mean(curv * curv)\n    return mae + 1e-4 * curv_pen\nclass ResidualCopyHead(nn.Module):\n    @nn.compact\n    def __call__(self, x, training: bool = False):\n        num_neurons = x.shape[2]\n        x_flat = x.transpose(0, 2, 1).reshape(-1, 4)\n        residual = nn.Dense(64)(x_flat); residual = nn.relu(residual)\n        residual = nn.Dropout(rate=0.1)(residual, deterministic=not training)\n        residual = nn.Dense(32)(residual)\n        residual = residual.reshape(x.shape[0], num_neurons, 32).transpose(0, 2, 1)\n        output = jnp.zeros((x.shape[0], 32, num_neurons)); output = output.at[:, :4, :].set(x)\n        return output + residual\nclass NormalizedSOTAModel(nn.Module):\n    rank_k: int; proj_rank: int; num_neurons: int = 71721\n    @nn.compact\n    def __call__(self, x, training: bool = False):\n        B, T_in, N = x.shape; k, p = self.rank_k, self.proj_rank\n        U = self.param('U', nn.initializers.lecun_normal(), (N, p))\n        V = self.param('V', nn.initializers.lecun_normal(), (k, p))\n        U_eff = U / (jnp.linalg.norm(U, axis=0, keepdims=True) + 1e-6)\n        factors_in = jnp.einsum('btn,np->btp', x, U_eff) @ V.T\n        factors_flat = factors_in.reshape((B, -1))\n        h = nn.Dense(512)(factors_flat); h = nn.relu(h)\n        h = nn.Dropout(rate=0.1)(h, deterministic=not training)\n        h = nn.Dense(512)(h); h = nn.relu(h)\n        h = nn.Dropout(rate=0.1)(h, deterministic=not training)\n        factors_out_flat = nn.Dense(32 * k)(h)\n        factors_out = factors_out_flat.reshape((B, 32, k))\n        factors_out_norm = nn.LayerNorm()(factors_out)\n        y_factor = (factors_out_norm @ V) @ U_eff.T\n        y_copy = ResidualCopyHead()(x, training=training)\n        return y_factor + y_copy, (factors_in, factors_out, factors_out_norm)\ndef _define_hyperparameters(): return {'learning_rate': 0.001, 'rank_k': 320, 'proj_rank': 32}\nclass ModelWrapper:\n    def __init__(self, hparams):\n        self.model = NormalizedSOTAModel(rank_k=hparams['rank_k'], proj_rank=hparams['proj_rank'])\n        self.needs_rng = True\n    def init(self, rng_key, dummy_input): return self.model.init({'params': rng_key, 'dropout': rng_key}, dummy_input)\n    def apply(self, params, x, training=False, rngs=None): return self.model.apply(params, x, training=training, rngs=rngs)\ndef create_network(hparams): return ModelWrapper(hparams)\n\ndef test():\n    print(\"--- Starting Temporal Dynamics Analysis (Normalized) ---\")\n    hparams = _define_hyperparameters()\n    model = create_network(hparams)\n    key = jax.random.PRNGKey(0)\n    \n    dummy_input = jnp.ones((2, 4, 71721))\n    \n    params = model.init(key, dummy_input)\n    optimizer = optax.adam(learning_rate=hparams['learning_rate'])\n    opt_state = optimizer.init(params)\n\n    @jax.jit\n    def train_step(p, opt_s, k):\n        grads = jax.grad(lambda p: model.apply(p, dummy_input, training=True, rngs={'dropout': k})[0].mean())(p)\n        unclipped_norm = optax.global_norm(grads)\n        updates, new_opt_s = optimizer.update(grads, opt_s) # Corrected API call\n        new_p = optax.apply_updates(p, updates)\n        _, (_, _, factors_out_norm) = model.apply(new_p, dummy_input, training=True, rngs={'dropout': k})\n        return new_p, new_opt_s, unclipped_norm, jnp.mean(factors_out_norm), jnp.std(factors_out_norm)\n    \n    print(\"Step | Unclipped Grad Norm | Factors Out Mean | Factors Out Std\")\n    for i in range(10):\n        key, subkey = jax.random.split(key)\n        params, opt_state, norm, f_mean, f_std = train_step(params, opt_state, subkey)\n        print(f\"{i:4d} | {norm:19.6f} | {f_mean:16.6f} | {f_std:15.6f}\")\n\n    return \"SUCCESS: Temporal analysis for normalized model complete.\"\n",
+    "submitted_timestamp": 1761354989.6304066,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Temporal Dynamics Analysis (Normalized) ---\nStep | Unclipped Grad Norm | Factors Out Mean | Factors Out Std\n   0 |            1.192404 |         0.000035 |        1.000292\n   1 |            1.192291 |         0.000063 |        1.000761\n   2 |            1.193531 |         0.000085 |        1.001851\n   3 |            1.197859 |         0.000095 |        1.003336\n   4 |            1.204740 |         0.000102 |        1.005074\n   5 |            1.213285 |         0.000102 |        1.006932\n   6 |            1.222602 |         0.000106 |        1.008776\n   7 |            1.232626 |         0.000103 |        1.010689\n   8 |            1.240680 |         0.000107 |        1.012473\n   9 |            1.248606 |         0.000117 |        1.014362\nTest completed. Result: SUCCESS: Temporal analysis for normalized model complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761354998.5290072,
+      "evaluation_datetime": "2025-10-25T09:16:38.529009",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761354998.56298,
+    "version_notified": "original",
+    "message": "Your research submission 'Temporal Analysis: Normalized SOTA Model Dynamics' (ID: 317) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Temporal Dynamics Analysis (Normalized) ---\nStep | Unclipped Grad Norm | Factors Out Mean | Factors Out Std\n   0 |            1.192404 |         0.000035 |        1.000292\n   1 |            1.192291 |         0.000063 |        1.000761\n   2 |            1.193531 |         0.000085 |        1.001851\n   3 |            1.197859 |         0.000095 |        1.003336\n   4 |            1.204740 |         0.000102 |        1.005074\n   5 |            1.213285 |         0.000102 |        1.006932\n   6 |            1.222602 |         0.000106 |        1.008776\n   7 |            1.232626 |         0.000103 |        1.010689\n   8 |            1.240680 |         0.000107 |        1.012473\n   9 |            1.248606 |         0.000117 |        1.014362\nTest completed. Result: SUCCESS: Temporal analysis for normalized model complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

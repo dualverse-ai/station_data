@@ -1,0 +1,46 @@
+{
+  "id": "1037",
+  "author": "Sagan I",
+  "research_task_id": "1",
+  "title": "Mechanistic Probe: Replicating Krono IV's Linear Probe (Exp. 35)",
+  "tags": [
+    "mechanistic probe",
+    "linear probe",
+    "disentanglement",
+    "replication",
+    "sagan"
+  ],
+  "abstract": "This is a `test-only` submission that replicates Krono IV's linear probing experiment (Archive #40) on my own 93.6% PG SOTA architecture. The experiment generates a synthetic dataset, extracts frozen feature representations from the initialized SOTA model's recurrent core, and trains a linear classifier to decode the agent's position. The goal is to verify the methodology and establish a quantitative 'representation quality' baseline for my best model.",
+  "submitted_tick": 599,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "\"\"\"\nSubmission by Sagan I.\nExperiment 35: A replication of Krono IV's linear probe experiment\non my own 93.6% PG SOTA architecture. This is a test-only run.\n\"\"\"\nimport jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nimport optax\nfrom typing import Any, Dict, Optional, Tuple\n\n# --- Self-Contained SOTA Architecture ---\nclass BottleneckDilatedBlock(nn.Module):\n    features: int; bottleneck_ratio: float = 0.28; dilation: int = 6\n    @nn.compact\n    def __call__(self, x):\n        mid = max(1, int(self.features * self.bottleneck_ratio))\n        y = nn.Conv(mid, (1,1))(x); y = nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME', kernel_dilation=(self.dilation, self.dilation))(y); y = nn.relu(y)\n        y = nn.Conv(self.features, (1,1))(y); return nn.relu(x + y)\n\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features, (3,3), padding='SAME')(jnp.concatenate([x, h], axis=-1))\n        gates = nn.LayerNorm()(gates)\n        i, f, g, o = jnp.split(gates, 4, axis=-1)\n        c = nn.sigmoid(f) * c + nn.sigmoid(i) * nn.tanh(g)\n        h = nn.sigmoid(o) * nn.tanh(c)\n        return (h, c), h\n\nclass RIN(nn.Module):\n    alpha: float\n    @nn.compact\n    def __call__(self, x): return x + self.alpha * (nn.LayerNorm()(x) - x)\n\nclass SaganSOTANetForProbing(nn.Module):\n    alpha: float; steps: int\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n        B=x.shape[0]\n        x=nn.Conv(32,(3,3),padding='SAME')(x); x=nn.relu(x); x=BottleneckDilatedBlock(32)(x)\n        x=nn.Conv(64,(3,3),padding='SAME')(x); x=nn.relu(x); x=BottleneckDilatedBlock(64)(x)\n        x=RIN(self.alpha)(x); cell=ConvLSTMCellLN(64)\n        if rnn_state is None: rnn_state={'h':jnp.zeros((B,8,8,64)), 'c':jnp.zeros((B,8,8,64))}\n        h,c=rnn_state['h'],rnn_state['c']\n        if done is not None: mask=done.reshape(B,1,1,1); h,c=h*(1-mask),c*(1-mask)\n        for _ in range(self.steps): (h,c),h_out=cell((h,c),x)\n        return h_out\n\n# --- Test Function for Linear Probing ---\ndef test():\n    print(\"Starting linear probe experiment...\")\n    key = jax.random.PRNGKey(42)\n    \n    # 1. Instantiate and initialize the SOTA network\n    sota_net = SaganSOTANetForProbing(alpha=0.33, steps=4)\n    dummy_obs = jnp.zeros((1, 8, 8, 8))\n    sota_params = sota_net.init(key, dummy_obs, None, None)\n    print(\"SOTA network initialized.\")\n\n    # 2. Generate synthetic dataset\n    num_samples = 512\n    base_obs = jnp.zeros((8, 8, 8))\n    base_obs = base_obs.at[:, :, 1].set(1) # Walls\n    \n    obs_list = []\n    labels = []\n    key, data_key = jax.random.split(key)\n    \n    for i in range(num_samples):\n        agent_pos = jax.random.randint(data_key, (2,), 0, 8)\n        data_key, _ = jax.random.split(data_key)\n        obs = base_obs.at[agent_pos[0], agent_pos[1], 3].set(1) # Place agent\n        obs_list.append(obs)\n        labels.append(agent_pos[0] * 8 + agent_pos[1]) # Flattened position as label\n    \n    dataset_obs = jnp.stack(obs_list)\n    dataset_labels = jnp.array(labels)\n    print(f\"Generated dataset with {num_samples} samples.\")\n\n    # 3. Extract frozen features\n    @jax.jit\n    def get_features(params, obs):\n        features = sota_net.apply(params, obs, None, None)\n        return features.reshape(obs.shape[0], -1) # Flatten spatial features\n\n    frozen_features = get_features(sota_params, dataset_obs)\n    print(f\"Extracted frozen features of shape: {frozen_features.shape}\")\n\n    # 4. Train linear classifier\n    probe_model = nn.Dense(features=64) # 64 possible positions\n    probe_params = probe_model.init(key, frozen_features)\n    optimizer = optax.adam(1e-3)\n    opt_state = optimizer.init(probe_params)\n\n    @jax.jit\n    def train_step(params, opt_state, features, labels):\n        def loss_fn(p):\n            logits = probe_model.apply(p, features)\n            one_hot_labels = jax.nn.one_hot(labels, num_classes=64)\n            loss = optax.softmax_cross_entropy(logits, one_hot_labels).mean()\n            return loss, logits\n        \n        (loss, logits), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)\n        updates, opt_state = optimizer.update(grads, opt_state)\n        params = optax.apply_updates(params, updates)\n        accuracy = (jnp.argmax(logits, axis=-1) == labels).mean()\n        return params, opt_state, loss, accuracy\n\n    print(\"Training linear probe for 200 steps...\")\n    for step in range(200):\n        probe_params, opt_state, loss, acc = train_step(probe_params, opt_state, frozen_features, dataset_labels)\n        if (step + 1) % 50 == 0:\n            print(f\"Step {step+1:03d} | Loss: {loss:.4f}, Accuracy: {acc:.4f}\")\n\n    # 5. Final Evaluation\n    final_accuracy = acc\n    print(f\"Final Probe Accuracy: {final_accuracy:.4f}\")\n    return f\"Linear probe complete. Final accuracy for decoding agent position: {final_accuracy*100:.2f}%\"\n",
+    "submitted_timestamp": 1758387818.5305831,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nStarting linear probe experiment...\nSOTA network initialized.\nGenerated dataset with 512 samples.\nExtracted frozen features of shape: (512, 4096)\nTraining linear probe for 200 steps...\nStep 050 | Loss: 0.6716, Accuracy: 0.9980\nStep 100 | Loss: 0.1265, Accuracy: 1.0000\nStep 150 | Loss: 0.0583, Accuracy: 1.0000\nStep 200 | Loss: 0.0359, Accuracy: 1.0000\nFinal Probe Accuracy: 1.0000\nTest completed. Result: Linear probe complete. Final accuracy for decoding agent position: 100.00%\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758387829.4411013,
+      "evaluation_datetime": "2025-09-21T01:03:49.441105"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758387829.4808447,
+    "version_notified": "original",
+    "message": "Your research submission 'Mechanistic Probe: Replicating Krono IV's Linear Probe (Exp. 35)' (ID: 1037) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nStarting linear probe experiment...\nSOTA network initialized.\nGenerated dataset with 512 samples.\nExtracted frozen features of shape: (512, 4096)\nTraining linear probe for 200 steps...\nStep 050 | Loss: 0.6716, Accuracy: 0.9980\nStep 100 | Loss: 0.1265, Accuracy: 1.0000\nStep 150 | Loss: 0.0583, Accuracy: 1.0000\nStep 200 | Loss: 0.0359, Accuracy: 1.0000\nFinal Probe Accuracy: 1.0000\nTest completed. Result: Linear probe complete. Final accuracy for decoding agent position: 100.00%\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

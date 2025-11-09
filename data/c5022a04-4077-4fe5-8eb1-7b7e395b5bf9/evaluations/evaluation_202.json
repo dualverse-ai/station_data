@@ -1,0 +1,46 @@
+{
+  "id": "202",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "ASN v1.2 with Boundary Force Proxies",
+  "tags": [
+    "active-set newton",
+    "asn",
+    "boundary forces",
+    "bug fix",
+    "second-order"
+  ],
+  "abstract": "This submission corrects a fundamental flaw in the previous ASN implementation (ID 200). The original model failed because it only considered inter-circle forces and ignored interactions with the container walls, leading to poor update steps. This version, ASN v1.2, introduces 'boundary force proxies' that add explicit repulsive forces from the walls to the gradient calculation. This makes the local quadratic model more complete and physically accurate, aiming to fix the stagnation issue and produce a competitive score.",
+  "submitted_tick": 88,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport time\n\ndef construct_packing() -> tuple:\n    n = 32\n    I_triu, J_triu = np.triu_indices(n, 1)\n\n    def solve_lp(centers: np.ndarray):\n        c_obj = -np.ones(n)\n        D = np.linalg.norm(centers[I_triu] - centers[J_triu], axis=1)\n        m_pairs = len(I_triu)\n        A_pairs = np.zeros((m_pairs, n)); A_pairs[np.arange(m_pairs), I_triu] = 1; A_pairs[np.arange(m_pairs), J_triu] = 1; b_pairs = D\n        A_bounds = np.zeros((n * 4, n)); b_bounds = np.zeros(n * 4)\n        for i in range(n):\n            A_bounds[i*4+0, i] = 1; b_bounds[i*4+0] = centers[i, 0]\n            A_bounds[i*4+1, i] = 1; b_bounds[i*4+1] = 1 - centers[i, 0]\n            A_bounds[i*4+2, i] = 1; b_bounds[i*4+2] = centers[i, 1]\n            A_bounds[i*4+3, i] = 1; b_bounds[i*4+3] = 1 - centers[i, 1]\n        A_ub = np.vstack([A_pairs, A_bounds]); b_ub = np.concatenate([b_pairs, b_bounds])\n        res = linprog(c_obj, A_ub=A_ub, b_ub=b_ub, bounds=(0, None), method='highs')\n        if not res.success or res.x is None: return None, -1.0, None\n        duals = res.ineqlin.marginals[:m_pairs] if hasattr(res, 'ineqlin') and res.ineqlin.marginals is not None else np.zeros(m_pairs)\n        return res.x, -res.fun, np.maximum(0, duals)\n\n    def get_boundary_forces(centers, radii):\n        boundary_grad = np.zeros_like(centers)\n        k_boundary = 10.0 # Heuristic force constant\n        for i in range(n):\n            # Using simple overlap instead of slack for simplicity\n            if centers[i, 0] - radii[i] < 0: boundary_grad[i, 0] += k_boundary * (radii[i] - centers[i, 0])\n            if centers[i, 0] + radii[i] > 1: boundary_grad[i, 0] -= k_boundary * (centers[i, 0] + radii[i] - 1.0)\n            if centers[i, 1] - radii[i] < 0: boundary_grad[i, 1] += k_boundary * (radii[i] - centers[i, 1])\n            if centers[i, 1] + radii[i] > 1: boundary_grad[i, 1] -= k_boundary * (centers[i, 1] + radii[i] - 1.0)\n        return boundary_grad\n\n    MAIN_LOOP_STEPS = 50 # Increase steps\n    TIME_BUDGET_SECONDS = 1000\n    LINE_SEARCH_ALPHAS = [1.0, 0.7, 0.4, 0.2]\n    DAMPING_MU = 1e-3\n    DUAL_SMOOTHING_BETA = 0.6\n    \n    centers = np.array(np.meshgrid(np.linspace(0.1, 0.9, 8), np.linspace(0.1, 0.9, 4))).T.reshape(-1, 2)\n    radii, current_score, initial_duals = solve_lp(centers)\n    if initial_duals is None: return centers, np.full(n, 0.01)\n    smoothed_duals = initial_duals\n    start_time = time.time()\n\n    for iter_num in range(MAIN_LOOP_STEPS):\n        if time.time() - start_time > TIME_BUDGET_SECONDS: break\n\n        grad = np.zeros_like(centers)\n        hessian = np.zeros((n, 2, 2))\n        active_mask = smoothed_duals > 1e-9\n        V = centers[I_triu[active_mask]] - centers[J_triu[active_mask]]\n        d = np.linalg.norm(V, axis=1, keepdims=True); d = np.maximum(d, 1e-9)\n        U = V / d\n        \n        active_duals = smoothed_duals[active_mask]\n        np.add.at(grad, I_triu[active_mask], active_duals[:, np.newaxis] * U)\n        np.add.at(grad, J_triu[active_mask], -active_duals[:, np.newaxis] * U)\n        \n        # *** CRITICAL FIX: Add boundary forces to the gradient ***\n        boundary_grad = get_boundary_forces(centers, radii)\n        grad += boundary_grad\n        \n        I2 = np.eye(2)\n        uuT = U[:, :, np.newaxis] * U[:, np.newaxis, :]\n        M_orth = (active_duals[:, np.newaxis, np.newaxis] / d[:,:,np.newaxis]) * (I2 - uuT)\n        np.add.at(hessian, I_triu[active_mask], M_orth)\n        np.add.at(hessian, J_triu[active_mask], M_orth)\n        hessian += DAMPING_MU * I2[np.newaxis, :, :]\n        \n        dC = np.zeros_like(centers)\n        try:\n            for i in range(n): dC[i] = np.linalg.solve(hessian[i], grad[i])\n        except np.linalg.LinAlgError:\n            dC = grad\n\n        move_accepted = False\n        for alpha in LINE_SEARCH_ALPHAS:\n            C_proposed = np.clip(centers + alpha * dC, 0.01, 0.99)\n            radii_prop, score_prop, duals_prop = solve_lp(C_proposed)\n            if score_prop > current_score + 1e-9:\n                centers, radii, current_score = C_proposed, radii_prop, score_prop\n                smoothed_duals = DUAL_SMOOTHING_BETA * smoothed_duals + (1 - DUAL_SMOOTHING_BETA) * duals_prop\n                move_accepted = True\n                break\n        if not move_accepted: break\n\n    final_radii, _, _ = solve_lp(centers)\n    if final_radii is None: final_radii = np.full(n, 0.01)\n    return centers, final_radii * 0.99999\n",
+    "submitted_timestamp": 1760802730.5808628,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.8285531428571429,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.828553",
+      "evaluation_timestamp": 1760802733.074765,
+      "evaluation_datetime": "2025-10-18T23:52:13.074767"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.8285531428571429,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760802733.0969913,
+    "version_notified": "original",
+    "message": "Your research submission 'ASN v1.2 with Boundary Force Proxies' (ID: 202) has been evaluated.\n\n**Score:** 1.8285531428571429\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.828553\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

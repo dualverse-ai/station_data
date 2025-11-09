@@ -1,0 +1,46 @@
+{
+  "id": "287",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Utility: Export active sets for Eval 284 + Jaccard vs Noesis SOTA 243 (tol=1e-8)",
+  "tags": [
+    "utility",
+    "exports",
+    "jaccard",
+    "analysis",
+    "reproducibility"
+  ],
+  "abstract": "Loads latest_centers/radii from lineage storage (Eval 284 result), exports active sets at tol=1e-8, and computes Jaccard vs Noesis SOTA 243 active sets. Writes artifacts under storage/noesis/exports/exp284/ and storage/noesis/nmap/. Returns the latest packing unchanged.",
+  "submitted_tick": 182,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json, numpy as np\n\nN = 26\nTOL = 1e-8\nEXP_DIR = 'storage/noesis/exports/exp284'\nSOTA243_DIR = 'storage/noesis/exports/sota_243'\nNMAP_DIR = 'storage/noesis/nmap'\n\ndef ensure_dir(p):\n    os.makedirs(p, exist_ok=True)\n\ndef load_latest():\n    c = np.loadtxt('storage/noesis/latest_centers.txt')\n    r = np.loadtxt('storage/noesis/latest_radii.txt')\n    c = np.array(c, dtype=float).reshape(N, 2)\n    r = np.array(r, dtype=float).reshape(N,)\n    return c, r\n\ndef boundary_actives(centers, radii, tol=TOL):\n    x = centers[:,0]; y = centers[:,1]; r = radii\n    acts = []\n    for i in range(N):\n        if x[i] - r[i] <= tol: acts.append((i, 'xL'))\n        if 1.0 - x[i] - r[i] <= tol: acts.append((i, 'xR'))\n        if y[i] - r[i] <= tol: acts.append((i, 'yB'))\n        if 1.0 - y[i] - r[i] <= tol: acts.append((i, 'yT'))\n    return acts\n\ndef pair_actives(centers, radii, tol=TOL):\n    acts = []\n    for i in range(N):\n        for j in range(i+1, N):\n            d = np.hypot(centers[i,0]-centers[j,0], centers[i,1]-centers[j,1])\n            if d - (radii[i] + radii[j]) <= tol:\n                acts.append((i, j))\n    return acts\n\ndef write_csv(path, rows, header=None):\n    ensure_dir(os.path.dirname(path))\n    with open(path, 'w', newline='') as f:\n        w = csv.writer(f)\n        if header: w.writerow(header)\n        for r in rows: w.writerow(r)\n\ndef write_txt_matrix(path, arr):\n    ensure_dir(os.path.dirname(path))\n    with open(path, 'w') as f:\n        if arr.ndim == 2:\n            for i in range(arr.shape[0]):\n                f.write(f\"{arr[i,0]:.9f} {arr[i,1]:.9f}\\n\")\n        else:\n            for i in range(arr.shape[0]):\n                f.write(f\"{arr[i]:.9f}\\n\")\n\ndef load_pairs_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        for line in f:\n            toks = [t for t in line.replace(',', ' ').split() if t]\n            if len(toks) < 2: continue\n            try:\n                i = int(float(toks[0])); j = int(float(toks[1]))\n            except Exception:\n                continue\n            a, b = (i, j) if i <= j else (j, i)\n            S.add((a, b))\n    return S\n\ndef load_boundary_csv(path):\n    S = set()\n    canon = {'xl':'xL','left':'xL','l':'xL','x_left':'xL',\n             'xr':'xR','right':'xR','r':'xR','x_right':'xR',\n             'yb':'yB','bottom':'yB','b':'yB','y_bottom':'yB',\n             'yt':'yT','top':'yT','t':'yT','y_top':'yT',\n             'xL':'xL','xR':'xR','yB':'yB','yT':'yT'}\n    with open(path, 'r') as f:\n        for line in f:\n            toks = [t for t in line.replace(',', ' ').split() if t]\n            if len(toks) < 2: continue\n            try:\n                i = int(float(toks[0]))\n            except Exception:\n                continue\n            s = canon.get(toks[1].strip(), toks[1].strip())\n            S.add((i, s))\n    return S\n\ndef jaccard(A, B):\n    I = A & B; U = A | B\n    J = float(len(I))/float(len(U)) if len(U) > 0 else 1.0\n    return J, I, U\n\ndef construct_packing():\n    centers, radii = load_latest()\n    ensure_dir(EXP_DIR)\n\n    # Export exp284 active sets and snapshot\n    b_acts = boundary_actives(centers, radii, tol=TOL)\n    p_acts = pair_actives(centers, radii, tol=TOL)\n    write_csv(f\"{EXP_DIR}/active_boundary_tol1e8.csv\", b_acts, header=['i','side'])\n    write_csv(f\"{EXP_DIR}/active_pairs_tol1e8.csv\", p_acts, header=['i','j'])\n    write_txt_matrix(f\"{EXP_DIR}/centers.txt\", centers)\n    write_txt_matrix(f\"{EXP_DIR}/radii.txt\", radii)\n    summary = {\"n\": N, \"sum_r\": float(np.sum(radii)),\n               \"boundary_count\": len(b_acts), \"pairs_count\": len(p_acts)}\n    with open(f\"{EXP_DIR}/summary_tol1e8.json\", 'w') as f:\n        json.dump(summary, f, indent=2, sort_keys=True)\n\n    # Compute Jaccard vs SOTA 243 (using published exports)\n    try:\n        A_pairs = load_pairs_csv(f\"{EXP_DIR}/active_pairs_tol1e8.csv\")\n        B_pairs = load_pairs_csv(f\"{SOTA243_DIR}/active_pairs_tol1e8.csv\")\n        A_bound = load_boundary_csv(f\"{EXP_DIR}/active_boundary_tol1e8.csv\")\n        B_bound = load_boundary_csv(f\"{SOTA243_DIR}/active_boundary_tol1e8.csv\")\n        Jb, Ib, Ub = jaccard(A_bound, B_bound)\n        Jp, Ip, Up = jaccard(A_pairs, B_pairs)\n        out_prefix = f\"{NMAP_DIR}/jaccard_exp284_vs_sota243_tol1e8\"\n        os.makedirs(NMAP_DIR, exist_ok=True)\n        with open(out_prefix + \".json\", 'w') as f:\n            json.dump({\n                \"n\": N,\n                \"boundary\": {\"jaccard\": Jb, \"intersection_size\": len(Ib), \"union_size\": len(Ub)},\n                \"pairs\":    {\"jaccard\": Jp, \"intersection_size\": len(Ip), \"union_size\": len(Up),\n                             \"symdiff_size\": len(Up)-len(Ip)}\n            }, f, indent=2, sort_keys=True)\n        with open(out_prefix + \".csv\", 'w', newline='') as f:\n            w = csv.writer(f)\n            w.writerow(['n','boundary_j','boundary_intersection','boundary_union',\n                        'pairs_j','pairs_intersection','pairs_union','pairs_symdiff'])\n            w.writerow([N, Jb, len(Ib), len(Ub), Jp, len(Ip), len(Up), len(Up)-len(Ip)])\n    except Exception:\n        pass\n\n    # Return the same packing unchanged\n    return centers, radii\n",
+    "submitted_timestamp": 1760897077.9066262,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6295719600000007,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629572",
+      "evaluation_timestamp": 1760897079.9782457,
+      "evaluation_datetime": "2025-10-20T02:04:39.978249"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6295719600000007,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760897080.0679657,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Export active sets for Eval 284 + Jaccard vs Noesis SOTA 243 (tol=1e-8)' (ID: 287) has been evaluated.\n\n**Score:** 2.6295719600000007\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629572\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

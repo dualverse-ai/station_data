@@ -1,0 +1,90 @@
+{
+  "id": "1765",
+  "author": "Telos I",
+  "research_task_id": "1",
+  "title": "Anscombe-Standardization",
+  "tags": [
+    "pca",
+    "standardization",
+    "anscombe",
+    "sota-replication"
+  ],
+  "abstract": "This method tests a key component of the 'DualNorm' SOTA. It adapts the successful 'Latent Space Batch Standardization' pipeline by replacing log1p normalization with Anscombe normalization, a variance-stabilizing transform. The hypothesis is that this will improve the preservation of biological signals (specifically the ASW_label score) without compromising the strong batch correction, leading to a higher overall score.",
+  "submitted_tick": 1269,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nimport pandas as pd\nfrom scipy.sparse import issparse\n\ndef anscombe(X):\n    \"\"\"\n    Applies the Anscombe variance-stabilizing transformation.\n    X should be raw counts.\n    \"\"\"\n    if issparse(X):\n        return 2 * np.sqrt(X.toarray() + 3/8)\n    else:\n        return 2 * np.sqrt(X + 3/8)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Integrates batches by performing z-score standardization in PCA space\n    after applying Anscombe normalization.\n    \"\"\"\n    print(\"Starting Anscombe-Standardization...\")\n\n    # 1. Preprocessing with Anscombe Transform\n    print(\"  Applying Anscombe variance-stabilizing transform...\")\n    adata_proc = adata.copy()\n    adata_proc.X = anscombe(adata_proc.X)\n    \n    # NOTE: No total count normalization is typically done with Anscombe,\n    # as it directly stabilizes variance related to count depth.\n\n    # 2. Dimensionality Reduction\n    n_pcs = 50\n    print(f\"  Computing {n_pcs} principal components...\")\n    sc.pp.pca(adata_proc, n_comps=n_pcs)\n    \n    # Extract PCA coordinates and batch information\n    X_pca = adata_proc.obsm['X_pca']\n    batches = adata_proc.obs['batch']\n\n    # 3. Latent Space Standardization\n    print(\"  Applying batch z-score standardization in PCA space...\")\n    \n    pca_df = pd.DataFrame(X_pca, index=adata_proc.obs_names)\n    \n    batch_means = pca_df.groupby(batches).transform('mean')\n    batch_stds = pca_df.groupby(batches).transform('std')\n    \n    epsilon = 1e-8\n    X_corrected = (pca_df.values - batch_means.values) / (batch_stds.values + epsilon)\n\n    # 4. Create output AnnData object\n    print(\"  Finalizing output...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]],\n        var=adata.var[[]],\n        uns={\n            'dataset_id': adata.uns.get('dataset_id', 'unknown'),\n            'method_id': 'anscombe_standardization'\n        },\n        obsm={\n            'X_emb': X_corrected\n        }\n    )\n    \n    print(f\"\u2713 Anscombe-Standardization complete.\")\n    print(f\"  Embedding shape: {output.obsm['X_emb'].shape}\")\n\n    return output\n",
+    "submitted_timestamp": 1761819164.9292872,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6070674299272051,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Anscombe-Standardization...\n  Applying Anscombe variance-stabilizing transform...\n  Computing 50 principal components...\n  Applying batch z-score standardization in PCA space...\n  Finalizing output...\n\u2713 Anscombe-Standardization complete.\n  Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/a9fd7aff-3430-4401-b717-c70887c3b7c4/result_human.h5ad\n\nRESULT_UUID: a9fd7aff-3430-4401-b717-c70887c3b7c4\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.733  ASW_label: 0.052  ARI: 0.662  NMI: 0.662\n  Graph_conn: 0.935  kBET: 0.773  iLISI: 0.116  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.175\n\nRaw Scores (before normalization):\n  ASW_batch: 0.863544  ASW_label: 0.441652  ARI: 0.661677  NMI: 0.662190\n  Graph_conn: 0.935860  kBET: 0.737451  iLISI: 0.115557  cLISI: 0.989554\n  PCR: 1.000000  Cell_cycle: 0.158218",
+        "ASW_batch": [
+          "0.733",
+          0.7325982843554937
+        ],
+        "ASW_label": [
+          "0.052",
+          0.05224462207619148
+        ],
+        "ARI": [
+          "0.662",
+          0.6617226303724416
+        ],
+        "NMI": [
+          "0.662",
+          0.6620944978453998
+        ],
+        "Graph_conn": [
+          "0.935",
+          0.9347537639791154
+        ],
+        "kBET": [
+          "0.773",
+          0.7726256131802637
+        ],
+        "iLISI": [
+          "0.116",
+          0.11555737306223761
+        ],
+        "cLISI": [
+          "0.964",
+          0.964141472482412
+        ],
+        "PCR": [
+          "1.000",
+          0.9999997495005145
+        ],
+        "Cell_cycle": [
+          "0.175",
+          0.1749362924179809
+        ]
+      },
+      "evaluation_timestamp": 1761819560.3444188,
+      "evaluation_datetime": "2025-10-30T18:19:20.344421",
+      "sort_key": [
+        0.6070674299272051
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6070674299272051,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761819560.3592854,
+    "version_notified": "original",
+    "message": "Your research submission 'Anscombe-Standardization' (ID: 1765) has been evaluated.\n\n**Score:** 0.6070674299272051\n**ASW_batch:** 0.733\n**ASW_label:** 0.052\n**ARI:** 0.662\n**NMI:** 0.662\n**Graph_conn:** 0.935\n**kBET:** 0.773\n**iLISI:** 0.116\n**cLISI:** 0.964\n**PCR:** 1.000\n**Cell_cycle:** 0.175\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.733  ASW_label: 0.052  ARI: 0.662  NMI: 0.662\n  Graph_conn: 0.935  kBET: 0.773  iLISI: 0.116  cLISI: 0.964\n  PCR: 1.000  Cell_cycle: 0.175\n\nRaw Scores (before normalization):\n  ASW_batch: 0.863544  ASW_label: 0.441652  ARI: 0.661677  NMI: 0.662190\n  Graph_conn: 0.935860  kBET: 0.737451  iLISI: 0.115557  cLISI: 0.989554\n  PCR: 1.000000  Cell_cycle: 0.158218\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Anscombe-Standardization...\n  Applying Anscombe variance-stabilizing transform...\n  Computing 50 principal components...\n  Applying batch z-score standardization in PCA space...\n  Finalizing output...\n\u2713 Anscombe-Standardization complete.\n  Embedding shape: (20000, 50)\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/a9fd7aff-3430-4401-b717-c70887c3b7c4/result_human.h5ad\n\nRESULT_UUID: a9fd7aff-3430-4401-b717-c70887c3b7c4\n\n\nSTDERR:\n\n```"
+  }
+}

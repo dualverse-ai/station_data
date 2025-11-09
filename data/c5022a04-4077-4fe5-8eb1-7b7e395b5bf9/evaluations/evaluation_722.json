@@ -1,0 +1,46 @@
+{
+  "id": "722",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "SOTA Replication v1.2 (Corrected SCP-LP): MM-LP Adaptive Search",
+  "tags": [
+    "sota-replication",
+    "mm-lp",
+    "adaptive-search",
+    "bugfix",
+    "praxis-v"
+  ],
+  "abstract": "This submission re-runs the from-scratch SOTA replication after a critical bugfix in the `mmlp_utils.py` script. A direct code comparison revealed my SCP-LP formulation was using a theoretically correct but practically flawed simplification. The utility script has been updated to use the exact, un-simplified constraint formulation from the proven SOTA implementation. This experiment is the definitive test of the corrected from-scratch code.",
+  "submitted_tick": 448,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nfrom multiprocessing import Pool, cpu_count\n\nsys.path.append('storage/praxis')\nfrom mmlp_utils import mmlp_center_update\nfrom asn_utils import solve_radii_lp_with_duals # For exact scoring\n\nN_CIRCLES = 32\n\ndef get_fps_seed(seed_val):\n    \"\"\"Generates one Farthest-Point Sampling seed.\"\"\"\n    np_rng = np.random.default_rng(seed_val)\n    points = np.zeros((N_CIRCLES, 2))\n    points[0] = np_rng.uniform(0.05, 0.95, 2)\n    \n    for i in range(1, N_CIRCLES):\n        num_candidates = 2000\n        candidates = np_rng.uniform(0.05, 0.95, (num_candidates, 2))\n        dist_to_existing = np.sum((candidates[:, np.newaxis, :] - points[np.newaxis, :i, :])**2, axis=2)\n        min_dist_to_existing = np.min(dist_to_existing, axis=1)\n        points[i] = candidates[np.argmax(min_dist_to_existing)]\n    return points\n\ndef run_mmlp_optimization(args):\n    \"\"\"Worker function to run an MM-LP optimization from a given seed.\"\"\"\n    initial_centers, num_iters, initial_delta = args\n    \n    centers_best = initial_centers.copy()\n    \n    lp_res = solve_radii_lp_with_duals(centers_best)\n    if lp_res is None: return (-1.0, None)\n    score_best = np.sum(lp_res['radii'])\n    radii_best = lp_res['radii']\n\n    centers_anchor = centers_best.copy()\n    radii_anchor = radii_best.copy()\n    delta = initial_delta\n\n    for _ in range(num_iters):\n        update_res = mmlp_center_update(centers_anchor, radii_anchor, delta)\n        \n        if update_res is None:\n            delta *= 0.8\n            continue\n\n        candidate_centers = np.clip(update_res['centers'], 1e-6, 1.0 - 1e-6)\n        \n        exact_lp_res = solve_radii_lp_with_duals(candidate_centers)\n        if exact_lp_res is None:\n            delta *= 0.8\n            continue\n            \n        score_candidate = np.sum(exact_lp_res['radii'])\n\n        if score_candidate > score_best:\n            score_best = score_candidate\n            centers_best = candidate_centers\n            radii_best = exact_lp_res['radii']\n            centers_anchor = centers_best.copy()\n            radii_anchor = radii_best.copy()\n            delta = min(0.05, delta * 1.2)\n        else:\n            delta *= 0.8\n\n    return (score_best, centers_best)\n\ndef construct_packing() -> tuple:\n    N_PROSPECT = 1024\n    N_ELITE = 32\n    PROSPECT_ITER = 20\n    REFINE_ITER = 100\n    DELTA0 = 0.015\n\n    prospect_seeds = [get_fps_seed(i) for i in range(N_PROSPECT)]\n    prospect_args = [(seed, PROSPECT_ITER, DELTA0) for seed in prospect_seeds]\n    \n    with Pool(cpu_count()) as pool:\n        prospect_results = pool.map(run_mmlp_optimization, prospect_args)\n\n    prospect_results.sort(key=lambda x: x[0], reverse=True)\n    elite_centers = [res[1] for res in prospect_results[:N_ELITE] if res[1] is not None]\n\n    if not elite_centers:\n        return get_fps_seed(0), np.full((N_CIRCLES,), 0.01)\n\n    refine_args = [(centers, REFINE_ITER, DELTA0) for centers in elite_centers]\n    \n    with Pool(cpu_count()) as pool:\n        refine_results = pool.map(run_mmlp_optimization, refine_args)\n    \n    best_score = -1.0\n    best_centers = None\n    for score, centers in refine_results:\n        if score > best_score:\n            best_score = score\n            best_centers = centers\n\n    if best_centers is None:\n        return get_fps_seed(0), np.full((N_CIRCLES,), 0.01)\n\n    final_lp_res = solve_radii_lp_with_duals(best_centers)\n    final_radii = final_lp_res['radii']\n\n    return best_centers, final_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760915662.8164475,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circle 1 at (0.8884332652138264, 0.8884332832918794) with radius 0.1115667346746069 is outside the unit square",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circle 1 at (0.8884332652138264, 0.8884332832918794) with radius 0.1115667346746069 is outside the unit square",
+      "evaluation_timestamp": 1760915717.1923172,
+      "evaluation_datetime": "2025-10-20T07:15:17.192319"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760915717.2182968,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Replication v1.2 (Corrected SCP-LP): MM-LP Adaptive Search' (ID: 722) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circle 1 at (0.8884332652138264, 0.8884332832918794) with radius 0.1115667346746069 is outside the unit square\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

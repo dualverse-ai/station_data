@@ -1,0 +1,47 @@
+{
+  "id": "996",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Probe (test-only): PG R_vp at init \u2014 \u03b1 \u2208 {0.20,0.33}, head=48 (PG recipe)",
+  "tags": [
+    "probe",
+    "policy gradient",
+    "gradients",
+    "normalization",
+    "convlstm",
+    "attention"
+  ],
+  "abstract": "Compute initial trunk gradient ratio R_vp = ||\u2207_trunk L_value|| / ||\u2207_trunk L_policy|| for PG with RIN \u03b1 \u2208 {0.20,0.33} and head_hidden=48 (PG SOTA setting). Reports norms and R_vp to STDOUT.",
+  "submitted_tick": 573,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax, jax.numpy as jnp\nfrom typing import Optional, Dict\nimport flax.linen as nn\nfrom flax import traverse_util\n\nclass BottleneckDilatedBlock(nn.Module):\n    features: int; bottleneck_ratio: float = 0.28; dilation: int = 6\n    @nn.compact\n    def __call__(self, x):\n        mid = max(1, int(self.features * self.bottleneck_ratio))\n        y = nn.Conv(mid,(1,1),padding='SAME')(x); y = nn.relu(y)\n        y = nn.Conv(mid,(3,3),padding='SAME',kernel_dilation=(self.dilation,self.dilation))(y); y = nn.relu(y)\n        y = nn.Conv(self.features,(1,1),padding='SAME')(y)\n        return nn.relu(x + y)\n\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n        h, c = carry\n        gates = nn.Conv(4*self.features,(3,3),padding='SAME')(jnp.concatenate([x,h],axis=-1))\n        gates = nn.LayerNorm(epsilon=1e-5)(gates)\n        i,f,g,o = jnp.split(gates, 4, axis=-1)\n        i = nn.sigmoid(i); f = nn.sigmoid(f); o = nn.sigmoid(o); g = jnp.tanh(g)\n        c = f*c + i*g\n        h = o*jnp.tanh(c)\n        return (h,c), h\n\nclass NetRIN_AttnGap(nn.Module):\n    rin_alpha: float = 0.33\n    cnn_features_1: int = 32; cnn_features_2: int = 64\n    convlstm_features: int = 64; dilation: int = 6; bottleneck_ratio: float = 0.28\n    head_hidden: int = 48; steps: int = 4\n    @nn.compact\n    def __call__(self, x: jnp.ndarray, done: jnp.ndarray):\n        B = x.shape[0]\n        x = nn.Conv(self.cnn_features_1,(3,3),padding='SAME')(x); x = nn.relu(x)\n        x = BottleneckDilatedBlock(self.cnn_features_1, self.bottleneck_ratio, self.dilation)(x)\n        x = nn.Conv(self.cnn_features_2,(3,3),padding='SAME')(x); x = nn.relu(x)\n        x = BottleneckDilatedBlock(self.cnn_features_2, self.bottleneck_ratio, self.dilation)(x)\n        x_ln = nn.LayerNorm(epsilon=1e-5)(x)\n        x = x + self.rin_alpha * (x_ln - x)\n        zeros = lambda: jnp.zeros((B,8,8,self.convlstm_features), dtype=x.dtype)\n        h, c = zeros(), zeros()\n        for _ in range(self.steps):\n            (h,c), _ = ConvLSTMCellLN(self.convlstm_features)((h,c), x)\n        B_,H,W,C = h.shape\n        attn_logits = nn.Conv(1,(1,1),padding='SAME')(h).reshape((B_,H*W))\n        attn_w = nn.softmax(attn_logits, axis=-1).reshape((B_,H*W,1))\n        tokens = h.reshape((B_,H*W,C))\n        attn_vec = (attn_w * tokens).sum(axis=1)\n        gap_vec = tokens.mean(axis=1)\n        z = jnp.concatenate([attn_vec, gap_vec], axis=-1)\n        shared = nn.Dense(256)(z); shared = nn.relu(shared)\n        ph = nn.Dense(self.head_hidden)(shared); ph = nn.relu(ph)\n        policy = nn.Dense(4)(ph)\n        vh = nn.Dense(self.head_hidden)(shared); vh = nn.relu(vh)\n        value = nn.Dense(1)(vh).squeeze(-1)\n        return policy, value\n\ndef _flatten(tree): return traverse_util.flatten_dict(tree, keep_empty_nodes=True)\ndef _unflatten(fd): return traverse_util.unflatten_dict(fd)\ndef _mask_trunk(params):\n    flat = _flatten(params)\n    mask = {}\n    for k in flat.keys():\n        path = \"/\".join(k)\n        # Treat any Dense layers as heads; everything else = trunk\n        mask[k] = (\"Dense\" not in path)\n    return _unflatten(mask)\n\ndef _masked_norm(grads, mask):\n    fg, fm = _flatten(grads), _flatten(mask)\n    sq = 0.0\n    for k,g in fg.items():\n        if fm.get(k, False):\n            sq = sq + jnp.sum(jnp.square(g))\n    return float(jnp.sqrt(sq + 1e-12))\n\ndef test():\n    key = jax.random.PRNGKey(0)\n    B = 16\n    obs = jax.random.normal(key, (B,8,8,8))\n    done = jnp.zeros((B,), dtype=jnp.bool_)\n    key, ka, kr = jax.random.split(key, 3)\n    advantages = jax.random.normal(ka, (B,))\n    actions = jax.random.randint(kr, (B,), 0, 4)\n    returns_target = jnp.zeros((B,))  # baseline target for value MSE at init\n\n    def pg_policy_loss(params, net):\n        logits, _ = net.apply(params, obs, done)\n        logp = jax.nn.log_softmax(logits, axis=-1)[jnp.arange(B), actions]\n        return -jnp.mean(jax.lax.stop_gradient(advantages) * logp)\n\n    def pg_value_loss(params, net):\n        _, v = net.apply(params, obs, done)\n        return 0.5 * jnp.mean((v - jax.lax.stop_gradient(returns_target))**2)\n\n    results = []\n    for alpha in [0.20, 0.33]:\n        net = NetRIN_AttnGap(rin_alpha=alpha, head_hidden=48)\n        params = net.init(key, obs, done)\n        mask = _mask_trunk(params)\n        g_pi = jax.grad(lambda p: pg_policy_loss(p, net))(params)\n        g_v  = jax.grad(lambda p: pg_value_loss(p, net))(params)\n        n_pi = _masked_norm(g_pi, mask)\n        n_v  = _masked_norm(g_v, mask)\n        r_vp = n_v / (n_pi + 1e-12)\n        results.append({\"alpha\": alpha, \"norm_trunk_policy\": n_pi, \"norm_trunk_value\": n_v, \"R_vp\": r_vp})\n\n    print(\"PG R_vp at init (head=48) over alpha:\")\n    for r in results:\n        print(f\"alpha={r['alpha']:.2f} | ||g_pi||={r['norm_trunk_policy']:.4f}, ||g_v||={r['norm_trunk_value']:.4f}, R_vp={r['R_vp']:.4f}\")\n    return {\"results\": results}\n",
+    "submitted_timestamp": 1758358301.5870414,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nPG R_vp at init (head=48) over alpha:\nalpha=0.20 | ||g_pi||=0.3418, ||g_v||=0.0472, R_vp=0.1382\nalpha=0.33 | ||g_pi||=0.3316, ||g_v||=0.0363, R_vp=0.1096\nTest completed. Result: {'results': [{'alpha': 0.2, 'norm_trunk_policy': 0.34176477789878845, 'norm_trunk_value': 0.047227319329977036, 'R_vp': 0.13818661952293088}, {'alpha': 0.33, 'norm_trunk_policy': 0.3316413164138794, 'norm_trunk_value': 0.0363427996635437, 'R_vp': 0.10958465626785563}]}\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758358320.4853435,
+      "evaluation_datetime": "2025-09-20T16:52:00.485347"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758358320.5601373,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe (test-only): PG R_vp at init \u2014 \u03b1 \u2208 {0.20,0.33}, head=48 (PG recipe)' (ID: 996) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nPG R_vp at init (head=48) over alpha:\nalpha=0.20 | ||g_pi||=0.3418, ||g_v||=0.0472, R_vp=0.1382\nalpha=0.33 | ||g_pi||=0.3316, ||g_v||=0.0363, R_vp=0.1096\nTest completed. Result: {'results': [{'alpha': 0.2, 'norm_trunk_policy': 0.34176477789878845, 'norm_trunk_value': 0.047227319329977036, 'R_vp': 0.13818661952293088}, {'alpha': 0.33, 'norm_trunk_policy': 0.3316413164138794, 'norm_trunk_value': 0.0363427996635437, 'R_vp': 0.10958465626785563}]}\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

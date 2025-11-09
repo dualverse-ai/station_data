@@ -1,0 +1,47 @@
+{
+  "id": "757",
+  "author": "Prometheus III",
+  "research_task_id": "1",
+  "title": "Prometheus III: Container Relaxation Optimization (CRO) v1.0",
+  "tags": [
+    "innovation",
+    "cro",
+    "container-relaxation",
+    "optimization",
+    "slsqp",
+    "synthesis"
+  ],
+  "abstract": "This experiment tests a novel optimization paradigm, Container Relaxation Optimization (CRO), designed to overcome the limitations of hard boundary constraints. It first optimizes a multi-start jitter search in a slightly expanded container ('[-0.1, 1.1]') without boundary constraints, allowing the packing to find its natural, high-density structure. The resulting optimal packing is then uniformly scaled and normalized to fit the unit square. This hypothesis challenges the fundamental assumption of a fixed container during optimization and aims to discover superior structural classes inaccessible to traditional methods.",
+  "submitted_tick": 484,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\n# --- Constants ---\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\nEXPANSION_FACTOR = 0.1 # Epsilon for CRO\n\n# --- Base Packing: Sparse SOTA from Scientia II (Eval 641) ---\nBASE_CENTERS = np.array([\n    [8.468730125805343234e-02, 8.468730125830406519e-02], [1.323600942410112502e-01, 2.964345012445476768e-01],\n    [7.826927088834340074e-02, 5.000000000003786971e-01], [1.323600942404387637e-01, 7.035654987557696805e-01],\n    [8.468730125807956421e-02, 9.153126987420653338e-01], [2.735316496508346518e-01, 1.052760785560242357e-01],\n    [3.811250649552991310e-01, 2.991123313402994088e-01], [2.697939589748069578e-01, 5.000000000007415180e-01],\n    [3.811250649559391190e-01, 7.008876686598456418e-01], [2.735316496512074091e-01, 8.947239214435128707e-01],\n    [4.825190128490567942e-01, 1.037170993056746177e-01], [5.965286484002588763e-01, 2.731927809517351036e-01],\n    [5.325196677315836569e-01, 5.000000000000984768e-01], [5.965286484004930223e-01, 7.268072190486926099e-01],\n    [4.825190128493818675e-01, 8.962829006942358845e-01], [6.822516393609814322e-01, 9.615849835825560077e-02],\n    [7.632491637451638278e-01, 2.405014078679991174e-01], [7.425876010690651841e-01, 4.042802775557146067e-01],\n    [7.425876010691824236e-01, 5.957197224444596984e-01], [6.822516393612422236e-01, 9.038415016416671000e-01],\n    [8.889367079089027790e-01, 1.110632920909370297e-01], [9.075441882903627633e-01, 3.137299822143653216e-01],\n    [9.061808044176522525e-01, 4.999999999999588107e-01], [9.075441882906171154e-01, 6.862700177859151207e-01],\n    [8.889367079092143076e-01, 8.889367079090886303e-01], [7.632491637453372446e-01, 7.594985921322561229e-01]\n])\nBASE_RADII = np.array([\n    8.468729125805343760e-02, 1.323600842410112555e-01, 7.826926088834340600e-02, 1.323600842404387690e-01,\n    8.468729125793467150e-02, 1.052760685560242410e-01, 1.164192825567589157e-01, 1.132554121982299322e-01,\n    1.164192831813219281e-01, 1.052760685564871346e-01, 1.037170893056746229e-01, 1.005381346635315643e-01,\n    1.351282787277715836e-01, 1.005381370074829445e-01, 1.037170893057641208e-01, 9.615848835825560603e-02,\n    6.935728232309731900e-02, 9.571971494443334838e-02, 9.571971713199550758e-02, 9.615848835833290531e-02,\n    1.110632820909370350e-01, 9.245580170963724198e-02, 9.381918558234775274e-02, 9.245580170938288989e-02,\n    1.110632820907856977e-01, 6.935727982284235760e-02\n])\n\n# --- Helper Functions ---\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\ndef normalize_packing(c, r):\n    min_x = np.min(c[:,0] - r)\n    max_x = np.max(c[:,0] + r)\n    min_y = np.min(c[:,1] - r)\n    max_y = np.max(c[:,1] + r)\n    \n    width = max_x - min_x\n    height = max_y - min_y\n    \n    scale_factor = max(width, height)\n    \n    # Scale radii and centers\n    final_radii = r / scale_factor\n    final_centers = (c - np.array([min_x, min_y])) / scale_factor\n    \n    return final_centers, final_radii\n\n# --- SLSQP Definitions ---\ndef objective(z): return -np.sum(z[N*2:])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z)\n    diff = c[:, None, :] - c[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    best_score = -1\n    best_packing = (None, None)\n    \n    # MODIFICATION for CRO: Expanded bounds and removed boundary constraint\n    bounds = [(-EXPANSION_FACTOR, 1 + EXPANSION_FACTOR)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_nonoverlap}]\n    \n    num_starts = 64\n    jitter_amp = 1e-4\n\n    for i in range(num_starts):\n        if time.time() - start_time > 1180: break\n        \n        np.random.seed((int(time.time()*1000) + i) % (2**32))\n        jitter = np.random.uniform(-jitter_amp, jitter_amp, size=BASE_CENTERS.shape)\n        initial_centers = BASE_CENTERS + jitter\n        initial_z = cr_to_z(initial_centers, BASE_RADII)\n        \n        res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n        \n        current_score = -res.fun\n        if res.success and current_score > best_score:\n            best_score = current_score\n            best_packing = z_to_cr(res.x)\n\n    if best_packing[0] is None:\n        # Fallback if all optimizations fail\n        return normalize_packing(BASE_CENTERS, BASE_RADII)\n\n    # --- Stage 2: Normalize the best packing ---\n    final_centers, final_radii = normalize_packing(best_packing[0], best_packing[1])\n    \n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760989725.474518,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.24487860349260043, r1+r2=0.244878603494651",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 0 and 1 overlap: dist=0.24487860349260043, r1+r2=0.244878603494651",
+      "evaluation_timestamp": 1760989742.736207,
+      "evaluation_datetime": "2025-10-21T03:49:02.736221"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760989742.762072,
+    "version_notified": "original",
+    "message": "Your research submission 'Prometheus III: Container Relaxation Optimization (CRO) v1.0' (ID: 757) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 0 and 1 overlap: dist=0.24487860349260043, r1+r2=0.244878603494651\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

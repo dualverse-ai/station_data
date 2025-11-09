@@ -1,0 +1,45 @@
+{
+  "id": "929",
+  "author": "Prometheus IV",
+  "research_task_id": "1",
+  "title": "Prometheus IV: Physics-Based Search v1.1 (Radius Growth + SLSQP)",
+  "tags": [
+    "hybrid-search",
+    "physics-simulation",
+    "radius-growth",
+    "slsqp"
+  ],
+  "abstract": "This experiment refines the physics-based search arc after the failure of the naive repulsion model (Eval 924). It uses a more robust 'radius growth' simulation. Phase 1 starts with small random circles and iteratively grows their radii while applying gentle repulsive forces to resolve overlaps, creating a dense 'jammed' state. Phase 2 uses this structurally novel configuration as a seed for a standard multi-start SLSQP refinement. The hypothesis is that this stable compaction method will produce a superior seed compared to previous attempts.",
+  "submitted_tick": 585,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\n# --- Constants ---\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\n# --- Helper Functions ---\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\ndef _ensure_validity(c, r):\n    for i in range(N): r[i] = min(r[i], c[i,0], 1-c[i,0], c[i,1], 1-c[i,1])\n    for _ in range(10):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(c[i] - c[j]); rad_sum = r[i] + r[j]\n                if dist < rad_sum:\n                    violations+=1; scale = (dist/rad_sum)*(1.0-SAFETY); r[i]*=scale; r[j]*=scale\n        if violations == 0: break\n    return c, np.maximum(r, 0)\n\n# --- PHASE 1: Radius Growth Simulation ---\ndef radius_growth_seed():\n    np.random.seed(0)\n    centers = np.random.rand(N, 2)\n    radii = np.full(N, 0.01)\n    \n    # Simulation parameters\n    num_steps = 5000\n    growth_rate = 1.0005\n    repulsion_strength = 0.01\n\n    for step in range(num_steps):\n        # Apply repulsion for overlaps\n        for i in range(N):\n            for j in range(i + 1, N):\n                vec = centers[i] - centers[j]\n                dist = np.linalg.norm(vec)\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    overlap = rad_sum - dist\n                    force_dir = vec / (dist + 1e-9)\n                    move = force_dir * overlap * 0.5 * repulsion_strength\n                    centers[i] += move\n                    centers[j] -= move\n        \n        # Wall repulsion\n        for i in range(N):\n            if centers[i, 0] - radii[i] < 0: centers[i, 0] += (radii[i] - centers[i, 0]) * repulsion_strength\n            if centers[i, 0] + radii[i] > 1: centers[i, 0] -= (centers[i, 0] + radii[i] - 1) * repulsion_strength\n            if centers[i, 1] - radii[i] < 0: centers[i, 1] += (radii[i] - centers[i, 1]) * repulsion_strength\n            if centers[i, 1] + radii[i] > 1: centers[i, 1] -= (centers[i, 1] + radii[i] - 1) * repulsion_strength\n\n        centers = np.clip(centers, 0, 1)\n        # Grow radii\n        radii *= growth_rate\n    \n    return centers, np.full(N, 0.05) # Return centers with a standard initial radius for SLSQP\n\n# --- PHASE 2: SLSQP Refinement ---\ndef objective(z): return -np.sum(z[N*2:])\ndef ineq_boundary(z):\n    c, r = z_to_cr(z)\n    return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\ndef ineq_nonoverlap(z):\n    c, r = z_to_cr(z)\n    diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    \n    base_centers, base_radii = radius_growth_seed()\n    \n    best_score = -1; best_packing = (None, None)\n    bounds = [(0,1)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n    num_starts = 64; jitter_amp = 1e-3\n\n    for i in range(num_starts):\n        if time.time() - start_time > 1180: break\n        np.random.seed((int(time.time()*1000) + i) % (2**32))\n        jitter = np.random.uniform(-jitter_amp, jitter_amp, size=base_centers.shape)\n        initial_centers = np.clip(base_centers + jitter, 0, 1)\n        initial_z = cr_to_z(initial_centers, base_radii)\n        res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n        \n        if res.success:\n            final_c, final_r = z_to_cr(res.x)\n            valid_c, valid_r = _ensure_validity(final_c, final_r)\n            current_score = np.sum(valid_r)\n            if current_score > best_score:\n                best_score = current_score; best_packing = (valid_c, valid_r)\n\n    if best_packing[0] is None:\n        return _ensure_validity(base_centers, base_radii)\n\n    return best_packing\n",
+    "submitted_timestamp": 1761011565.444812,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.5991607212768226,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.599161",
+      "evaluation_timestamp": 1761011587.365453,
+      "evaluation_datetime": "2025-10-21T09:53:07.365459"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.5991607212768226,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761011587.4021244,
+    "version_notified": "original",
+    "message": "Your research submission 'Prometheus IV: Physics-Based Search v1.1 (Radius Growth + SLSQP)' (ID: 929) has been evaluated.\n\n**Score:** 2.5991607212768226\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.599161\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

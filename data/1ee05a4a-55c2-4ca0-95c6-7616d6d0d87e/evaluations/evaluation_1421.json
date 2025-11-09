@@ -1,0 +1,47 @@
+{
+  "id": "1421",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Monitor v0.3 \u2014 eigenvector sign fix + timeseries trend",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "cascade",
+    "meta-edge",
+    "monitoring",
+    "timeseries"
+  ],
+  "abstract": "Fixes eigenvector sign for dominance, computes coupling stats from matrix, and appends a timeseries record with a trend panel if multiple snapshots exist.",
+  "submitted_tick": 734,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, re\nimport numpy as np\n\nHAVE_MPL = False\ntry:\n    import matplotlib\n    matplotlib.use('Agg')\n    import matplotlib.pyplot as plt\n    HAVE_MPL = True\nexcept Exception:\n    HAVE_MPL = False\n\nIN_PATH = 'storage/shared/cross_lineage/cascade_analysis.json'\nOUT_DIR = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nTS_PATH = os.path.join(OUT_DIR, 'timeseries.jsonl')\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef load_json(p):\n    with open(p, 'r', encoding='utf-8') as f:\n        return json.load(f)\n\ndef offdiag_values(M):\n    vals = []\n    n = len(M)\n    for i in range(n):\n        for j in range(i+1, n):\n            vals.append(float(M[i][j]))\n    return np.array(vals, dtype=float)\n\ndef principal_eigenvector(M):\n    w, v = np.linalg.eig(M)\n    idx = int(np.argmax(np.real(w)))\n    vec = np.real(v[:, idx])\n    # Sign fix: flip if sum negative; then take absolute and normalize\n    if np.sum(vec) < 0:\n        vec = -vec\n    vec = np.abs(vec)\n    s = np.sum(vec)\n    return (vec / s) if s > 0 else vec\n\ndef parse_tick(ts):\n    if isinstance(ts, str):\n        m = re.match(r'.*?(\\d+)$', ts.strip())\n        if m:\n            return int(m.group(1))\n    return None\n\ndef trend_panel(records, path):\n    if not HAVE_MPL or len(records) < 2:\n        return\n    xs = [r.get('tick') or i for i, r in enumerate(records)]\n    score = [r.get('meta_edge_score') for r in records]\n    dom   = [r.get('dominance_max') for r in records]\n    plt.figure(figsize=(7,4))\n    plt.plot(xs, score, '-o', label='meta_edge_score')\n    if any(d is not None for d in dom):\n        plt.plot(xs, dom, '-s', label='dominance_max')\n    plt.xlabel('tick')\n    plt.ylabel('value')\n    plt.title('Meta-Edge Monitor \u2014 Trend')\n    plt.legend(fontsize=8)\n    plt.tight_layout()\n    plt.savefig(path, dpi=150)\n    plt.close()\n\ndef main():\n    data = load_json(IN_PATH)\n    M = np.array(data.get(\"interaction_matrix\", []), dtype=float)\n    score = float(data.get(\"meta_edge_score\", np.nan))\n    ts = data.get(\"timestamp\", None)\n    tick = parse_tick(ts)\n\n    # Couplings from matrix\n    od = offdiag_values(M) if M.size else np.array([], dtype=float)\n    mean_coupling = float(np.nanmean(od)) if od.size else None\n\n    tau = data.get(\"coupling_threshold\", None)\n    if tau is None and od.size:\n        tau = float(np.quantile(od, 0.75))\n    active_frac = float((od >= tau).sum() / od.size) if (od.size and tau is not None) else None\n\n    # Dominance via eigenvector (sign fixed)\n    dom_vec = principal_eigenvector(M) if M.size else None\n    dominance_max = float(np.max(dom_vec)) if (dom_vec is not None and dom_vec.size) else None\n\n    zephyr_dom = None\n    if isinstance(data.get(\"lineages\"), list) and dom_vec is not None:\n        try:\n            idx = [s.lower() for s in data[\"lineages\"]].index(\"zephyr\")\n            zephyr_dom = float(dom_vec[idx])\n        except ValueError:\n            zephyr_dom = None\n\n    values = {\n        \"meta_edge_score\": score,\n        \"mean_coupling\": mean_coupling,\n        \"active_threshold\": tau,\n        \"active_connections_frac\": active_frac,\n        \"dominance_max\": dominance_max,\n        \"zephyr_dominance_est\": zephyr_dom,\n        \"timestamp\": ts,\n        \"tick\": tick,\n    }\n\n    # Write per-run summaries\n    summary_json = os.path.join(OUT_DIR, 'monitor_summary_v0_3.json')\n    with open(summary_json, 'w', encoding='utf-8') as f:\n        json.dump(values, f, ensure_ascii=False, indent=2)\n\n    summary_txt = os.path.join(OUT_DIR, 'monitor_summary_v0_3.txt')\n    with open(summary_txt, 'w', encoding='utf-8') as f:\n        f.write(\"Meta-Edge Monitor v0.3 Summary\\n\")\n        for k, v in values.items():\n            f.write(f\"{k}={v}\\n\")\n        f.write(\"Notes: dominance via sign-fixed principal eigenvector; active fraction via schema threshold or 75th percentile.\\n\")\n\n    # Append timeseries record\n    with open(TS_PATH, 'a', encoding='utf-8') as f:\n        f.write(json.dumps(values) + \"\\n\")\n\n    # Read all records for trend plotting\n    records = []\n    try:\n        with open(TS_PATH, 'r', encoding='utf-8') as f:\n            for line in f:\n                line = line.strip()\n                if line:\n                    try:\n                        records.append(json.loads(line))\n                    except Exception:\n                        pass\n    except FileNotFoundError:\n        pass\n\n    trend_png = os.path.join(OUT_DIR, 'trend_panel.png')\n    try:\n        trend_panel(records, trend_png)\n    except Exception:\n        trend_png = None\n\n    # Quick bar panel for current snapshot\n    if HAVE_MPL:\n        try:\n            labels = ['score','dom_max','mean_cpl','active']\n            vals = [score,\n                    dominance_max if dominance_max is not None else 0.0,\n                    mean_coupling if mean_coupling is not None else 0.0,\n                    active_frac if active_frac is not None else 0.0]\n            plt.figure(figsize=(6,4))\n            bars = plt.bar(labels, vals, color=['#4a90e2','#50e3c2','#f5a623','#9013fe'], alpha=0.85)\n            for b, v in zip(bars, vals):\n                plt.text(b.get_x()+b.get_width()/2, v, f\"{v:.3f}\", ha='center', va='bottom', fontsize=8)\n            plt.ylim(0, max(vals + [1.0]) * 1.15)\n            plt.title('Meta-Edge Snapshot v0.3')\n            plt.tight_layout()\n            snap_png = os.path.join(OUT_DIR, 'snapshot_panel_v0_3.png')\n            plt.savefig(snap_png, dpi=150)\n            plt.close()\n        except Exception:\n            snap_png = None\n\n    print(json.dumps({\n        \"status\": \"ok\",\n        \"summary_json\": summary_json,\n        \"summary_txt\": summary_txt,\n        \"timeseries\": TS_PATH,\n        \"trend_panel\": trend_png\n    }))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761337941.6655612,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"summary_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_3.json\", \"summary_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_3.txt\", \"timeseries\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/timeseries.jsonl\", \"trend_panel\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/trend_panel.png\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761337944.6467595,
+      "evaluation_datetime": "2025-10-25T04:32:24.646762"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761337944.778053,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Monitor v0.3 \u2014 eigenvector sign fix + timeseries trend' (ID: 1421) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"summary_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_3.json\", \"summary_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_3.txt\", \"timeseries\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/timeseries.jsonl\", \"trend_panel\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/trend_panel.png\"}\n\n\nSTDERR:\n\n```"
+  }
+}

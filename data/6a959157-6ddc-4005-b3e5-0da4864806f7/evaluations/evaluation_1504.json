@@ -1,0 +1,92 @@
+{
+  "id": "1504",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "EtC+BRBG\u2011minimal v3 (\u03bb_r=0.6, fixed): ComBat embedding; ridge\u2011residualized PCA50 graph; equal\u2011quota kNN (k=50)",
+  "tags": [
+    "embed-then-correct",
+    "residualization",
+    "balanced-graph",
+    "quotas",
+    "binary",
+    "knn"
+  ],
+  "abstract": "Bugfix for v3 \u03bb_r=0.6: correct batch design loop. Dual-path: X_emb = PCA60\u2192ComBat. Graph path = PCA50 on log1p counts, per\u2011PC ridge residualization vs batch (\u03bb_r=0.6, l2=1e\u20113), then equal\u2011quota kNN (k=50) with 256\u2011neighbor candidates, binary connectivities, true Euclidean distances; neighbors metadata set.",
+  "submitted_tick": 1067,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scipy.sparse as sp\nimport scanpy as sc\nimport anndata as ad\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\n\ndef _to_csr(X):\n    return X if sp.isspmatrix_csr(X) else (X.tocsr() if sp.issparse(X) else sp.csr_matrix(X))\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_counts(adata):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    Xn = _row_scale_csr(Xc, (1e4 / lib).astype(np.float32))\n    Xn = Xn.tocsr().copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _select_features(X, adata):\n    if 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if 0 < mask.sum() < X.shape[1]:\n            return X[:, mask]\n    return X\n\ndef _pca_svd(X, n_components=50, random_state=0):\n    n, g = X.shape\n    n_components = int(min(n_components, max(2, min(n - 1, g))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _design_from_batches(batches):\n    b = np.asarray(batches).astype(str)\n    uniq = np.unique(b)\n    B = len(uniq)\n    p = 1 + max(0, B - 1)\n    X = np.zeros((b.size, p), dtype=np.float64)\n    X[:, 0] = 1.0\n    m = {v: i for i, v in enumerate(uniq)}\n    idx = np.vectorize(m.get)(b)\n    for i in range(b.size):\n        j = idx[i]\n        if j < B - 1:\n            X[i, 1 + j] = 1.0\n    return X\n\ndef _ridge_residualize_per_pc(Z, batches, lam_r=0.6, l2=1e-3):\n    X = _design_from_batches(batches)           # (n x p)\n    XtX = X.T @ X\n    p = XtX.shape[0]\n    XtX_reg = XtX + l2 * np.eye(p)\n    XtZ = X.T @ Z\n    beta = np.linalg.solve(XtX_reg, XtZ)        # (p x d)\n    Z_pred = X @ beta                            # (n x d)\n    Z_res = Z - lam_r * Z_pred\n    return Z_res.astype(np.float32)\n\ndef _equal_quota_knn(Z, batches, k=50, k_candidates=256, metric='euclidean'):\n    n = Z.shape[0]\n    kq = min(k_candidates + 1, n)\n    nn = NearestNeighbors(n_neighbors=kq, metric=metric, algorithm='auto')\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d_all = d_all[:, 1:]   # drop self\n    idx_all = idx_all[:, 1:]\n\n    b_arr = np.asarray(batches).astype(str)\n    uniq = np.unique(b_arr)\n    b2i = {b: i for i, b in enumerate(uniq)}\n    b_idx = np.vectorize(b2i.get)(b_arr)\n\n    rows, cols, dvals = [], [], []\n    B = len(uniq)\n    base = k // B\n    rem = k - base * B\n\n    for i in range(n):\n        cand_idx = idx_all[i]\n        cand_dist = d_all[i]\n        cand_batch = b_idx[cand_idx]\n\n        targets = np.full(B, base, dtype=int)\n        rot = i % B\n        if rem > 0:\n            end = min(B, rot + rem)\n            targets[rot:end] += 1\n            if end - rot < rem:\n                targets[:(rem - (end - rot))] += 1\n\n        chosen_mask = np.zeros(cand_idx.shape[0], dtype=bool)\n        perb = np.zeros(B, dtype=int)\n\n        # Phase 1: satisfy quotas by nearest candidates\n        for j in range(cand_idx.shape[0]):\n            bj = cand_batch[j]\n            if perb[bj] < targets[bj]:\n                chosen_mask[j] = True\n                perb[bj] += 1\n                if chosen_mask.sum() == k:\n                    break\n\n        # Phase 2: top-up if still short\n        if chosen_mask.sum() < k:\n            for j in range(cand_idx.shape[0]):\n                if not chosen_mask[j]:\n                    chosen_mask[j] = True\n                    if chosen_mask.sum() == k:\n                        break\n\n        sel = np.flatnonzero(chosen_mask)[:k]\n        chosen_idx = cand_idx[sel]\n        chosen_dist = cand_dist[sel]\n        rows.extend([i] * chosen_idx.size)\n        cols.extend(chosen_idx.tolist())\n        dvals.extend(chosen_dist.tolist())\n\n    W_dir = sp.csr_matrix((np.ones(len(rows), dtype=np.float64), (rows, cols)), shape=(n, n))\n    D_dir = sp.csr_matrix((np.asarray(dvals, dtype=np.float64), (rows, cols)), shape=(n, n))\n    W = ((W_dir + W_dir.T) > 0).astype(np.float64)   # binary symmetric union\n    D = D_dir.minimum(D_dir.T)\n    D = D + (D.T.multiply((D == 0)))                 # fill missing symmetric entries\n    return W.tocsr(), D.tocsr()\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Normalize + HVG\n    Xn = _normalize_log1p_counts(adata)\n    Xn = _select_features(Xn, adata)\n\n    # Embedding path: PCA60 \u2192 ComBat\n    Z_emb = _pca_svd(Xn, n_components=60, random_state=0)\n    ad_pca = ad.AnnData(X=Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pca, key='batch')\n    X_emb = np.asarray(ad_pca.X, dtype=np.float32)\n\n    # Graph path: PCA50 \u2192 ridge residualization vs batch\n    Z_graph = _pca_svd(Xn, n_components=50, random_state=1)\n    Zg_corr = _ridge_residualize_per_pc(Z_graph, adata.obs['batch'].values, lam_r=0.6, l2=1e-3)\n\n    # Equal\u2011quota binary kNN with true distances (expanded candidate pool)\n    C, D = _equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=256, metric='euclidean')\n\n    # Outputs\n    adata.obsm['X_emb'] = X_emb\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {'n_neighbors': 50, 'method': 'equal_quota+ridge_resid', 'metric': 'euclidean'}\n    }\n    return adata\n",
+    "submitted_timestamp": 1761750791.3447583,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.669083269354225,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/32d98a55-df62-4964-b74d-46313b542831/result_human.h5ad\n\nRESULT_UUID: 32d98a55-df62-4964-b74d-46313b542831\n\n\nSTDERR:\n/tmp/tmp__zorncf/submission.py:150: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = _equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=256, metric='euclidean')\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.791  NMI: 0.749\n  Graph_conn: 0.936  kBET: 0.657  iLISI: 0.346  cLISI: 0.981\n  PCR: 1.000  Cell_cycle: 0.312\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.791396  NMI: 0.748701\n  Graph_conn: 0.937034  kBET: 0.628595  iLISI: 0.345533  cLISI: 0.994391\n  PCR: 0.999970  Cell_cycle: 0.275233",
+        "ASW_batch": [
+          "0.699",
+          0.6989951642297522
+        ],
+        "ASW_label": [
+          "0.220",
+          0.22047280823616794
+        ],
+        "ARI": [
+          "0.791",
+          0.7914246513085825
+        ],
+        "NMI": [
+          "0.749",
+          0.748630016866989
+        ],
+        "Graph_conn": [
+          "0.936",
+          0.9359473000532853
+        ],
+        "kBET": [
+          "0.657",
+          0.6567954014268239
+        ],
+        "iLISI": [
+          "0.346",
+          0.3455327691140931
+        ],
+        "cLISI": [
+          "0.981",
+          0.9807436876818463
+        ],
+        "PCR": [
+          "1.000",
+          0.999969586815358
+        ],
+        "Cell_cycle": [
+          "0.312",
+          0.31232130780935113
+        ]
+      },
+      "evaluation_timestamp": 1761751142.1809702,
+      "evaluation_datetime": "2025-10-29T23:19:02.180971",
+      "sort_key": [
+        0.669083269354225
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.669083269354225,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761751142.2327619,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC+BRBG\u2011minimal v3 (\u03bb_r=0.6, fixed): ComBat embedding; ridge\u2011residualized PCA50 graph; equal\u2011quota kNN (k=50)' (ID: 1504) has been evaluated.\n\n**Score:** 0.669083269354225\n**ASW_batch:** 0.699\n**ASW_label:** 0.220\n**ARI:** 0.791\n**NMI:** 0.749\n**Graph_conn:** 0.936\n**kBET:** 0.657\n**iLISI:** 0.346\n**cLISI:** 0.981\n**PCR:** 1.000\n**Cell_cycle:** 0.312\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.699  ASW_label: 0.220  ARI: 0.791  NMI: 0.749\n  Graph_conn: 0.936  kBET: 0.657  iLISI: 0.346  cLISI: 0.981\n  PCR: 1.000  Cell_cycle: 0.312\n\nRaw Scores (before normalization):\n  ASW_batch: 0.848407  ASW_label: 0.538931  ARI: 0.791396  NMI: 0.748701\n  Graph_conn: 0.937034  kBET: 0.628595  iLISI: 0.345533  cLISI: 0.994391\n  PCR: 0.999970  Cell_cycle: 0.275233\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/32d98a55-df62-4964-b74d-46313b542831/result_human.h5ad\n\nRESULT_UUID: 32d98a55-df62-4964-b74d-46313b542831\n\n\nSTDERR:\n/tmp/tmp__zorncf/submission.py:150: SparseEfficiencyWarning: Comparing a sparse matrix with 0 using == is inefficient, try using != instead.\n  C, D = _equal_quota_knn(Zg_corr, batches=adata.obs['batch'].values, k=50, k_candidates=256, metric='euclidean')\n\n```"
+  }
+}

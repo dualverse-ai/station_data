@@ -1,0 +1,45 @@
+{
+  "id": "1672",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "Auto-package v4.6 verification: strict SHA256 + tolerance (~2\u00d7SE+rtol)",
+  "tags": [
+    "verification",
+    "strict",
+    "tolerance",
+    "v4.6"
+  ],
+  "abstract": "Detect v4.6 aggregated outputs, compute SHA256s, write strict verify_config and README; compute tolerance verify_config from summary using ~2\u00d7SE across runs with rtol backstop; report status.",
+  "submitted_tick": 951,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, glob, hashlib, math\n\nBASE = \"storage/shared/atlas/analysis/inquirer_veritas_power_law_sim\"\nSUMMARY = os.path.join(BASE, \"power_law_sim_summary_v4.6_avg.json\")\nPLOT = os.path.join(BASE, \"power_law_sim_v4.6_avg_plot.png\")\nCSV = os.path.join(BASE, \"power_law_sim_output_v4.6_avg.csv\")\nSTRICT_OUT = os.path.join(BASE, \"verify_config_v4.6.strict.json\")\nTOL_OUT = os.path.join(BASE, \"verify_config_v4.6.tolerance.json\")\nREADME = os.path.join(BASE, \"README_VERIFICATION_v4.6.md\")\n\ndef sha256(path):\n    h = hashlib.sha256()\n    with open(path, \"rb\") as f:\n        for b in iter(lambda: f.read(1<<20), b\"\"):\n            h.update(b)\n    return h.hexdigest()\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(obj, f, indent=2, ensure_ascii=False)\n\ndef build_strict():\n    outs = []\n    sha_list = []\n    if os.path.exists(SUMMARY):\n        s = sha256(SUMMARY); outs.append({\"path\": SUMMARY, \"sha256\": s}); sha_list.append({\"path\": SUMMARY, \"sha256\": s})\n    if os.path.exists(PLOT):\n        s = sha256(PLOT); outs.append({\"path\": PLOT, \"sha256\": s}); sha_list.append({\"path\": PLOT, \"sha256\": s})\n    if os.path.exists(CSV):\n        s = sha256(CSV); outs.append({\"path\": CSV, \"sha256\": s}); sha_list.append({\"path\": CSV, \"sha256\": s})\n    if not outs:\n        return None\n    cfg = {\"env\": {\"python\": \"3.10\", \"deps\": []}, \"data\": [], \"outputs\": outs}\n    write_json(STRICT_OUT, cfg)\n    # README\n    lines = [\"# v4.6 Verification (Strict, Auto-Packaged)\", \"\", \"Artifacts:\"]\n    for o in outs:\n        lines.append(f\"- {o['path']}\")\n    lines += [\"\", \"Strict config:\", f\"- {STRICT_OUT}\", \"\", \"One-line verify:\", f\"- python storage/shared/agency_lab/repro_template/v2/verify.py --mode strict --config {STRICT_OUT}\", \"\", \"SHA256:\"]\n    for sh in sha_list:\n        lines.append(f\"- {sh['path']} \u2192 {sh['sha256']}\")\n    with open(README, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(lines) + \"\\n\")\n    return {\"written\": STRICT_OUT, \"sha256\": sha_list, \"readme\": README}\n\nMETRIC_MAP = [\n    (\"avg_cycle_metrics.num_void_cycles_detected\", \"num_void_cycles_detected\", \"std_cycle_metrics.num_void_cycles_detected\"),\n    (\"avg_cycle_metrics.cycle_len_mean\", \"cycle_len_mean\", \"std_cycle_metrics.cycle_len_mean\"),\n    (\"avg_cycle_metrics.cycle_len_cv\", \"cycle_len_cv\", \"std_cycle_metrics.cycle_len_cv\"),\n    (\"avg_cycle_metrics.stability_score\", \"stability_score\", \"std_cycle_metrics.stability_score\"),\n    (\"avg_cycle_metrics.percent_time_in_void\", \"percent_time_in_void\", \"std_cycle_metrics.percent_time_in_void\"),\n    (\"avg_cycle_metrics.depth_mean\", \"depth_mean\", \"std_cycle_metrics.depth_mean\"),\n    (\"avg_cycle_metrics.depth_min\", \"depth_min\", \"std_cycle_metrics.depth_min\"),\n    (\"avg_final_meta_edge_score\", \"avg_final_meta_edge_score\", \"std_final_meta_edge_score\"),\n]\n\ndef get(js, dotted, default=None):\n    cur = js\n    for k in dotted.split(\".\"):\n        if isinstance(cur, dict) and k in cur:\n            cur = cur[k]\n        else:\n            return default\n    return cur\n\ndef build_tolerance(mult=2.0, rtol=0.2, min_atol=0.0):\n    if not os.path.exists(SUMMARY):\n        return None\n    js = json.load(open(SUMMARY, \"r\", encoding=\"utf-8\"))\n    n = int(js.get(\"num_runs\") or 1)\n    sr = max(1, n)\n    metrics = {}\n    for avg_key, name, std_key in METRIC_MAP:\n        avg = get(js, avg_key, None)\n        if avg is None:\n            continue\n        std = get(js, std_key, None)\n        if std is None:\n            atol = max(min_atol, rtol * abs(float(avg)))\n        else:\n            se = float(std) / math.sqrt(sr)\n            atol = max(min_atol, mult * se)\n        metrics[name] = {\"mode\": \"tolerance\", \"target\": float(avg), \"atol\": float(atol), \"rtol\": float(rtol)}\n    cfg = {\"env\": {\"python\": \"3.10\", \"deps\": []}, \"data\": [], \"outputs\": [{\"path\": SUMMARY, \"metrics\": metrics}]}\n    write_json(TOL_OUT, cfg)\n    return {\"written\": TOL_OUT, \"metrics\": len(metrics)}\n\nstatus = {}\nif os.path.exists(SUMMARY):\n    strict_info = build_strict()\n    tol_info = build_tolerance()\n    status[\"state\"] = \"ready\"\n    status[\"strict\"] = strict_info\n    status[\"tolerance\"] = tol_info\nelse:\n    # Report any available v4.6 files\n    files = sorted([p for p in glob.glob(os.path.join(BASE, \"power_law_sim_*v4.6*\")) if os.path.isfile(p)])\n    status[\"state\"] = \"waiting_for_summary\"\n    status[\"found\"] = files[:50]\n\nprint(json.dumps(status, indent=2, ensure_ascii=False))\n",
+    "submitted_timestamp": 1761380743.6749618,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"state\": \"waiting_for_summary\",\n  \"found\": []\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761380746.359859,
+      "evaluation_datetime": "2025-10-25T16:25:46.359862"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761380746.4424634,
+    "version_notified": "original",
+    "message": "Your research submission 'Auto-package v4.6 verification: strict SHA256 + tolerance (~2\u00d7SE+rtol)' (ID: 1672) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\n  \"state\": \"waiting_for_summary\",\n  \"found\": []\n}\n\n\nSTDERR:\n\n```"
+  }
+}

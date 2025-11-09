@@ -1,0 +1,71 @@
+{
+  "id": "298",
+  "author": "Episteme I",
+  "research_task_id": "1",
+  "title": "Analysis: SOTA Model with Gradient Norm Logging",
+  "tags": [
+    "analysis",
+    "gradients",
+    "normalization",
+    "sota",
+    "mechanistic-understanding"
+  ],
+  "abstract": "This is an analytical experiment designed to investigate the reviewer's suggestion from my recent publication (Archive #7). I will instrument the SOTA architecture (ID 277) to log the global gradient norm at each training step. The goal of this initial run is to verify the logging mechanism using the test() function and prepare for a full training run to collect data for a comparative analysis between normalized and un-normalized models.",
+  "submitted_tick": 143,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import flax.linen as nn\nimport jax.numpy as jnp\nimport optax\nimport jax\n\n# --- Full SOTA model code from ID 277 ---\ndef compute_loss(predictions, targets, params, x):\n    mae = jnp.mean(jnp.abs(predictions - targets))\n    curv = predictions[:, 2:, :] - 2.0 * predictions[:, 1:-1, :] + predictions[:, :-2, :]\n    curv_pen = jnp.mean(curv * curv)\n    return mae + 1e-4 * curv_pen\n\nclass ResidualCopyHead(nn.Module):\n    @nn.compact\n    def __call__(self, x, training: bool = False):\n        num_neurons = x.shape[2]\n        x_flat = x.transpose(0, 2, 1).reshape(-1, 4)\n        residual = nn.Dense(64)(x_flat)\n        residual = nn.relu(residual)\n        residual = nn.Dropout(rate=0.1)(residual, deterministic=not training)\n        residual = nn.Dense(32)(residual)\n        residual = residual.reshape(x.shape[0], num_neurons, 32).transpose(0, 2, 1)\n        output = jnp.zeros((x.shape[0], 32, num_neurons))\n        output = output.at[:, :4, :].set(x)\n        return output + residual\n\nclass NewSOTAModel(nn.Module):\n    rank_k: int\n    proj_rank: int\n    num_neurons: int = 71721\n    \n    @nn.compact\n    def __call__(self, x, training: bool = False):\n        B, T_in, N = x.shape\n        k, p = self.rank_k, self.proj_rank\n        U = self.param('U', nn.initializers.lecun_normal(), (N, p))\n        V = self.param('V', nn.initializers.lecun_normal(), (k, p))\n        U_eff = U / (jnp.linalg.norm(U, axis=0, keepdims=True) + 1e-6)\n        factors_in = jnp.einsum('btn,np->btp', x, U_eff) @ V.T\n        factors_flat = factors_in.reshape((B, -1))\n        h = nn.Dense(512)(factors_flat)\n        h = nn.relu(h)\n        h = nn.Dropout(rate=0.1)(h, deterministic=not training)\n        h = nn.Dense(512)(h)\n        h = nn.relu(h)\n        h = nn.Dropout(rate=0.1)(h, deterministic=not training)\n        factors_out_flat = nn.Dense(32 * k)(h)\n        factors_out = factors_out_flat.reshape((B, 32, k))\n        factors_out_norm = nn.LayerNorm()(factors_out)\n        y_factor = (factors_out_norm @ V) @ U_eff.T\n        y_copy = ResidualCopyHead()(x, training=training)\n        return y_factor + y_copy\n\ndef create_optimizer(learning_rate: float = 0.001):\n    return optax.chain(\n        optax.clip_by_global_norm(1.0),\n        optax.adam(learning_rate=learning_rate)\n    )\n\ndef _define_hyperparameters():\n    return { 'learning_rate': 0.001, 'rank_k': 320, 'proj_rank': 32 }\n\nclass ModelWrapper:\n    def __init__(self, hparams):\n        self.model = NewSOTAModel(rank_k=hparams['rank_k'], proj_rank=hparams['proj_rank'])\n        self.needs_rng = True\n    def init(self, rng_key, dummy_input):\n        return self.model.init({'params': rng_key, 'dropout': rng_key}, dummy_input)\n    def apply(self, params, x, training=False, rngs=None):\n        return self.model.apply(params, x, training=training, rngs=rngs)\n\ndef create_network(hparams):\n    return ModelWrapper(hparams)\n\n# --- Analytical test() function ---\ndef test():\n    \"\"\"\n    Lightweight test to validate the gradient norm logging mechanism.\n    Does not use GPU and will not trigger a full training run.\n    \"\"\"\n    print(\"--- Starting Gradient Norm Logging Test ---\")\n    hparams = _define_hyperparameters()\n    model = create_network(hparams)\n    key = jax.random.PRNGKey(0)\n    \n    dummy_input = jnp.ones((2, 4, 71721))\n    dummy_targets = jnp.ones((2, 32, 71721))\n    \n    params = model.init(key, dummy_input)\n    \n    # Define a loss function for grad calculation\n    def loss_fn(p):\n        preds = model.apply(p, dummy_input, training=True, rngs={'dropout': key})\n        return compute_loss(preds, dummy_targets, p, dummy_input)\n    \n    # Calculate gradients\n    grads = jax.grad(loss_fn)(params)\n    \n    # Calculate global gradient norm\n    global_grad_norm = optax.global_norm(grads)\n    \n    print(f\"Calculated Global Gradient Norm: {global_grad_norm}\")\n    \n    if global_grad_norm > 0:\n        return \"SUCCESS: Gradient norm logging mechanism is functional.\"\n    else:\n        return \"FAILURE: Gradient norm is zero or invalid.\"\n",
+    "submitted_timestamp": 1761344652.9549968,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Gradient Norm Logging Test ---\nCalculated Global Gradient Norm: 1.0628548860549927\nTest completed. Result: SUCCESS: Gradient norm logging mechanism is functional.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761344665.0437534,
+      "evaluation_datetime": "2025-10-25T06:24:25.043756",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761344665.0875256,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis: SOTA Model with Gradient Norm Logging' (ID: 298) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Gradient Norm Logging Test ---\nCalculated Global Gradient Norm: 1.0628548860549927\nTest completed. Result: SUCCESS: Gradient norm logging mechanism is functional.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

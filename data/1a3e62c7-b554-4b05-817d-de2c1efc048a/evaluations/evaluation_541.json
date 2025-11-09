@@ -1,0 +1,47 @@
+{
+  "id": "541",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Dual-Tolerance KKT Gate on SOTA_243 (NNLS shadow-price estimates)",
+  "tags": [
+    "analysis",
+    "bpigo",
+    "kkt",
+    "nnls",
+    "gate-check",
+    "tolerance"
+  ],
+  "abstract": "Estimates KKT multipliers via nonnegative least squares on active constraints at tol\u2208{1e-9,1e-8}; ranks interior pairs by \u03bb, intersects top-K across tolerances, and detects crossing-quads. Writes operator_gate_dual_tol_kkt_latest.json and kkt_top_pairs_by_lambda_latest.json; returns SOTA with 1e-9 shrink.",
+  "submitted_tick": 331,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, time\nimport numpy as np\ntry:\n    from scipy.optimize import nnls\nexcept Exception:\n    nnls = None\n\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\nTOLS = [1e-9, 1e-8]\nK_TOL_MAP = {1e-9: 25, 1e-8: 15}\n\nP_C = 'storage/noesis/latest_centers.txt'\nP_R = 'storage/noesis/latest_radii.txt'\nOUT_DIR = 'storage/noesis/exports'\nOUT_JSON = os.path.join(OUT_DIR, 'operator_gate_dual_tol_kkt_latest.json')\nOUT_TOP  = os.path.join(OUT_DIR, 'kkt_top_pairs_by_lambda_latest.json')\n\ndef _ensure_dir(p): os.makedirs(p, exist_ok=True)\n\ndef load_snapshot():\n    c = np.loadtxt(P_C, dtype=float).reshape(N,2)\n    r = np.loadtxt(P_R, dtype=float).reshape(N,)\n    if np.any(r <= 0): raise ValueError(\"non-positive radii\")\n    return c, r\n\ndef slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef active_sets(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), s_pairs = slacks(c, r)\n    b = []\n    for i in range(N):\n        if s_xL[i] <= tol: b.append((i, 'xL'))\n        if s_xR[i] <= tol: b.append((i, 'xR'))\n        if s_yB[i] <= tol: b.append((i, 'yB'))\n        if s_yT[i] <= tol: b.append((i, 'yT'))\n    p = []\n    for i in range(N):\n        for j in range(i+1, N):\n            if s_pairs[i,j] <= tol:\n                p.append((i, j))\n    return b, p\n\ndef boundary_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    return (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n\ndef grad_row_boundary(i, kind):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi + 1; ri = xi + 2\n    if kind == 'xL':\n        row[xi] = 1.0;  row[ri] = -1.0\n    elif kind == 'xR':\n        row[xi] = -1.0; row[ri] = -1.0\n    elif kind == 'yB':\n        row[yi] = 1.0;  row[ri] = -1.0\n    elif kind == 'yT':\n        row[yi] = -1.0; row[ri] = -1.0\n    return row\n\ndef grad_row_pair(c, i, j):\n    row = np.zeros(3*N, dtype=float)\n    xi = 3*i; yi = xi + 1; ri = xi + 2\n    xj = 3*j; yj = xj + 1; rj = xj + 2\n    dx = c[i,0] - c[j,0]; dy = c[i,1] - c[j,1]\n    d = float(np.hypot(dx, dy))\n    if d > 1e-15:\n        invd = 1.0 / d\n        row[xi] = dx*invd; row[yi] = dy*invd\n        row[xj] = -dx*invd; row[yj] = -dy*invd\n    row[ri] = -1.0; row[rj] = -1.0\n    return row\n\ndef kkt_nnls(c, r, tol):\n    # Build Jacobian rows for active constraints at tol\n    b_act, p_act = active_sets(c, r, tol)\n    rows = []\n    ids  = []  # ('b',i,kind) or ('p',i,j)\n    for (i, kind) in b_act:\n        rows.append(grad_row_boundary(i, kind)); ids.append(('b', i, kind))\n    for (i, j) in p_act:\n        rows.append(grad_row_pair(c, i, j));    ids.append(('p', i, j))\n    if not rows:\n        return [], np.array([]), []\n\n    J = np.vstack(rows)            # (M, 3N)\n    A = J.T                        # (3N, M)\n    b = np.zeros(3*N, dtype=float) # -\u2207f = e_r\n    b[2::3] = 1.0\n\n    if nnls is not None:\n        lam, _ = nnls(A, b)\n    else:\n        # Fallback: unconstrained least squares then clamp to >=0\n        lam = np.linalg.lstsq(A, b, rcond=None)[0]\n        lam = np.maximum(lam, 0.0)\n    return ids, lam, J\n\ndef rank_pairs_by_lambda(ids, lam, interior_mask):\n    # Aggregate \u03bb for pair constraints only; return list of (i,j,lambda)\n    pairs = []\n    for idx, tag in enumerate(ids):\n        if tag[0] != 'p': continue\n        i, j = tag[1], tag[2]\n        if interior_mask[i] and interior_mask[j]:\n            pairs.append((i, j, float(lam[idx])))\n    pairs.sort(key=lambda t: t[2], reverse=True)\n    return pairs\n\ndef _orient(a, b, c):\n    return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])\n\ndef segments_cross(p1, p2, q1, q2):\n    o1 = _orient(p1, p2, q1); o2 = _orient(p1, p2, q2)\n    o3 = _orient(q1, q2, p1); o4 = _orient(q1, q2, p2)\n    return (o1*o2 < 0) and (o3*o4 < 0)\n\ndef construct_packing():\n    c, r = load_snapshot()\n    # Common interior requirement: non-boundary at both tolerances\n    interior_boths = None\n    tops_by_tol = {}\n    for tol in TOLS:\n        bmask = boundary_mask(c, r, tol)\n        interior = ~bmask\n        if interior_boths is None:\n            interior_boths = interior.copy()\n        else:\n            interior_boths = interior_boths & interior\n\n    ranked_pairs = {}\n    for tol in TOLS:\n        ids, lam, J = kkt_nnls(c, r, tol)\n        pairs = rank_pairs_by_lambda(ids, lam, interior_boths)\n        K = K_TOL_MAP[tol]\n        ranked_pairs[str(tol)] = [{'i':i, 'j':j, 'lambda':lam_} for (i,j,lam_) in pairs[:K]]\n\n    # Intersect top-K sets across tolerances\n    sets = []\n    for tol in TOLS:\n        K = K_TOL_MAP[tol]\n        s = set((d['i'], d['j']) for d in ranked_pairs[str(tol)][:K])\n        sets.append(s)\n    common = set.intersection(*sets) if sets else set()\n\n    # Search for crossing-quads among common top pairs\n    common_list = list(common)\n    quads = []\n    m = len(common_list)\n    for a in range(m):\n        i, j = common_list[a]\n        pi, pj = c[i], c[j]\n        for b in range(a+1, m):\n            k, l = common_list[b]\n            if len({i,j,k,l}) < 4: continue\n            pk, pl = c[k], c[l]\n            if segments_cross(pi, pj, pk, pl):\n                quads.append({'quad': [i, j, k, l]})\n    report = {\n        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n        'policy': {'tols': TOLS, 'K_map': K_TOL_MAP, 'interior_requirement': 'non-boundary at both tol'},\n        'has_candidate': bool(quads),\n        'num_candidates': len(quads),\n        'example_quads': quads[:5],\n        'common_pairs_count': len(common)\n    }\n\n    _ensure_dir(OUT_DIR)\n    try:\n        with open(OUT_JSON, 'w') as f:\n            json.dump(report, f, indent=2)\n        with open(OUT_TOP, 'w') as f:\n            json.dump({'ranked_pairs_by_tol': ranked_pairs}, f, indent=2)\n    except Exception:\n        pass\n\n    # Return SOTA snapshot with tiny shrink\n    r_out = np.maximum(r - SAFETY, R_MIN)\n    return c.astype(float), r_out.astype(float)\n",
+    "submitted_timestamp": 1760942503.7302532,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760942506.1592362,
+      "evaluation_datetime": "2025-10-20T14:41:46.159244"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760942506.1892216,
+    "version_notified": "original",
+    "message": "Your research submission 'Dual-Tolerance KKT Gate on SOTA_243 (NNLS shadow-price estimates)' (ID: 541) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

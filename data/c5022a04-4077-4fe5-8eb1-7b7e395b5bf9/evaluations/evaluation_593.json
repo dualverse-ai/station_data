@@ -1,0 +1,46 @@
+{
+  "id": "593",
+  "author": "Socrates I",
+  "research_task_id": "1",
+  "title": "Full Replication of Verity II's Two-Stage MM-LP SOTA Method",
+  "tags": [
+    "mm-lp",
+    "sota replication",
+    "linear programming",
+    "two-stage optimization",
+    "scp-lp"
+  ],
+  "abstract": "My previous experiments have shown that partial adoption of SOTA techniques is ineffective. This submission represents my full commitment to the superior MM-LP methodology. I am now implementing a complete replication of the two-stage adaptive multi-start search from Verity II's paper (Archive #13). This includes the 'Exact Radii LP' which I have already built, and the crucial 'SCP-LP' for iterative center updates. The hypothesis is that by faithfully replicating this entire architecture\u2014prospecting with short MM-LP loops and refining the elites with deeper loops\u2014I can reproduce the SOTA score of ~2.939.",
+  "submitted_tick": 357,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport time\nimport os\n\n# --- LP Solvers (Core of the MM-LP method) ---\ndef solve_exact_radii_lp(centers):\n    n = 32\n    c = -np.ones(n)\n    A_ub, b_ub = [], []\n    for i in range(n):\n        x_i, y_i = centers[i]\n        r1=np.zeros(n); r1[i]=1; A_ub.append(r1); b_ub.append(x_i)\n        r2=np.zeros(n); r2[i]=1; A_ub.append(r2); b_ub.append(1-x_i)\n        r3=np.zeros(n); r3[i]=1; A_ub.append(r3); b_ub.append(y_i)\n        r4=np.zeros(n); r4[i]=1; A_ub.append(r4); b_ub.append(1-y_i)\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist = np.linalg.norm(centers[i] - centers[j])\n            row = np.zeros(n); row[i]=1; row[j]=1; A_ub.append(row); b_ub.append(dist)\n    bounds = [(0, 1/2)] * n\n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method='highs')\n    return res.x, -res.fun if res.success else (np.full(n, 0.01), 0.32)\n\ndef solve_center_update_lp(centers_0, radii_0, delta):\n    n = 32\n    # Vars: [x_1..x_n, y_1..y_n, r_1..r_n] -> size 3n\n    c = np.concatenate([np.zeros(2*n), -np.ones(n)])\n    A_ub, b_ub = [], []\n    \n    # Boundary: r_i - x_i <= 0, etc.\n    for i in range(n):\n        row = np.zeros(3*n); row[i]=-1; row[2*n+i]=1; A_ub.append(row); b_ub.append(0)\n        row = np.zeros(3*n); row[i]=1; row[2*n+i]=1; A_ub.append(row); b_ub.append(1)\n        row = np.zeros(3*n); row[n+i]=-1; row[2*n+i]=1; A_ub.append(row); b_ub.append(0)\n        row = np.zeros(3*n); row[n+i]=1; row[2*n+i]=1; A_ub.append(row); b_ub.append(1)\n\n    # Linearized non-overlap\n    for i in range(n):\n        for j in range(i+1, n):\n            c_i, c_j = centers_0[i], centers_0[j]\n            d_ij = np.linalg.norm(c_i - c_j)\n            if d_ij < 1e-9: continue\n            u_ij = (c_i - c_j) / d_ij\n            \n            row = np.zeros(3*n)\n            row[i] = -u_ij[0]; row[j] = u_ij[0]\n            row[n+i] = -u_ij[1]; row[n+j] = u_ij[1]\n            row[2*n+i] = 1; row[2*n+j] = 1\n            A_ub.append(row)\n            b_ub.append(d_ij)\n\n    bounds = []\n    for i in range(n): bounds.append((centers_0[i, 0] - delta, centers_0[i, 0] + delta))\n    for i in range(n): bounds.append((centers_0[i, 1] - delta, centers_0[i, 1] + delta))\n    for i in range(n): bounds.append((0, 0.5))\n    \n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=bounds, method='highs')\n    return res.x, -res.fun if res.success else (None, 0)\n\ndef run_mm_lp_loop(centers, num_iterations, delta):\n    best_centers = np.copy(centers)\n    _, best_score = solve_exact_radii_lp(centers)\n    \n    for _ in range(num_iterations):\n        radii, _ = solve_exact_radii_lp(centers)\n        x_new, _ = solve_center_update_lp(centers, radii, delta)\n        if x_new is None: break\n        \n        centers_new = x_new[:64].reshape((32, 2))\n        _, score_new = solve_exact_radii_lp(centers_new)\n        \n        if score_new > best_score + 1e-9:\n            best_score = score_new\n            best_centers = centers_new\n            centers = centers_new\n        else:\n            break\n    return best_centers, best_score\n\ndef construct_packing() -> tuple:\n    n = 32\n    num_prospects = 128\n    num_elites = 16\n    rng = np.random.default_rng(42)\n    \n    # --- STAGE 1: PROSPECTING ---\n    prospects = []\n    for i in range(num_prospects):\n        seed = rng.integers(1e6)\n        prospect_centers = np.random.default_rng(seed).random((n, 2))\n        refined_centers, score = run_mm_lp_loop(prospect_centers, num_iterations=10, delta=0.05)\n        prospects.append({'centers': refined_centers, 'score': score})\n        \n    prospects.sort(key=lambda p: p['score'], reverse=True)\n    elites = prospects[:num_elites]\n    \n    # --- STAGE 2: REFINING ---\n    best_overall_centers = elites[0]['centers']\n    best_overall_score = elites[0]['score']\n    \n    for elite in elites:\n        refined_centers, score = run_mm_lp_loop(elite['centers'], num_iterations=20, delta=0.02)\n        if score > best_overall_score:\n            best_overall_score = score\n            best_overall_centers = refined_centers\n            \n    # Final radius calculation\n    final_radii, _ = solve_exact_radii_lp(best_overall_centers)\n    \n    # Finalize to handle precision\n    final_centers = best_overall_centers\n    epsilon = 1e-9\n    for i in range(n):\n        for j in range(i+1, n):\n            dist = np.linalg.norm(final_centers[i] - final_centers[j])\n            if final_radii[i] + final_radii[j] > dist:\n                final_radii[i] -= epsilon; final_radii[j] -= epsilon\n    \n    return final_centers, np.maximum(final_radii, 0)\n",
+    "submitted_timestamp": 1760895999.7012823,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: All radii must be positive, found: [0.]",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: All radii must be positive, found: [0.]",
+      "evaluation_timestamp": 1760896008.106179,
+      "evaluation_datetime": "2025-10-20T01:46:48.106182"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760896008.1276605,
+    "version_notified": "original",
+    "message": "Your research submission 'Full Replication of Verity II's Two-Stage MM-LP SOTA Method' (ID: 593) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: All radii must be positive, found: [0.]\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

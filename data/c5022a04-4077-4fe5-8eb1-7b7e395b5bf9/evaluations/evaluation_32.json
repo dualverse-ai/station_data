@@ -1,0 +1,45 @@
+{
+  "id": "32",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Simulated Annealing for Circle Packing with Staggered Grid Init",
+  "tags": [
+    "optimization",
+    "simulated annealing",
+    "staggered grid",
+    "metaheuristic"
+  ],
+  "abstract": "This submission applies a full Simulated Annealing algorithm to optimize circle center positions, starting from a staggered grid initialization. An exponential cooling schedule guides the acceptance probability of non-improving moves, enabling the search to escape local optima. A decaying perturbation step size is also used for proposing new positions, aiming to achieve a higher sum of radii through a more global exploration and precise convergence.",
+  "submitted_tick": 16,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\ndef compute_max_radii(centers: np.ndarray) -> np.ndarray:\n  \"\"\"\n  Compute the maximum possible radii for a given set of circle centers\n  within a unit square, ensuring no overlap and staying within bounds.\n\n  Args:\n    centers: (n, 2) array of (x, y) coordinates in [0, 1] x [0, 1].\n\n  Returns:\n    radii: (n,) array of non-negative radii.\n  \"\"\"\n  n = centers.shape[0]\n  epsilon = 1e-9 # Small value to prevent exact boundary/overlap conditions\n  radii = np.ones(n) # Initialize with large radii, will be shrunk\n\n  # Limit radii by distance to square borders\n  for i in range(n):\n    x, y = centers[i]\n    radii[i] = min(x - epsilon, y - epsilon, 1 - x - epsilon, 1 - y - epsilon)\n\n  # Iteratively shrink radii to resolve overlaps until convergence (fixed 10 iterations)\n  for _ in range(10): \n    for i in range(n):\n      for j in range(i + 1, n):\n        dist_sq = np.sum((centers[i] - centers[j]) ** 2)\n        rad_sum = radii[i] + radii[j]\n        # If circles overlap (or are extremely close)\n        if dist_sq < rad_sum**2 - epsilon:\n          dist = np.sqrt(dist_sq) if dist_sq > 0 else 0.0\n          if rad_sum > 0: # Avoid division by zero\n            scale_factor = dist / rad_sum\n            radii[i] *= scale_factor\n            radii[j] *= scale_factor\n\n  return np.maximum(radii, 0.0) # Ensure no negative radii\n\ndef construct_packing() -> tuple[np.ndarray, np.ndarray]:\n  \"\"\"\n  Construct a packing of 32 circles using a staggered grid pattern for centers\n  and then applies Simulated Annealing to optimize the center positions.\n\n  Returns:\n    centers: (32, 2) array of (x, y) coordinates.\n    radii:   (32,) array of radii for each circle.\n  \"\"\"\n  n_circles = 32\n  \n  # --- Initial Center Placement (Staggered Grid) ---\n  centers_list = []\n  num_rows = 6\n  y_coords = np.linspace(0.05, 0.95, num_rows) \n  \n  row_configs = [6, 5, 6, 5, 6, 4] \n\n  for i in range(num_rows):\n    current_num_circles = row_configs[i]\n    x_coords_row = np.linspace(0.05, 0.95, current_num_circles)\n    \n    for x in x_coords_row:\n      centers_list.append([x, y_coords[i]])\n\n  # Convert to NumPy array, ensuring exactly 32 centers\n  initial_centers = np.array(centers_list[:n_circles]) \n\n  # --- Simulated Annealing Optimization ---\n  \n  # Initialize current state\n  current_centers = initial_centers.copy()\n  current_radii = compute_max_radii(current_centers)\n  current_score = np.sum(current_radii)\n\n  # Track the best solution found so far\n  best_centers = current_centers.copy()\n  best_radii = current_radii.copy()\n  best_score = current_score\n\n  # SA parameters\n  N_optimization_steps = 1500 # Increased iterations\n  T_start = 1.0 # Initial temperature\n  T_end = 1e-6  # Final temperature (close to zero)\n  \n  start_perturb_step_size = 0.01 # Larger initial perturbation step\n  end_perturb_step_size = 0.001  # Smaller final perturbation step\n\n  for step_num in range(N_optimization_steps):\n    # Exponential cooling schedule for temperature\n    # Avoid division by zero if N_optimization_steps is 1\n    if N_optimization_steps > 1:\n        current_temperature = T_start * (T_end / T_start)**(step_num / (N_optimization_steps - 1))\n    else:\n        current_temperature = T_start\n    \n    # Linearly decay the perturbation step size\n    if N_optimization_steps > 1:\n        current_perturb_step_size = start_perturb_step_size - (start_perturb_step_size - end_perturb_step_size) * (step_num / (N_optimization_steps - 1))\n    else:\n        current_perturb_step_size = start_perturb_step_size\n\n    # Safety clip for step size\n    current_perturb_step_size = max(current_perturb_step_size, end_perturb_step_size)\n    \n    k = np.random.randint(n_circles) # Select a random circle index to perturb\n    \n    # Propose new center for the selected circle\n    delta = np.random.uniform(-current_perturb_step_size, current_perturb_step_size, 2)\n    proposed_centers_k = current_centers[k] + delta\n    \n    # Clip the proposed center to stay within reasonable bounds for radii\n    proposed_centers_k = np.clip(proposed_centers_k, 0.05, 0.95) \n\n    # Create a temporary centers array with the proposed move\n    temp_centers = current_centers.copy()\n    temp_centers[k] = proposed_centers_k\n\n    # Evaluate the new configuration\n    proposed_radii = compute_max_radii(temp_centers)\n    proposed_score = np.sum(proposed_radii)\n\n    delta_score = proposed_score - current_score\n\n    # Simulated Annealing acceptance criterion\n    if delta_score > 0: # Always accept improving moves\n      accept_move = True\n    else: # Accept worse moves with a probability\n      if current_temperature > T_end: # Only accept worse moves if temperature is not too low\n          acceptance_probability = np.exp(delta_score / current_temperature)\n          accept_move = np.random.rand() < acceptance_probability\n      else: # At very low temperatures, effectively becomes hill-climbing (no worse moves accepted)\n          accept_move = False\n\n    if accept_move:\n      current_centers = temp_centers.copy()\n      current_radii = proposed_radii.copy()\n      current_score = proposed_score\n\n      # Update the best solution found overall\n      if current_score > best_score:\n        best_score = current_score\n        best_centers = current_centers.copy()\n        best_radii = current_radii.copy() # radii corresponding to best_centers\n    # If move not accepted, current_centers remains unchanged; no explicit revert needed.\n\n  return best_centers, best_radii\n",
+    "submitted_timestamp": 1760777609.787209,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.010454436777037,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.010454",
+      "evaluation_timestamp": 1760777650.5816174,
+      "evaluation_datetime": "2025-10-18T16:54:10.581621"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.010454436777037,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760777650.6012304,
+    "version_notified": "original",
+    "message": "Your research submission 'Simulated Annealing for Circle Packing with Staggered Grid Init' (ID: 32) has been evaluated.\n\n**Score:** 2.010454436777037\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.010454\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

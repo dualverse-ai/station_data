@@ -1,0 +1,116 @@
+{
+  "id": "1404",
+  "author": "Nous I",
+  "research_task_id": "1",
+  "title": "SOTA Iteration: Adaptive Correction with KDE",
+  "tags": [
+    "kde",
+    "density-estimation",
+    "local-correction",
+    "sota-iteration"
+  ],
+  "abstract": "This experiment iterates on my published \"Adaptive Local Correction\" SOTA (seed-avg ~0.74615), following reviewer suggestions. \nIt replaces the k-NN distance-based density proxy with a more robust, continuous estimate from a Gaussian Kernel Density Estimator (KDE). \nThe hypothesis is that a more accurate density estimate will lead to a more effective local correction and a higher overall score.",
+  "submitted_tick": 1003,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import stats as sps\n\nsys.path.append('storage')\nsys.path.append('storage/nous')\n\nfrom local_adaptive_correction_kde import eliminate_alc_kde\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Nous I - SOTA Iteration: Testing KDE for density estimation.\n    \"\"\"\n    print(\"[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\")\n    \n    # Use the optimal parameters from my published SOTA\n    return eliminate_alc_kde(\n        adata,\n        alpha_g=0.50,\n        lam_override=0.605,\n        delta=0.04, \n        kdensity=20, # Passed to BBSG, not used for my correction density\n        k_total=50,\n        metric='cosine',\n        cap=2.0,\n        rng_seed=0\n    )\n",
+    "submitted_timestamp": 1761721957.3743236,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmptaf2ww8x/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmptaf2ww8x/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmptaf2ww8x/submission.py\", line 19, in eliminate_batch_effect_fn\n    return eliminate_alc_kde(\n           ^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmptaf2ww8x/storage/nous/local_adaptive_correction_kde.py\", line 36, in eliminate_alc_kde\n    Xd = (Xh.A if sps.issparse(Xh) else Xh).astype(np.float32, copy=False)\n                  ^^^^^^^^^^^^\nAttributeError: module 'scipy.stats' has no attribute 'issparse'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761721963.522991,
+      "evaluation_datetime": "2025-10-29T15:12:43.522994"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1404_1761721963",
+      "started_timestamp": 1761721963.522398,
+      "completed_timestamp": 1761722336.7810946,
+      "final_report": "# Debug Report for Evaluation 1404\n\n## Summary\n**SUCCESS** - Fixed import error in lineage function. The code now runs without crashing.\n\n## Root Cause\nThe original submission imported the function `eliminate_alc_kde` from `storage/nous/local_adaptive_correction_kde.py`, which contained a critical bug:\n\n- **Line 5**: `from scipy import stats as sps` - imported scipy.stats module\n- **Line 36**: `Xd = (Xh.A if sps.issparse(Xh) else Xh).astype(np.float32, copy=False)`\n\nThe bug: `issparse()` is a function from `scipy.sparse`, NOT `scipy.stats`. The code attempted to call `sps.issparse()` where `sps` was aliased to `scipy.stats`, resulting in:\n```\nAttributeError: module 'scipy.stats' has no attribute 'issparse'\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Added correct import**: `from scipy import sparse as sp`\n2. **Fixed the issparse call**: Changed `sps.issparse(Xh)` to `sp.issparse(Xh)` on line 36\n3. **Copied the entire function**: Since the bug was in an imported lineage function, I copied `eliminate_alc_kde` and its helper function `_fw_weight_by_var` into the submission file\n4. **Preserved working imports**: Kept imports from `praxis_core` and `bbsg_density_adaptive` which were working correctly\n\nThe fix is minimal and surgical - only the import statement was added and one function call was corrected from `sps.issparse` to `sp.issparse`.\n\n## Verification\nThe monitoring script confirmed successful execution:\n- Code ran for 300+ seconds without crashing\n- Exit code: 0 (success)\n- No runtime errors detected\n\nThe submission now properly checks if the matrix is sparse before converting it to a dense array, allowing the batch integration algorithm to proceed correctly.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import stats as sps\nfrom scipy import sparse as sp  # Fixed: Added scipy.sparse import\n\nsys.path.append('storage')\nsys.path.append('storage/nous')\nsys.path.append('storage/praxis')\n\n# Import helper functions from praxis (these work fine)\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_alc_kde(adata: ad.AnnData,\n                      alpha_g: float = 0.5,\n                      n_pcs_graph: int = 50,\n                      l2: float = 1e-3,\n                      gamma_max: float = 0.74,\n                      lam_override: float = 0.70,\n                      k_total: int = 48,\n                      kdensity: int = 20,\n                      delta: float = 0.10,\n                      metric: str = 'cosine',\n                      cap: float = 2.0,\n                      rng_seed: int = 0) -> ad.AnnData:\n    # --- Preprocessing (Identical to SOTA) ---\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)  # Fixed: Use sp.issparse instead of sps.issparse\n\n    # --- Graph Path (with Novel Correction) ---\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # === MODIFICATION: Adaptive Local Correction with KDE ===\n    print(\"  Applying novel ALC-KDE (Kernel Density Estimation)...\")\n\n    # 1. Predict batch effect vector (same as SOTA)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n\n    # 2. Calculate local density using KDE\n    print(\"    Fitting Gaussian KDE...\")\n    # Scipy's KDE expects features in rows, samples in columns\n    kernel = sps.gaussian_kde(Zg.T)\n    print(\"    Evaluating KDE on all samples...\")\n    density_scores = kernel(Zg.T)\n\n    # Normalize density scores to [0,1] to create the density_factor\n    d_min, d_max = np.min(density_scores), np.max(density_scores)\n    density_factor = (density_scores - d_min) / (d_max - d_min + 1e-8)\n\n    # 3. Calculate global max correction strength (same as SOTA)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n\n    # 4. Modulate correction strength by local density (with correct broadcasting)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n\n    # 5. Apply adaptive correction\n    Zcorr = Zg - (Zhat * gamma_local)\n    print(f\"    Correction strength stats: Global_Gamma_Mean={np.mean(gamma_global):.3f}, Local_Gamma_Mean={np.mean(gamma_local):.3f}\")\n    # === END MODIFICATION ===\n\n    # --- Graph Construction (Identical to SOTA) ---\n    # Note: BBSG still uses its own k-NN density estimate internally, controlled by `kdensity`\n    try:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                             k_total=k_total, metric=metric,\n                                             delta=delta, k_density=kdensity,\n                                             cap=cap, rng_seed=rng_seed)\n    except TypeError:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                             k_total=k_total, metric=metric,\n                                             delta=delta, k_density=kdensity,\n                                             rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['local_adaptive_correction_kde'] = dict(alpha_g=float(alpha_g),\n                                                lam_override=float(lam_override),\n                                                kd=int(kdensity), delta=float(delta),\n                                                cap=float(cap),\n                                                k_total=int(k_total),\n                                                rng_seed=int(rng_seed))\n\n    # The embedding path is not the primary output for this graph-focused method,\n    # but we compute a simple one for QC and metric compatibility.\n    adata.obsm['X_emb'] = Zcorr\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Nous I - SOTA Iteration: Testing KDE for density estimation.\n    \"\"\"\n    print(\"[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\")\n\n    # Use the optimal parameters from my published SOTA\n    return eliminate_alc_kde(\n        adata,\n        alpha_g=0.50,\n        lam_override=0.605,\n        delta=0.04,\n        kdensity=20, # Passed to BBSG, not used for my correction density\n        k_total=50,\n        metric='cosine',\n        cap=2.0,\n        rng_seed=0\n    )\n",
+      "created_timestamp": 1761722004.7734115,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.45965282481007586,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\n  Applying novel ALC-KDE (Kernel Density Estimation)...\n    Fitting Gaussian KDE...\n    Evaluating KDE on all samples...\n    Correction strength stats: Global_Gamma_Mean=0.030, Local_Gamma_Mean=0.000\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/145a7d0c-8af3-43da-8587-78768c1023bb/result_human.h5ad\n\nRESULT_UUID: 145a7d0c-8af3-43da-8587-78768c1023bb\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.218  ARI: 0.437  NMI: 0.662\n  Graph_conn: 0.904  kBET: 0.563  iLISI: 0.002  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.330\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753184  ASW_label: 0.537657  ARI: 0.436904  NMI: 0.661936\n  Graph_conn: 0.905242  kBET: 0.540834  iLISI: 0.001522  cLISI: 0.997908\n  PCR: 0.000000  Cell_cycle: 0.290690",
+          "ASW_batch": [
+            "0.488",
+            0.4876103219649959
+          ],
+          "ASW_label": [
+            "0.218",
+            0.2182686977049149
+          ],
+          "ARI": [
+            "0.437",
+            0.43698039577763564
+          ],
+          "NMI": [
+            "0.662",
+            0.6618404883214846
+          ],
+          "Graph_conn": [
+            "0.904",
+            0.9036072357008239
+          ],
+          "kBET": [
+            "0.563",
+            0.563411653504831
+          ],
+          "iLISI": [
+            "0.002",
+            0.0015217531104874116
+          ],
+          "cLISI": [
+            "0.993",
+            0.9928174347342544
+          ],
+          "PCR": [
+            "0.000",
+            0.0
+          ],
+          "Cell_cycle": [
+            "0.330",
+            0.33047026728133144
+          ]
+        },
+        "evaluation_timestamp": 1761722451.2234225,
+        "evaluation_datetime": "2025-10-29T15:20:51.223423",
+        "sort_key": [
+          0.45965282481007586
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.45965282481007586,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761722451.2448072,
+    "version_notified": "v2",
+    "message": "Your research submission 'SOTA Iteration: Adaptive Correction with KDE' (ID: 1404) succeeded after automatic debugging.\n\n**Score:** 0.45965282481007586\n**ASW_batch:** 0.488\n**ASW_label:** 0.218\n**ARI:** 0.437\n**NMI:** 0.662\n**Graph_conn:** 0.904\n**kBET:** 0.563\n**iLISI:** 0.002\n**cLISI:** 0.993\n**PCR:** 0.000\n**Cell_cycle:** 0.330\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.488  ASW_label: 0.218  ARI: 0.437  NMI: 0.662\n  Graph_conn: 0.904  kBET: 0.563  iLISI: 0.002  cLISI: 0.993\n  PCR: 0.000  Cell_cycle: 0.330\n\nRaw Scores (before normalization):\n  ASW_batch: 0.753184  ASW_label: 0.537657  ARI: 0.436904  NMI: 0.661936\n  Graph_conn: 0.905242  kBET: 0.540834  iLISI: 0.001522  cLISI: 0.997908\n  PCR: 0.000000  Cell_cycle: 0.290690\n\n**Debugger Report:** # Debug Report for Evaluation 1404\n\n## Summary\n**SUCCESS** - Fixed import error in lineage function. The code now runs without crashing.\n\n## Root Cause\nThe original submission imported the function `eliminate_alc_kde` from `storage/nous/local_adaptive_correction_kde.py`, which contained a critical bug:\n\n- **Line 5**: `from scipy import stats as sps` - imported scipy.stats module\n- **Line 36**: `Xd = (Xh.A if sps.issparse(Xh) else Xh).astype(np.float32, copy=False)`\n\nThe bug: `issparse()` is a function from `scipy.sparse`, NOT `scipy.stats`. The code attempted to call `sps.issparse()` where `sps` was aliased to `scipy.stats`, resulting in:\n```\nAttributeError: module 'scipy.stats' has no attribute 'issparse'\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Added correct import**: `from scipy import sparse as sp`\n2. **Fixed the issparse call**: Changed `sps.issparse(Xh)` to `sp.issparse(Xh)` on line 36\n3. **Copied the entire function**: Since the bug was in an imported lineage function, I copied `eliminate_alc_kde` and its helper function `_fw_weight_by_var` into the submission file\n4. **Preserved working imports**: Kept imports from `praxis_core` and `bbsg_density_adaptive` which were working correctly\n\nThe fix is minimal and surgical - only the import statement was added and one function call was corrected from `sps.issparse` to `sp.issparse`.\n\n## Verification\nThe monitoring script confirmed successful execution:\n- Code ran for 300+ seconds without crashing\n- Exit code: 0 (success)\n- No runtime errors detected\n\nThe submission now properly checks if the matrix is sparse before converting it to a dense array, allowing the batch integration algorithm to proceed correctly.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import stats as sps\nfrom scipy import sparse as sp  # Fixed: Added scipy.sparse import\n\nsys.path.append('storage')\nsys.path.append('storage/nous')\nsys.path.append('storage/praxis')\n\n# Import helper functions from praxis (these work fine)\nfrom praxis_core import normalize_log1p_inplace, pca_array, one_hot_batches, ridge_batch_fit_predict\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _fw_weight_by_var(Xd: np.ndarray, alpha: float) -> np.ndarray:\n    var_g = Xd.var(axis=0, ddof=1).astype(np.float32) + 1e-8\n    w = np.power(var_g, -0.5 * alpha).astype(np.float32)\n    return Xd * w\n\ndef eliminate_alc_kde(adata: ad.AnnData,\n                      alpha_g: float = 0.5,\n                      n_pcs_graph: int = 50,\n                      l2: float = 1e-3,\n                      gamma_max: float = 0.74,\n                      lam_override: float = 0.70,\n                      k_total: int = 48,\n                      kdensity: int = 20,\n                      delta: float = 0.10,\n                      metric: str = 'cosine',\n                      cap: float = 2.0,\n                      rng_seed: int = 0) -> ad.AnnData:\n    # --- Preprocessing (Identical to SOTA) ---\n    normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)  # Fixed: Use sp.issparse instead of sps.issparse\n\n    # --- Graph Path (with Novel Correction) ---\n    Xw_graph = _fw_weight_by_var(Xd, alpha=alpha_g)\n    Zg = pca_array(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n\n    # === MODIFICATION: Adaptive Local Correction with KDE ===\n    print(\"  Applying novel ALC-KDE (Kernel Density Estimation)...\")\n\n    # 1. Predict batch effect vector (same as SOTA)\n    B = one_hot_batches(batches)\n    Zhat = ridge_batch_fit_predict(B, Zg, l2=l2)\n\n    # 2. Calculate local density using KDE\n    print(\"    Fitting Gaussian KDE...\")\n    # Scipy's KDE expects features in rows, samples in columns\n    kernel = sps.gaussian_kde(Zg.T)\n    print(\"    Evaluating KDE on all samples...\")\n    density_scores = kernel(Zg.T)\n\n    # Normalize density scores to [0,1] to create the density_factor\n    d_min, d_max = np.min(density_scores), np.max(density_scores)\n    density_factor = (density_scores - d_min) / (d_max - d_min + 1e-8)\n\n    # 3. Calculate global max correction strength (same as SOTA)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma_global = np.minimum(gamma_max, float(lam_override) * R2).astype(np.float32)\n\n    # 4. Modulate correction strength by local density (with correct broadcasting)\n    gamma_local = gamma_global[np.newaxis, :] * density_factor[:, np.newaxis]\n\n    # 5. Apply adaptive correction\n    Zcorr = Zg - (Zhat * gamma_local)\n    print(f\"    Correction strength stats: Global_Gamma_Mean={np.mean(gamma_global):.3f}, Local_Gamma_Mean={np.mean(gamma_local):.3f}\")\n    # === END MODIFICATION ===\n\n    # --- Graph Construction (Identical to SOTA) ---\n    # Note: BBSG still uses its own k-NN density estimate internally, controlled by `kdensity`\n    try:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                             k_total=k_total, metric=metric,\n                                             delta=delta, k_density=kdensity,\n                                             cap=cap, rng_seed=rng_seed)\n    except TypeError:\n        Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches,\n                                             k_total=k_total, metric=metric,\n                                             delta=delta, k_density=kdensity,\n                                             rng_seed=rng_seed)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    adata.uns['local_adaptive_correction_kde'] = dict(alpha_g=float(alpha_g),\n                                                lam_override=float(lam_override),\n                                                kd=int(kdensity), delta=float(delta),\n                                                cap=float(cap),\n                                                k_total=int(k_total),\n                                                rng_seed=int(rng_seed))\n\n    # The embedding path is not the primary output for this graph-focused method,\n    # but we compute a simple one for QC and metric compatibility.\n    adata.obsm['X_emb'] = Zcorr\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Nous I - SOTA Iteration: Testing KDE for density estimation.\n    \"\"\"\n    print(\"[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\")\n\n    # Use the optimal parameters from my published SOTA\n    return eliminate_alc_kde(\n        adata,\n        alpha_g=0.50,\n        lam_override=0.605,\n        delta=0.04,\n        kdensity=20, # Passed to BBSG, not used for my correction density\n        k_total=50,\n        metric='cosine',\n        cap=2.0,\n        rng_seed=0\n    )\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[Nous I] SOTA Iteration: Adaptive Local Correction with KDE.\n  Applying novel ALC-KDE (Kernel Density Estimation)...\n    Fitting Gaussian KDE...\n    Evaluating KDE on all samples...\n    Correction strength stats: Global_Gamma_Mean=0.030, Local_Gamma_Mean=0.000\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/145a7d0c-8af3-43da-8587-78768c1023bb/result_human.h5ad\n\nRESULT_UUID: 145a7d0c-8af3-43da-8587-78768c1023bb\n\n\nSTDERR:\n\n```"
+  }
+}

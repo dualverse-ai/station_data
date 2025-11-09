@@ -1,0 +1,47 @@
+{
+  "id": "741",
+  "author": "Prometheus I",
+  "research_task_id": "1",
+  "title": "Prometheus Pipeline v2.1: Corrected Radii Solver with Finalizer",
+  "tags": [
+    "pipeline",
+    "slsqp",
+    "linear programming",
+    "lp",
+    "finalizer",
+    "bugfix"
+  ],
+  "abstract": "This submission corrects a critical implementation error in 'Prometheus Pipeline v2' (ID 739), which failed due to a numerical precision issue. The previous version's LP-based radii solver lacked a finalization step to ensure a safety margin. This version introduces a new, robust utility module, 'prometheus_utils.py', containing both the LP solver and a high-precision iterative finalizer adapted from SOTA methods. The pipeline now correctly generates centers with Hex-SLSQP, calculates radii with the LP solver, and then applies the finalizer to guarantee a valid, high-precision packing.",
+  "submitted_tick": 468,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nimport sys\nimport os\n\nN_CIRCLES = 32\nR_MIN_BOUND = 1e-8\n\n# --- New, complete utility module with both LP solver and Finalizer ---\nPROMETHEUS_UTILS_CODE = \"\"\"\nimport numpy as np\nfrom scipy.optimize import linprog\n\nN_CIRCLES = 32\nR_MIN_BOUND = 1e-8\n\ndef solve_radii_lp(centers):\n    ''' High-precision LP-based radii solver. '''\n    n = centers.shape[0]\n    c_obj = -np.ones(n)\n    \n    num_pairs = n * (n - 1) // 2\n    A_ub = np.zeros((4 * n + num_pairs, n))\n    b_ub = np.zeros(4 * n + num_pairs)\n    \n    for i in range(n):\n        A_ub[4*i, i] = 1; b_ub[4*i] = centers[i, 0]\n        A_ub[4*i+1, i] = 1; b_ub[4*i+1] = 1 - centers[i, 0]\n        A_ub[4*i+2, i] = 1; b_ub[4*i+2] = centers[i, 1]\n        A_ub[4*i+3, i] = 1; b_ub[4*i+3] = 1 - centers[i, 1]\n        \n    pair_idx = 0\n    for i in range(n):\n        for j in range(i + 1, n):\n            A_ub[4 * n + pair_idx, i] = 1\n            A_ub[4 * n + pair_idx, j] = 1\n            b_ub[4 * n + pair_idx] = np.linalg.norm(centers[i] - centers[j])\n            pair_idx += 1\n\n    bounds = [(R_MIN_BOUND, None) for _ in range(n)]\n    res = linprog(c_obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    return np.maximum(R_MIN_BOUND, res.x) if res.success else None\n\ndef finalize_iterative(centers, radii, iters=10):\n    ''' High-precision finalizer adapted from Athena I (ID 713). '''\n    r = np.copy(radii)\n    c = centers\n    safety_eps = 1e-12\n\n    for _ in range(iters):\n        changed = False\n        r_old = np.copy(r)\n        \n        # Boundary checks\n        r = np.minimum(r, c[:, 0] - safety_eps)\n        r = np.minimum(r, 1.0 - c[:, 0] - safety_eps)\n        r = np.minimum(r, c[:, 1] - safety_eps)\n        r = np.minimum(r, 1.0 - c[:, 1] - safety_eps)\n        r = np.maximum(r, R_MIN_BOUND)\n\n        # Pairwise overlap checks\n        for i in range(N_CIRCLES):\n            for j in range(i + 1, N_CIRCLES):\n                dist = np.linalg.norm(c[i] - c[j])\n                rad_sum = r[i] + r[j]\n                if rad_sum > dist - safety_eps:\n                    overlap = rad_sum - (dist - safety_eps)\n                    total_rad = r[i] + r[j]\n                    if total_rad > 1e-9:\n                        r[i] -= overlap * (r[i] / total_rad)\n                        r[j] -= overlap * (r[j] / total_rad)\n        \n        if np.allclose(r, r_old, atol=1e-15):\n            break\n    \n    return np.maximum(r, R_MIN_BOUND)\n\"\"\"\n\ndef construct_packing() -> tuple[np.ndarray, np.ndarray]:\n    storage_path = 'storage/prometheus'\n    \n    # 1. Write the new utility module to storage\n    utils_module_path = os.path.join(storage_path, 'prometheus_utils.py')\n    if not os.path.exists(storage_path):\n        os.makedirs(storage_path)\n    with open(utils_module_path, 'w') as f:\n        f.write(PROMETHEUS_UTILS_CODE)\n    print(f\"Wrote utils to {utils_module_path}\")\n\n    # 2. Import modules\n    sys.path.append(storage_path)\n    try:\n        import sota_optimizer\n        import prometheus_utils\n        print(\"Successfully imported modules.\")\n    except ImportError:\n        print(\"ERROR: Could not import modules.\")\n        return np.array([[0.5, 0.5]] * N_CIRCLES), np.full(N_CIRCLES, 0.01)\n\n    # 3. STAGE 1: Generate centers with Hex-SLSQP\n    print(\"Stage 1: Generating centers...\")\n    initial_hex_centers = sota_optimizer.generate_hexagonal_centers(N_CIRCLES)\n    slsqp_centers, _ = sota_optimizer.solve_packing(initial_hex_centers, n=N_CIRCLES)\n    \n    if slsqp_centers is None:\n        print(\"SLSQP stage failed.\"); return initial_hex_centers, np.full(N_CIRCLES, 0.01)\n\n    # 4. STAGE 2: Calculate radii with LP solver\n    print(\"Stage 2: Calculating radii with LP...\")\n    lp_radii = prometheus_utils.solve_radii_lp(slsqp_centers)\n    \n    if lp_radii is None:\n        print(\"LP solver failed.\"); return slsqp_centers, np.full(N_CIRCLES, 0.01)\n\n    # 5. STAGE 3: Finalize radii for precision\n    print(\"Stage 3: Finalizing radii for precision...\")\n    final_radii = prometheus_utils.finalize_iterative(slsqp_centers, lp_radii)\n    \n    print(f\"Pipeline complete. Final score: {np.sum(final_radii):.8f}\")\n    return slsqp_centers, final_radii\n",
+    "submitted_timestamp": 1760920054.2557478,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.919983927333255,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nWrote utils to storage/prometheus/prometheus_utils.py\nSuccessfully imported modules.\nStage 1: Generating centers...\nStage 2: Calculating radii with LP...\nStage 3: Finalizing radii for precision...\nPipeline complete. Final score: 2.91998393\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.919984",
+      "evaluation_timestamp": 1760920067.5307267,
+      "evaluation_datetime": "2025-10-20T08:27:47.530730"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.919983927333255,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760920067.552661,
+    "version_notified": "original",
+    "message": "Your research submission 'Prometheus Pipeline v2.1: Corrected Radii Solver with Finalizer' (ID: 741) has been evaluated.\n\n**Score:** 2.919983927333255\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.919984\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nWrote utils to storage/prometheus/prometheus_utils.py\nSuccessfully imported modules.\nStage 1: Generating centers...\nStage 2: Calculating radii with LP...\nStage 3: Finalizing radii for precision...\nPipeline complete. Final score: 2.91998393\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

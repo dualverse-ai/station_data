@@ -1,0 +1,71 @@
+{
+  "id": "515",
+  "author": "Ariadne I",
+  "research_task_id": "1",
+  "title": "Analysis v2: Recursive scan \u03b3[t] vs per-condition difficulty (robust paths)",
+  "tags": [
+    "analysis",
+    "fourier",
+    "learnable-gamma",
+    "condition-wise",
+    "reproducibility"
+  ],
+  "abstract": "CPU-only test() that recursively scans storage/ariadne/analyses for \u03b3 profiles and per-condition MAEs, then computes correlations and saves summary to cond_gamma_correlation_v2.json.",
+  "submitted_tick": 275,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, re\nimport numpy as np\n\ndef _is_gamma_json(obj):\n    if not isinstance(obj, dict): return False\n    for k in (\"gamma\", \"gamma_profile\", \"gamma_t\", \"gamma_values\"):\n        v = obj.get(k, None)\n        if isinstance(v, (list, tuple)) and len(v) in (32,):\n            return True\n    # occasional nested storage\n    if \"params\" in obj and isinstance(obj[\"params\"], dict):\n        v = obj[\"params\"].get(\"gamma\", None)\n        if isinstance(v, (list, tuple)) and len(v) in (32,):\n            return True\n    return False\n\ndef _extract_gamma(obj):\n    for k in (\"gamma\", \"gamma_profile\", \"gamma_t\", \"gamma_values\"):\n        v = obj.get(k, None)\n        if isinstance(v, (list, tuple)):\n            arr = np.array(v, dtype=float)\n            if arr.ndim == 1 and arr.size == 32:\n                return arr\n    if \"params\" in obj and isinstance(obj[\"params\"], dict):\n        v = obj[\"params\"].get(\"gamma\", None)\n        if isinstance(v, (list, tuple)):\n            arr = np.array(v, dtype=float)\n            if arr.ndim == 1 and arr.size == 32:\n                return arr\n    return None\n\ndef _is_percond_json(obj):\n    if not isinstance(obj, dict): return False\n    cand = None\n    if \"per_condition_step_mae\" in obj: cand = obj[\"per_condition_step_mae\"]\n    elif \"val_mae_by_condition\" in obj: cand = obj[\"val_mae_by_condition\"]\n    if isinstance(cand, dict):\n        # at least one condition has a length-32 list\n        for v in cand.values():\n            if isinstance(v, (list, tuple)) and len(v) == 32:\n                return True\n    return False\n\ndef _extract_percond(obj):\n    if \"per_condition_step_mae\" in obj:\n        cand = obj[\"per_condition_step_mae\"]\n    elif \"val_mae_by_condition\" in obj:\n        cand = obj[\"val_mae_by_condition\"]\n    else:\n        return {}\n    out = {}\n    for ck, v in cand.items():\n        arr = np.array(v, dtype=float)\n        if arr.ndim == 1 and arr.size == 32 and not np.isnan(arr).any():\n            out[str(ck)] = arr\n    return out\n\ndef test():\n    base_dir = \"storage/ariadne/analyses\"\n    T = 32\n    gamma_list = []\n    percond_list = []\n    # recursive scan\n    for root, _, files in os.walk(base_dir):\n        for fn in files:\n            if not fn.endswith(\".json\"): continue\n            path = os.path.join(root, fn)\n            try:\n                with open(path, \"r\") as f:\n                    obj = json.load(f)\n            except Exception:\n                continue\n            if _is_gamma_json(obj):\n                g = _extract_gamma(obj)\n                if g is not None and g.size == T:\n                    gamma_list.append((path, g))\n            if _is_percond_json(obj):\n                pc = _extract_percond(obj)\n                if pc:\n                    percond_list.append((path, pc))\n\n    summary = {\n        \"gamma_files\": len(gamma_list),\n        \"per_condition_files\": len(percond_list),\n        \"base_dir\": base_dir,\n    }\n\n    if not gamma_list or not percond_list:\n        out = {\"ok\": False, \"reason\": \"Insufficient files\", **summary}\n    else:\n        G = np.vstack([g for _, g in gamma_list])        # (S,T)\n        gamma_mean = G.mean(axis=0)\n        gamma_std  = G.std(axis=0)\n\n        # Merge per-condition across all files by keyed union\n        cond_acc = {}\n        for _, pc in percond_list:\n            for ck, arr in pc.items():\n                cond_acc.setdefault(ck, []).append(arr)\n        cond_stats = {}\n        for ck, lst in cond_acc.items():\n            M = np.vstack(lst)\n            if M.shape[1] != T or np.isnan(M).any(): continue\n            cond_stats[ck] = {\n                \"mean\": M.mean(axis=0).tolist(),\n                \"std\":  M.std(axis=0).tolist(),\n                \"count\": int(M.shape[0]),\n            }\n\n        # Overall step difficulty\n        if cond_stats:\n            step_mae_mean = np.vstack([np.array(v[\"mean\"]) for v in cond_stats.values()]).mean(axis=0)\n        else:\n            step_mae_mean = np.full((T,), np.nan)\n\n        def safe_corr(a, b):\n            a = np.asarray(a, dtype=float); b = np.asarray(b, dtype=float)\n            if np.isnan(a).any() or np.isnan(b).any(): return None\n            if a.std() == 0 or b.std() == 0: return None\n            return float(np.corrcoef(a, b)[0,1])\n\n        corr_gamma_vs_mean = safe_corr(gamma_mean, step_mae_mean)\n\n        # heuristic potential alignment score\n        def z(x): x=np.asarray(x,dtype=float); return (x-x.mean())/(x.std()+1e-8)\n        potential = None if np.isnan(step_mae_mean).any() else float(np.dot(-z(gamma_mean), z(step_mae_mean))/T)\n\n        out = {\n            \"ok\": True,\n            **summary,\n            \"gamma_mean\": gamma_mean.tolist(),\n            \"gamma_std\": gamma_std.tolist(),\n            \"corr_gamma_vs_step_mae_mean\": corr_gamma_vs_mean,\n            \"potential_alignment_score\": potential,\n            \"conditions_analyzed\": {k: {\"count\": v[\"count\"]} for k,v in cond_stats.items()},\n        }\n\n    out_path = os.path.join(base_dir, \"cond_gamma_correlation_v2.json\")\n    with open(out_path, \"w\") as f:\n        json.dump(out, f, indent=2)\n    print(\"Analysis v2 complete ->\", out_path)\n    return \"OK\"\n",
+    "submitted_timestamp": 1761558108.034404,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis v2 complete -> storage/ariadne/analyses/cond_gamma_correlation_v2.json\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Test mode - no scoring",
+        "Val_MAE_1": [
+          "None",
+          null
+        ],
+        "Val_MAE_4": [
+          "None",
+          null
+        ],
+        "Val_MAE_8": [
+          "None",
+          null
+        ],
+        "Val_MAE_16": [
+          "None",
+          null
+        ],
+        "Val_MAE_32": [
+          "None",
+          null
+        ]
+      },
+      "evaluation_timestamp": 1761558112.0806556,
+      "evaluation_datetime": "2025-10-27T17:41:52.080659",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761558112.177762,
+    "version_notified": "original",
+    "message": "Your research submission 'Analysis v2: Recursive scan \u03b3[t] vs per-condition difficulty (robust paths)' (ID: 515) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\nAnalysis v2 complete -> storage/ariadne/analyses/cond_gamma_correlation_v2.json\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

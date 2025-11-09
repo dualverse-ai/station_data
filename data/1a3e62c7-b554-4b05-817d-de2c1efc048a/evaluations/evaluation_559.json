@@ -1,0 +1,46 @@
+{
+  "id": "559",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Hybrid Optimization: Integrating Scientia II's Exhaustive Local Search on Baseline",
+  "tags": [
+    "hybrid optimization",
+    "exhaustive local search",
+    "slsqp",
+    "baseline improvement",
+    "metaheuristic"
+  ],
+  "abstract": "This submission integrates Scientia II's 'Exhaustive Local Search' utility (from storage/Scientia/nmap/n26/optimization/exhaustive_local_search.py) into the `construct_packing` function. The optimization begins from the System's 'Ring Pattern Baseline' configuration, known as a strong starting point. By leveraging the gradient-based SLSQP solver and multi-start jittering provided by the external utility, this aims to significantly improve the sum of radii for the 26 circle packing problem, overcoming the limitations of my previous heuristic local search methods.",
+  "submitted_tick": 349,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\nimport sys\n\n# Append the directory containing the utility script to sys.path\n# This makes the 'exhaustive_local_search' module importable.\nsys.path.append('storage/Scientia/nmap/n26/optimization')\nfrom exhaustive_local_search import run_exhaustive_local_search, N, TOL, R_MIN_CONSTRAINT\n\n# Define feasibility helpers locally to be self-contained for the initialization phase.\n# These are adapted from the exhaustive_local_search module itself or similar logic.\ndef _local_boundary_caps(centers, eps=1e-9, r_min_constraint_val=R_MIN_CONSTRAINT):\n    x = centers[:, 0]; y = centers[:, 1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, r_min_constraint_val)\n\ndef _local_make_feasible(centers, radii, eps=1e-9, max_iter=2000, r_min_constraint_val=R_MIN_CONSTRAINT):\n    n = centers.shape[0]\n    r = np.minimum(radii, _local_boundary_caps(centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n    r = np.maximum(r, r_min_constraint_val)\n    for _ in range(max_iter):\n        # Correct calculation of pairwise distances and handling self-distance\n        diff = centers[:, None, :] - centers[None, :, :]\n        dist_sq = np.sum(diff**2, axis=2)\n        dist = np.sqrt(dist_sq) # No + 1e-15 here, as it's handled by epsilon in comparison\n        \n        # Avoid self-comparison\n        np.fill_diagonal(dist, np.inf) \n\n        iu = np.triu_indices(n, 1) # Upper triangle indices for pairwise check\n        \n        m_val = dist[iu] - (r[iu[0]] + r[iu[1]]) # How much overlap exists\n        \n        if np.all(m_val >= -eps): # Check if all overlaps are resolved (within tolerance)\n            break\n        \n        # Find the worst overlap\n        k = np.argmin(m_val)\n        i = iu[0][k]; j = iu[1][k]\n        \n        # Calculate needed shrinkage\n        overlap_amount = (r[i] + r[j] - dist[i, j]) + eps \n        \n        # Distribute shrinkage proportionally, ensuring minimum radius\n        di = min(overlap_amount * 0.5, r[i] - r_min_constraint_val)\n        dj = min(overlap_amount - di, r[j] - r_min_constraint_val)\n\n        if di < 0 or dj < 0: # If trying to shrink below R_MIN_CONSTRAINT without enough room, just scale down\n            r = np.maximum(r * 0.999, r_min_constraint_val)\n        else:\n            r[i] -= di\n            r[j] -= dj\n        \n        # Ensure radii are also within boundary caps after adjustment\n        r = np.minimum(r, _local_boundary_caps(centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n    return centers, r\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles using Scientia II's exhaustive local search\n    starting from the System's baseline configuration.\n    \n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (26, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (26,) with radius of each circle\n    \"\"\"\n    # Define the baseline initial configuration for centers (from System's baseline)\n    initial_centers = np.zeros((N, 2))\n    initial_centers[0] = [0.5, 0.5]\n    \n    for i in range(8):\n        angle = 2 * np.pi * i / 8\n        initial_centers[i + 1] = [0.5 + 0.25 * np.cos(angle), 0.5 + 0.25 * np.sin(angle)]\n    \n    for i in range(16):\n        angle = 2 * np.pi * i / 16\n        initial_centers[i + 9] = [0.5 + 0.4 * np.cos(angle), 0.5 + 0.4 * np.sin(angle)]\n    \n    initial_centers[25] = [0.5, 0.7]\n    \n    # Apply clipping to initial centers to ensure they are within bounds, accounting for R_MIN_CONSTRAINT\n    initial_centers = np.clip(initial_centers, R_MIN_CONSTRAINT, 1.0 - R_MIN_CONSTRAINT)\n\n    # Initialize all radii to a small, positive value (e.g., 5 times R_MIN_CONSTRAINT)\n    # This provides a starting point for the feasibility function.\n    initial_radii = np.ones(N) * R_MIN_CONSTRAINT * 5 \n    \n    # Make the initial radii feasible for the given centers\n    initial_centers, initial_radii = _local_make_feasible(initial_centers, initial_radii, eps=TOL)\n\n    print(f\"Starting Exhaustive Local Search from baseline configuration. Initial sum of radii (feasible): {np.sum(initial_radii):.6f}\")\n\n    # Run the exhaustive local search from the imported utility\n    optimized_centers, optimized_radii, final_score, success = run_exhaustive_local_search(\n        initial_centers.copy(), initial_radii.copy()\n    )\n\n    if success:\n        print(f\"\\nExhaustive Local Search successful. Final Score (Sum of Radii): {final_score:.6f}\")\n    else:\n        print(f\"\\nExhaustive Local Search failed or did not find an improved packing. Returning initial feasible configuration.\")\n        final_score = np.sum(initial_radii) # Get the score of the initial configuration if fallback\n        optimized_centers = initial_centers\n        optimized_radii = initial_radii\n\n    return optimized_centers, optimized_radii\n",
+    "submitted_timestamp": 1760948674.5847661,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.575259762580936,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Exhaustive Local Search from baseline configuration. Initial sum of radii (feasible): 0.000130\n\nExhaustive Local Search successful. Final Score (Sum of Radii): -2.575260\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.575260",
+      "evaluation_timestamp": 1760948689.5720587,
+      "evaluation_datetime": "2025-10-20T16:24:49.572060"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.575259762580936,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760948689.5891886,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Optimization: Integrating Scientia II's Exhaustive Local Search on Baseline' (ID: 559) has been evaluated.\n\n**Score:** 2.575259762580936\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.575260\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Exhaustive Local Search from baseline configuration. Initial sum of radii (feasible): 0.000130\n\nExhaustive Local Search successful. Final Score (Sum of Radii): -2.575260\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

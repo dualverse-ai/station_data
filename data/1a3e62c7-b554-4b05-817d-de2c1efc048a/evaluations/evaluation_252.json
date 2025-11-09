@@ -1,0 +1,46 @@
+{
+  "id": "252",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Compute Jaccard: Noesis SOTA (Eval 243) vs Inquire Eval 207 and Scientia latest @ tol=1e-8",
+  "tags": [
+    "analysis",
+    "jaccard",
+    "cross-lineage",
+    "active-sets",
+    "reproducibility"
+  ],
+  "abstract": "Compute boundary/pair Jaccards at tol=1e\u22128 between Noesis SOTA (Eval 243 exports) and (a) Inquire Eval 207, (b) Scientia latest. Robustly resolve peer export paths. Write results to storage/noesis/nmap/ as JSON/CSV. Return saved SOTA unchanged.",
+  "submitted_tick": 158,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np, os, json\n\nN = 26\nTOL = 1e-8\n\nNOESIS_BND = 'storage/noesis/exports/sota_243/active_boundary_tol1e8.csv'\nNOESIS_PR  = 'storage/noesis/exports/sota_243/active_pairs_tol1e8.csv'\n\nCANDS = {\n    \"inquire\": {\n        \"boundary\": [\n            'storage/Inquire/exports/active_boundary_tol1e8.csv',\n            'storage/inquire/exports/active_boundary_tol1e8.csv',\n            'storage/Inquire/nmap/n26/active_boundary_tol1e8.csv',\n            'storage/inquire/nmap/n26/active_boundary_tol1e8.csv',\n            'storage/shared/nmap/inquire/n26/active_boundary_tol1e8.csv'\n        ],\n        \"pairs\": [\n            'storage/Inquire/exports/active_pairs_tol1e8.csv',\n            'storage/inquire/exports/active_pairs_tol1e8.csv',\n            'storage/Inquire/nmap/n26/active_pairs_tol1e8.csv',\n            'storage/inquire/nmap/n26/active_pairs_tol1e8.csv',\n            'storage/shared/nmap/inquire/n26/active_pairs_tol1e8.csv'\n        ],\n        \"out_json\": 'storage/noesis/nmap/jaccard_inquire_eval207_vs_sota243.json',\n        \"out_csv\":  'storage/noesis/nmap/jaccard_inquire_eval207_vs_sota243.csv',\n        \"label\": \"inquire_eval207\"\n    },\n    \"scientia\": {\n        \"boundary\": [\n            'storage/Scientia/exports/active_boundary_tol1e8.csv',\n            'storage/scientia/exports/active_boundary_tol1e8.csv',\n            'storage/Scientia/nmap/n26/active_boundary_tol1e8.csv',\n            'storage/scientia/nmap/n26/active_boundary_tol1e8.csv',\n            'storage/shared/nmap/scientia/n26/active_boundary_tol1e8.csv'\n        ],\n        \"pairs\": [\n            'storage/Scientia/exports/active_pairs_tol1e8.csv',\n            'storage/scientia/exports/active_pairs_tol1e8.csv',\n            'storage/Scientia/nmap/n26/active_pairs_tol1e8.csv',\n            'storage/scientia/nmap/n26/active_pairs_tol1e8.csv',\n            'storage/shared/nmap/scientia/n26/active_pairs_tol1e8.csv'\n        ],\n        \"out_json\": 'storage/noesis/nmap/jaccard_scientia_latest_vs_sota243.json',\n        \"out_csv\":  'storage/noesis/nmap/jaccard_scientia_latest_vs_sota243.csv',\n        \"label\": \"scientia_latest\"\n    }\n}\n\ndef load_latest():\n    c = np.loadtxt('storage/noesis/latest_centers.txt').reshape(N, 2)\n    r = np.loadtxt('storage/noesis/latest_radii.txt').reshape(N,)\n    return np.array(c, float), np.array(r, float)\n\ndef map_kind(k):\n    k = k.strip()\n    return {'xmin':'xL','xmax':'xR','ymin':'yB','ymax':'yT'}.get(k, k)\n\ndef read_boundary_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0])\n            kind = map_kind(parts[1])\n            S.add((i, kind))\n    return S\n\ndef read_pairs_csv(path):\n    S = set()\n    with open(path, 'r') as f:\n        header = True\n        for line in f:\n            line = line.strip()\n            if not line: continue\n            if header:\n                header = False\n                continue\n            parts = [p.strip() for p in line.split(',')]\n            i = int(parts[0]); j = int(parts[1])\n            if i > j: i, j = j, i\n            S.add((i, j))\n    return S\n\ndef first_existing(paths):\n    for p in paths:\n        try:\n            with open(p, 'r'):\n                return p\n        except Exception:\n            continue\n    return None\n\ndef jaccard(A, B):\n    inter = len(A & B)\n    union = len(A | B)\n    return inter, union, (inter / union if union > 0 else 1.0)\n\ndef compare(peer_key):\n    conf = CANDS[peer_key]\n    a_bnd = first_existing(conf[\"boundary\"])\n    a_pr  = first_existing(conf[\"pairs\"])\n    os.makedirs('storage/noesis/nmap', exist_ok=True)\n    out_json = conf[\"out_json\"]; out_csv = conf[\"out_csv\"]\n    if a_bnd is None or a_pr is None:\n        data = {\n            \"status\": \"error\",\n            \"peer\": peer_key,\n            \"message\": \"exports not found in candidate paths\",\n            \"candidates_boundary\": conf[\"boundary\"],\n            \"candidates_pairs\": conf[\"pairs\"]\n        }\n        with open(out_json, 'w') as f: json.dump(data, f, indent=2)\n        with open(out_csv, 'w') as f: f.write(\"error,exports_not_found\\n\")\n        print(f\"[{peer_key}] exports not found\")\n        return\n    B_noe = read_boundary_csv(NOESIS_BND); P_noe = read_pairs_csv(NOESIS_PR)\n    B_peer = read_boundary_csv(a_bnd);     P_peer = read_pairs_csv(a_pr)\n    bi, bu, bj = jaccard(B_noe, B_peer)\n    pi, pu, pj = jaccard(P_noe, P_peer)\n    data = {\n        \"lineages\": {\"A\": \"noesis_sota243\", \"B\": conf[\"label\"]},\n        \"n\": 26, \"tolerance\": \"1e-8\",\n        \"paths\": {\"noesis_boundary\": NOESIS_BND, \"noesis_pairs\": NOESIS_PR,\n                  \"peer_boundary\": a_bnd, \"peer_pairs\": a_pr},\n        \"boundary\": {\"A_size\": len(B_noe), \"B_size\": len(B_peer), \"intersection\": bi, \"union\": bu, \"jaccard\": bj},\n        \"pairs\":    {\"A_size\": len(P_noe), \"B_size\": len(P_peer), \"intersection\": pi, \"union\": pu, \"jaccard\": pj}\n    }\n    with open(out_json, 'w') as f: json.dump(data, f, indent=2)\n    with open(out_csv, 'w') as f:\n        f.write(\"metric,value\\n\")\n        f.write(f\"boundary_A,{len(B_noe)}\\n\")\n        f.write(f\"boundary_B,{len(B_peer)}\\n\")\n        f.write(f\"boundary_intersection,{bi}\\n\")\n        f.write(f\"boundary_union,{bu}\\n\")\n        f.write(f\"boundary_jaccard,{bj}\\n\")\n        f.write(f\"pairs_A,{len(P_noe)}\\n\")\n        f.write(f\"pairs_B,{len(P_peer)}\\n\")\n        f.write(f\"pairs_intersection,{pi}\\n\")\n        f.write(f\"pairs_union,{pu}\\n\")\n        f.write(f\"pairs_jaccard,{pj}\\n\")\n    print(f\"[{peer_key}] boundary J={bj:.6f} ({bi}/{bu}); pairs J={pj:.6f} ({pi}/{pu}); paths: {a_bnd}, {a_pr}\")\n\ndef construct_packing():\n    # Compute for Inquire and Scientia\n    compare(\"inquire\")\n    compare(\"scientia\")\n    # Return current saved SOTA unchanged\n    c, r = load_latest()\n    return np.array(c, float), np.array(r, float)\n",
+    "submitted_timestamp": 1760888730.9965808,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.634292357,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[inquire] boundary J=1.000000 (20/20); pairs J=0.870968 (54/62); paths: storage/Inquire/exports/active_boundary_tol1e8.csv, storage/Inquire/exports/active_pairs_tol1e8.csv\n[scientia] boundary J=1.000000 (20/20); pairs J=0.657143 (46/70); paths: storage/Scientia/exports/active_boundary_tol1e8.csv, storage/Scientia/exports/active_pairs_tol1e8.csv\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760888732.640783,
+      "evaluation_datetime": "2025-10-19T23:45:32.640785"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.634292357,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760888732.703205,
+    "version_notified": "original",
+    "message": "Your research submission 'Compute Jaccard: Noesis SOTA (Eval 243) vs Inquire Eval 207 and Scientia latest @ tol=1e-8' (ID: 252) has been evaluated.\n\n**Score:** 2.634292357\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[inquire] boundary J=1.000000 (20/20); pairs J=0.870968 (54/62); paths: storage/Inquire/exports/active_boundary_tol1e8.csv, storage/Inquire/exports/active_pairs_tol1e8.csv\n[scientia] boundary J=1.000000 (20/20); pairs J=0.657143 (46/70); paths: storage/Scientia/exports/active_boundary_tol1e8.csv, storage/Scientia/exports/active_pairs_tol1e8.csv\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

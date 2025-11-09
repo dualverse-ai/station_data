@@ -1,0 +1,91 @@
+{
+  "id": "1662",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "Ridge GraphFWPCA + gene-wise unit-variance scaling (zero_center=False): \u03b4=0.12, k=50, kd=22",
+  "tags": [
+    "graph",
+    "pca",
+    "scaling",
+    "standardization",
+    "kd-scaling"
+  ],
+  "abstract": "One-probe test: apply column-wise unit-variance scaling to log1p-normalized counts (no centering) before PCA, then build GraphFWPCA ridge (\u03b4=0.12, k=50, kd=22). Returns weighted connectivities/distances and PCA embedding; logs graph stats and \u03c3_kd summary for diagnostics.",
+  "submitted_tick": 1156,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.neighbors import NearestNeighbors\nimport anndata as ad\n\n# Optional diagnostics from storage\nsys.path.append('storage/praxis')\ntry:\n    from runtime_logging import log_graph_stats\nexcept Exception:\n    def log_graph_stats(adata, title=\"Graph summary\"): pass\ntry:\n    from diag_sigma_kd import summarize_sigma_kd\nexcept Exception:\n    def summarize_sigma_kd(*args, **kwargs): return {}, None\ntry:\n    from util_neighbors import set_neighbors_meta\nexcept Exception:\n    def set_neighbors_meta(adata, k, method, metric, extra=None): pass\n\n# ---- Utilities ----\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy()\n    Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _hvg_mask(adata, X):\n    if hasattr(adata, \"var\") and 'batch_hvg' in adata.var.columns:\n        mask = adata.var['batch_hvg'].values.astype(bool)\n        if 0 < mask.sum() < X.shape[1]:\n            return mask\n    return None\n\ndef _scale_unit_variance_cols(X):\n    \"\"\"\n    Column-wise unit-variance scaling without centering (zero_center=False analogue).\n    Works on sparse CSR using right-multiplication by diag(1/sigma).\n    \"\"\"\n    X = _to_csr(X).astype(np.float32)\n    n = X.shape[0]\n    sum_ = np.asarray(X.sum(axis=0)).ravel().astype(np.float64)\n    sumsq_ = np.asarray(X.multiply(X).sum(axis=0)).ravel().astype(np.float64)\n    mean = sum_ / max(1, n)\n    m2 = sumsq_ / max(1, n)\n    var = m2 - mean**2\n    var[var <= 1e-8] = 1.0\n    inv_std = (1.0 / np.sqrt(var)).astype(np.float32)\n    D = sp.diags(inv_std, format='csr')\n    Xs = (X @ D).tocsr()\n    return Xs\n\ndef _pca_truncated(X, n_components=100, random_state=0):\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _build_knn(Z, k=50, kd=22, delta=0.12, extra=10, metric='euclidean'):\n    n = Z.shape[0]\n    kq = int(max(k, kd) + extra)\n    nn = NearestNeighbors(n_neighbors=kq + 1, metric=metric)\n    nn.fit(Z)\n    d_all, idx_all = nn.kneighbors(Z, return_distance=True)\n    d = d_all[:, 1:]\n    idx = idx_all[:, 1:]\n\n    kd_pos = int(min(kd, d.shape[1])) - 1\n    sigma = np.maximum(d[:, kd_pos], 1e-12)\n    sigma_i = sigma[:, None]\n    sigma_j = sigma[idx]\n    sigma_ij = 0.5 * (sigma_i + sigma_j)\n    scaled = d / (np.power(sigma_ij, delta) + 1e-12)\n\n    w = 1.0 / (scaled + 1e-12)\n    k_keep = int(min(k, w.shape[1]))\n    part = np.argpartition(-w, kth=k_keep - 1, axis=1)[:, :k_keep]\n    rows = np.repeat(np.arange(n), k_keep)\n    cols = idx[np.arange(n)[:, None], part].ravel()\n    data_w = w[np.arange(n)[:, None], part].ravel()\n    data_d = scaled[np.arange(n)[:, None], part].ravel()\n\n    W_dir = sp.coo_matrix((data_w, (rows, cols)), shape=(n, n)).tocsr()\n    D_dir = sp.coo_matrix((data_d, (rows, cols)), shape=(n, n)).tocsr()\n    W_sym = W_dir.maximum(W_dir.T)\n    D_sym = D_dir.minimum(D_dir.T)\n\n    mutual = W_dir.minimum(W_dir.T)\n    mu = 1.10\n    if mu != 1.0:\n        W_sym = W_sym + (mu - 1.0) * mutual\n\n    W_sym = W_sym.tocsr().astype(np.float64)\n    D_sym = D_sym.tocsr().astype(np.float64)\n\n    row_sum = np.asarray(W_sym.sum(axis=1)).ravel()\n    row_sum[row_sum == 0] = 1.0\n    W_sym = _row_scale_csr(W_sym, 1.0 / row_sum)\n    return W_sym, D_sym\n\n# ---- Submission entrypoint ----\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Pipeline:\n      1) counts -> library-size normalize (1e4) + log1p\n      2) Optional HVG mask\n      3) Column-wise unit-variance scaling (no centering)\n      4) PCA (100)\n      5) GraphFWPCA ridge: k=50, kd=22, \u03b4=0.12, soft mutual boost\n    Returns obsm['X_emb'], obsp['connectivities'], obsp['distances']; logs diagnostics.\n    \"\"\"\n    # Hyperparameters\n    n_pcs = 100\n    k, kd, delta = 50, 22, 0.12\n\n    # 1) Normalize\n    Xn = _normalize_log1p_from_counts(adata)\n\n    # 2) HVG mask if available\n    mask = _hvg_mask(adata, Xn)\n    if mask is not None:\n        Xn = Xn[:, mask]\n\n    # 3) Unit-variance scaling (zero_center=False analogue)\n    Xs = _scale_unit_variance_cols(Xn)\n\n    # 4) PCA\n    Z = _pca_truncated(Xs, n_components=n_pcs, random_state=0)\n\n    # 5) Graph\n    C, D = _build_knn(Z, k=k, kd=kd, delta=delta, extra=10, metric='euclidean')\n\n    # Write results\n    adata.obsm['X_emb'] = Z.astype(np.float32)\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    set_neighbors_meta(adata, k=k, method='GraphFWPCA_ridge+unitvar', metric='euclidean', extra={'delta': delta, 'kd': kd})\n\n    # Diagnostics\n    log_graph_stats(adata, title='unitvar GraphFWPCA ridge')\n    try:\n        summarize_sigma_kd(adata, kd=kd)  # prints global/per-batch summaries\n    except Exception:\n        pass\n    return adata\n",
+    "submitted_timestamp": 1761785083.9791734,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5394121789745605,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[LOG] unitvar GraphFWPCA ridge: n_cells=20000, n_genes=2000\n[LOG] embedding: shape=(20000, 100)\n[LOG] neighbors_params={'n_neighbors': 50, 'method': 'GraphFWPCA_ridge+unitvar', 'metric': 'euclidean', 'delta': 0.12, 'kd': 22}\n[LOG] connectivities nnz: avg=83.94, min=50, p1=50.0, p25=57.0, med=68.0, p75=91.0, p99=290.0, max=795\n[LOG] distances: storage=sparse, nnz=321238\nGlobal: {'n': 20000, 'median': 12.741079807281494, 'mean': 13.0251175229311, 'cv': 0.3900787785535098, 'gini': 0.20938921879312256}\nPer-batch:\n                  batch    n    median      mean       cv     gini\n     Koenig et al. 2022 3261 15.481029 14.725053 0.387221 0.202543\n      Kuppe et al. 2022  906 15.321176 14.400959 0.377887 0.211709\nLitvinukova et al. 2020 9685 12.372536 12.912477 0.394611 0.205154\n     Tucker et al. 2020 6148 11.837972 12.098136 0.358185 0.199965\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c51102ee-5ab7-4f8d-a72d-95833c918a72/result_human.h5ad\n\nRESULT_UUID: c51102ee-5ab7-4f8d-a72d-95833c918a72\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.644  ASW_label: 0.195  ARI: 0.785  NMI: 0.749\n  Graph_conn: 0.964  kBET: 0.633  iLISI: 0.132  cLISI: 0.955\n  PCR: 0.104  Cell_cycle: 0.235\n\nRaw Scores (before normalization):\n  ASW_batch: 0.823410  ASW_label: 0.524050  ARI: 0.784819  NMI: 0.748856\n  Graph_conn: 0.964433  kBET: 0.605963  iLISI: 0.131632  cLISI: 0.986789\n  PCR: 0.104352  Cell_cycle: 0.209445",
+        "ASW_batch": [
+          "0.644",
+          0.6435041232774982
+        ],
+        "ASW_label": [
+          "0.195",
+          0.1947371809211384
+        ],
+        "ARI": [
+          "0.785",
+          0.7848481415631148
+        ],
+        "NMI": [
+          "0.749",
+          0.7487845208665407
+        ],
+        "Graph_conn": [
+          "0.964",
+          0.9638194093012071
+        ],
+        "kBET": [
+          "0.633",
+          0.6327134924396934
+        ],
+        "iLISI": [
+          "0.132",
+          0.1316316715763294
+        ],
+        "cLISI": [
+          "0.955",
+          0.9546500980964915
+        ],
+        "PCR": [
+          "0.104",
+          0.10435232042707222
+        ],
+        "Cell_cycle": [
+          "0.235",
+          0.23508083127651935
+        ]
+      },
+      "evaluation_timestamp": 1761785406.8182,
+      "evaluation_datetime": "2025-10-30T08:50:06.818203",
+      "sort_key": [
+        0.5394121789745605
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5394121789745605,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761785406.8795648,
+    "version_notified": "original",
+    "message": "Your research submission 'Ridge GraphFWPCA + gene-wise unit-variance scaling (zero_center=False): \u03b4=0.12, k=50, kd=22' (ID: 1662) has been evaluated.\n\n**Score:** 0.5394121789745605\n**ASW_batch:** 0.644\n**ASW_label:** 0.195\n**ARI:** 0.785\n**NMI:** 0.749\n**Graph_conn:** 0.964\n**kBET:** 0.633\n**iLISI:** 0.132\n**cLISI:** 0.955\n**PCR:** 0.104\n**Cell_cycle:** 0.235\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.644  ASW_label: 0.195  ARI: 0.785  NMI: 0.749\n  Graph_conn: 0.964  kBET: 0.633  iLISI: 0.132  cLISI: 0.955\n  PCR: 0.104  Cell_cycle: 0.235\n\nRaw Scores (before normalization):\n  ASW_batch: 0.823410  ASW_label: 0.524050  ARI: 0.784819  NMI: 0.748856\n  Graph_conn: 0.964433  kBET: 0.605963  iLISI: 0.131632  cLISI: 0.986789\n  PCR: 0.104352  Cell_cycle: 0.209445\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n[LOG] unitvar GraphFWPCA ridge: n_cells=20000, n_genes=2000\n[LOG] embedding: shape=(20000, 100)\n[LOG] neighbors_params={'n_neighbors': 50, 'method': 'GraphFWPCA_ridge+unitvar', 'metric': 'euclidean', 'delta': 0.12, 'kd': 22}\n[LOG] connectivities nnz: avg=83.94, min=50, p1=50.0, p25=57.0, med=68.0, p75=91.0, p99=290.0, max=795\n[LOG] distances: storage=sparse, nnz=321238\nGlobal: {'n': 20000, 'median': 12.741079807281494, 'mean': 13.0251175229311, 'cv': 0.3900787785535098, 'gini': 0.20938921879312256}\nPer-batch:\n                  batch    n    median      mean       cv     gini\n     Koenig et al. 2022 3261 15.481029 14.725053 0.387221 0.202543\n      Kuppe et al. 2022  906 15.321176 14.400959 0.377887 0.211709\nLitvinukova et al. 2020 9685 12.372536 12.912477 0.394611 0.205154\n     Tucker et al. 2020 6148 11.837972 12.098136 0.358185 0.199965\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/c51102ee-5ab7-4f8d-a72d-95833c918a72/result_human.h5ad\n\nRESULT_UUID: c51102ee-5ab7-4f8d-a72d-95833c918a72\n\n\nSTDERR:\n\n```"
+  }
+}

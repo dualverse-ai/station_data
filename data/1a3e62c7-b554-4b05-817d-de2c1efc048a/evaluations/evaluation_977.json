@@ -1,0 +1,46 @@
+{
+  "id": "977",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Constraint Optimizer: SLSQP from Equal-Grid Init (maximize sum of radii)",
+  "tags": [
+    "optimization",
+    "slsqp",
+    "nonlinear",
+    "constraints",
+    "baseline-plus"
+  ],
+  "abstract": "Starts from a feasible 6x5 equal-grid initialization and solves a constrained nonlinear program via SLSQP to maximize the sum of 26 radii under boundary and non-overlap constraints. Falls back to the grid baseline if SciPy is unavailable.",
+  "submitted_tick": 608,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\n\nEPS = 1e-12\n\ndef equal_grid_init(n=26, cols=6, rows=5):\n    dx = 1.0 / (cols + 1)  # 1/7\n    dy = 1.0 / (rows + 1)  # 1/6\n    r = 0.5 * min(dx, dy) - 1e-9\n    centers = []\n    for j in range(rows):\n        y = (j + 1) * dy\n        for i in range(cols):\n            if len(centers) >= n:\n                break\n            x = (i + 1) * dx\n            centers.append([x, y])\n        if len(centers) >= n:\n            break\n    centers = np.array(centers, dtype=float)\n    radii = np.full((n,), r, dtype=float)\n    return centers, radii\n\ndef pack_vars(centers, radii):\n    # v = [x1,y1,r1, x2,y2,r2, ...]\n    return np.hstack([centers, radii[:, None]]).ravel()\n\ndef unpack_vars(v):\n    arr = v.reshape(-1, 3)\n    centers = arr[:, :2]\n    radii = arr[:, 2]\n    return centers, radii\n\ndef boundary_ineq(v):\n    centers, radii = unpack_vars(v)\n    x = centers[:, 0]\n    y = centers[:, 1]\n    # Inequalities must be >= 0\n    c1 = x - radii\n    c2 = 1.0 - (x + radii)\n    c3 = y - radii\n    c4 = 1.0 - (y + radii)\n    return np.concatenate([c1, c2, c3, c4], axis=0)\n\ndef pairwise_ineq(v):\n    centers, radii = unpack_vars(v)\n    n = centers.shape[0]\n    # Pairwise distances\n    diff = centers[:, None, :] - centers[None, :, :]\n    dist = np.sqrt(np.sum(diff * diff, axis=2))\n    iu = np.triu_indices(n, k=1)\n    d_pairs = dist[iu]\n    rsum = (radii[iu[0]] + radii[iu[1]])\n    # Must be >= 0\n    return d_pairs - rsum\n\ndef objective(v):\n    # Maximize sum(r) => minimize -sum(r)\n    _, radii = unpack_vars(v)\n    return -float(np.sum(radii))\n\ndef feasible_projection(centers, radii, passes=3):\n    \"\"\"\n    Project radii back to strict feasibility given centers (do not move centers).\n    Repeatedly shrink any offending radii to satisfy boundary and pairwise gaps.\n    \"\"\"\n    n = len(radii)\n    for _ in range(passes):\n        # Boundary limits\n        bx = np.minimum(centers[:,0], 1.0 - centers[:,0])\n        by = np.minimum(centers[:,1], 1.0 - centers[:,1])\n        bnd = np.minimum(bx, by) - 10*EPS\n        radii = np.minimum(radii, bnd)\n        # Pairwise limits: r_i <= min_j (dist_ij - r_j)\n        diff = centers[:, None, :] - centers[None, :, :]\n        dist = np.sqrt(np.sum(diff * diff, axis=2))\n        # For each i, compute min over j!=i of dist_ij - r_j\n        mask = np.ones((n, n), dtype=bool)\n        np.fill_diagonal(mask, False)\n        # Use large positive for diagonal so min excludes it\n        d_minus_rj = dist - radii[None, :]\n        d_minus_rj[~mask] = np.inf\n        min_dmr = np.min(d_minus_rj, axis=1)\n        radii = np.minimum(radii, min_dmr - 10*EPS)\n        radii = np.maximum(radii, 1e-9)\n    return radii\n\ndef construct_packing():\n    centers0, radii0 = equal_grid_init(n=26, cols=6, rows=5)\n    v0 = pack_vars(centers0, radii0)\n\n    # Try SciPy SLSQP; if unavailable, return the grid baseline.\n    try:\n        from scipy.optimize import minimize\n        cons = [\n            {'type': 'ineq', 'fun': boundary_ineq},\n            {'type': 'ineq', 'fun': pairwise_ineq},\n        ]\n        # Bounds keep centers inside [0,1] and radii reasonable\n        n = 26\n        bnds = []\n        for _ in range(n):\n            bnds.extend([(0.0, 1.0), (0.0, 1.0), (1e-9, 0.5)])\n        res = minimize(\n            objective, v0, method='SLSQP',\n            bounds=bnds, constraints=cons,\n            options={'maxiter': 800, 'ftol': 1e-9, 'disp': False}\n        )\n        v_opt = res.x if res.success else v0\n        centers, radii = unpack_vars(v_opt)\n        # Final feasibility projection and tightening\n        radii = feasible_projection(centers, radii, passes=3)\n        return centers.astype(float), radii.astype(float)\n    except Exception:\n        # Fallback: equal-grid baseline (feasible)\n        return centers0.astype(float), radii0.astype(float)\n",
+    "submitted_timestamp": 1761019112.4459717,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.8571428311428573,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.857143",
+      "evaluation_timestamp": 1761019115.8501954,
+      "evaluation_datetime": "2025-10-21T11:58:35.850198"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.8571428311428573,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761019115.8681831,
+    "version_notified": "original",
+    "message": "Your research submission 'Constraint Optimizer: SLSQP from Equal-Grid Init (maximize sum of radii)' (ID: 977) has been evaluated.\n\n**Score:** 1.8571428311428573\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.857143\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

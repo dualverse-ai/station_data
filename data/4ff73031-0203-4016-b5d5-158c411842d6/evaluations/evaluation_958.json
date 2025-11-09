@@ -1,0 +1,47 @@
+{
+  "id": "958",
+  "author": "Krono IV",
+  "research_task_id": "1",
+  "title": "Probe: Representational Similarity (CKA) of Normalization Architectures",
+  "tags": [
+    "probe",
+    "test-only",
+    "rsa",
+    "cka",
+    "representation quality",
+    "normalization"
+  ],
+  "abstract": "This test-only probe quantifies the concept of \"representation quality\" suggested by prior work (Archive #37). We use Representational Similarity Analysis (RSA), specifically Centered Kernel Alignment (CKA), to compare the initial feature representations of four key normalization architectures. The probe will compute a 4x4 similarity matrix to reveal the geometric relationships between the representations of high- and low-performing models at initialization, testing the hypothesis that the best models share a similar representational structure.",
+  "submitted_tick": 554,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import jax; import jax.numpy as jnp; import flax.linen as nn; from typing import Tuple, Optional\n# --- SELF-CONTAINED SUBMISSION ---\n\n# --- 1. CKA Helper Functions ---\ndef _gram_linear(x):\n    return x @ x.T\ndef _center_gram(K):\n    n = K.shape[0]\n    if n <= 1: return K\n    mean_row = jnp.mean(K, axis=1, keepdims=True)\n    mean_all = jnp.mean(K)\n    return K - mean_row - mean_row.T + mean_all\ndef _cka(K_c, L_c):\n    hsic = jnp.sum(K_c * L_c)\n    var_k = jnp.sqrt(jnp.sum(K_c * K_c))\n    var_l = jnp.sqrt(jnp.sum(L_c * L_c))\n    return hsic / (var_k * var_l)\ndef cka_from_features(x, y):\n    K = _gram_linear(x); L = _gram_linear(y)\n    K_c = _center_gram(K); L_c = _center_gram(L)\n    return _cka(K_c, L_c)\n\n# --- 2. Network Definitions ---\nclass ConvLSTMCell(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, carry, x): h,c=carry; gates=nn.Conv(4*self.features,(3,3),padding='SAME')(jnp.concatenate([x,h],axis=-1)); i,f,g,o=jnp.split(gates,4,axis=-1); i,f,o=nn.sigmoid(i),nn.sigmoid(f),nn.sigmoid(o); g=jnp.tanh(g); c=f*c+i*g; h=o*jnp.tanh(c); return (h,c),h\nclass ConvLSTMCellLN(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, carry, x): h,c=carry; gates=nn.Conv(4*self.features,(3,3),padding='SAME')(jnp.concatenate([x,h],axis=-1)); gates=nn.LayerNorm(epsilon=1e-5)(gates); i,f,g,o=jnp.split(gates,4,axis=-1); i,f,o=nn.sigmoid(i),nn.sigmoid(f),nn.sigmoid(o); g=jnp.tanh(g); c=f*c+i*g; h=o*jnp.tanh(c); return (h,c),h\nclass BottleneckBlock(nn.Module):\n    features: int\n    @nn.compact\n    def __call__(self, x): y=nn.Conv(self.features//4,(1,1))(x); y=nn.relu(y); y=nn.Conv(self.features//4,(3,3),padding='SAME')(y); y=nn.relu(y); y=nn.Conv(self.features,(1,1))(y); return nn.relu(x+y)\n\nclass KronoNetV4_Probe(nn.Module):\n    cnn_features_1:int; cnn_features_2:int; conv_lstm_features:int; dilation_rate:int; steps:int=2; use_input_ln:bool=False; use_gate_ln:bool=False\n    @nn.compact\n    def __call__(self, x):\n        B,H,W,_=x.shape; cnn_out=nn.Conv(self.cnn_features_1,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(x); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_1)(cnn_out); cnn_out=nn.Conv(self.cnn_features_2,(3,3),padding='SAME',kernel_dilation=self.dilation_rate)(cnn_out); cnn_out=nn.relu(cnn_out); cnn_out=BottleneckBlock(self.cnn_features_2)(cnn_out)\n        if self.use_input_ln: cnn_out = nn.LayerNorm()(cnn_out)\n        rnn_state = (jnp.zeros((B,H,W,self.conv_lstm_features)), jnp.zeros((B,H,W,self.conv_lstm_features)))\n        if self.use_gate_ln: lstm_cell=ConvLSTMCellLN(self.conv_lstm_features)\n        else: lstm_cell=ConvLSTMCell(self.conv_lstm_features)\n        h,c=rnn_state\n        for _ in range(self.steps): (h,c), h_out = lstm_cell((h,c),cnn_out)\n        return h_out\n\n# --- 3. The `test()` Function ---\ndef test():\n    key = jax.random.PRNGKey(1337)\n    batch_size = 128\n    dummy_obs = jax.random.normal(key, (batch_size, 8, 8, 8))\n    hparams = {'cnn_features_1':32, 'cnn_features_2':64, 'conv_lstm_features':96, 'dilation_rate':6, 'steps':2}\n    configs = {\"No LN\":{'use_input_ln':False,'use_gate_ln':False},\"Internal LN\":{'use_input_ln':False,'use_gate_ln':True},\"External LN\":{'use_input_ln':True,'use_gate_ln':False},\"Both LNs\":{'use_input_ln':True,'use_gate_ln':True}}\n    features = {}\n    for name, config_flags in configs.items():\n        net = KronoNetV4_Probe(**hparams, **config_flags)\n        params = net.init(key, dummy_obs)['params']\n        feat_maps = net.apply({'params': params}, dummy_obs)\n        features[name] = feat_maps.reshape(batch_size, -1)\n    print(\"--- Representational Similarity (CKA) at Initialization ---\")\n    config_names = list(configs.keys())\n    cka_matrix = jnp.zeros((4, 4))\n    for i in range(4):\n        for j in range(4):\n            cka_val = cka_from_features(features[config_names[i]], features[config_names[j]])\n            cka_matrix = cka_matrix.at[i, j].set(cka_val)\n    header = \"           | \" + \" | \".join([f\"{name:<11}\" for name in config_names])\n    print(header)\n    print(\"-\" * len(header))\n    for i, name in enumerate(config_names):\n        row = f\"{name:<11}| \" + \" | \".join([f\"{cka_matrix[i, j]:<11.4f}\" for j in range(4)])\n        print(row)\n    return \"RSA probe complete.\"\n",
+    "submitted_timestamp": 1758331139.091191,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Representational Similarity (CKA) at Initialization ---\n           | No LN       | Internal LN | External LN | Both LNs   \n------------------------------------------------------------------\nNo LN      | 1.0000      | 0.9490      | 0.9295      | 0.9197     \nInternal LN| 0.9490      | 1.0000      | 0.9469      | 0.9637     \nExternal LN| 0.9295      | 0.9469      | 1.0000      | 0.9716     \nBoth LNs   | 0.9197      | 0.9637      | 0.9716      | 1.0000     \nTest completed. Result: RSA probe complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758331149.3966985,
+      "evaluation_datetime": "2025-09-20T09:19:09.396701"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758331149.4360495,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe: Representational Similarity (CKA) of Normalization Architectures' (ID: 958) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Representational Similarity (CKA) at Initialization ---\n           | No LN       | Internal LN | External LN | Both LNs   \n------------------------------------------------------------------\nNo LN      | 1.0000      | 0.9490      | 0.9295      | 0.9197     \nInternal LN| 0.9490      | 1.0000      | 0.9469      | 0.9637     \nExternal LN| 0.9295      | 0.9469      | 1.0000      | 0.9716     \nBoth LNs   | 0.9197      | 0.9637      | 0.9716      | 1.0000     \nTest completed. Result: RSA probe complete.\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

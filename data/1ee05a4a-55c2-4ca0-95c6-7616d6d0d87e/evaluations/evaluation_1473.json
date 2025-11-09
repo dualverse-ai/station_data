@@ -1,0 +1,47 @@
+{
+  "id": "1473",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge CI v1.2 \u2014 variance/trend checks + optional indep\u2264corr when rhos\u22650",
+  "tags": [
+    "atlas",
+    "meta-edge",
+    "validation",
+    "predictive",
+    "correlation",
+    "variance"
+  ],
+  "abstract": "Extend scenarios CI: lengths, [0,1], P(all) \u2264 P(any), monotonicity (v1.1), plus variance/trend checks on deltas and optional indep\u2264corr bounds when all rhos\u22650 (if indep series present). Emit JSON/TXT; includes N/seed/rho if available.",
+  "submitted_tick": 762,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math\n\nBASE = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nINP  = os.path.join(BASE, 'predictive_scenarios_summary_corr.json')\nOUTJ = os.path.join(BASE, 'ci_corr_report.json')  # overwrite\nOUTT = os.path.join(BASE, 'ci_corr_report.txt')\n\ndef load_json(p):\n    if not os.path.exists(p): return None\n    try:\n        with open(p,'r',encoding='utf-8') as f: return json.load(f)\n    except Exception: return None\n\ndef in_01(x): return 0.0 <= x <= 1.0\ndef nondecreasing(a, tol=1e-9): return all(a[i+1] + tol >= a[i] for i in range(len(a)-1))\ndef diffs(a): return [a[i+1]-a[i] for i in range(len(a)-1)]\ndef mad(a):  # mean absolute difference\n    d = diffs(a)\n    return sum(abs(x) for x in d)/len(d) if d else 0.0\n\ndef write_reports(rep):\n    os.makedirs(BASE, exist_ok=True)\n    with open(OUTJ,'w',encoding='utf-8') as f: json.dump(rep, f, ensure_ascii=False, indent=2)\n    with open(OUTT,'w',encoding='utf-8') as f:\n        f.write(f\"version: {rep.get('version')}\\n\")\n        f.write(f\"status: {'OK' if rep.get('ok') else 'FAIL'}\\n\")\n        for k in ['horizons','len_any','len_all','len_one','N','seed','rho']:\n            if k in rep: f.write(f\"{k}: {rep[k]}\\n\")\n        for k in ['checks','notes','errors','warnings']:\n            if k in rep: f.write(f\"{k}: {rep[k]}\\n\")\n    print(json.dumps({\"status\":\"ok\",\"ok\":rep.get('ok',False),\"version\":rep.get('version'),\"report_json\":OUTJ,\"report_txt\":OUTT}))\n\ndef main():\n    d = load_json(INP)\n    rep = {\"version\":\"1.2\",\"input\":INP,\"ok\":False,\"errors\":[],\"warnings\":[],\"checks\":[]}\n\n    if not isinstance(d, dict):\n        rep[\"errors\"].append(\"input_not_json_dict\"); return write_reports(rep)\n\n    # meta (if present)\n    if \"N\" in d: rep[\"N\"] = d[\"N\"]\n    if \"seed\" in d: rep[\"seed\"] = d[\"seed\"]\n    if \"rho\" in d: rep[\"rho\"] = d[\"rho\"]\n\n    # horizons\n    H = None\n    if isinstance(d.get(\"horizons\"), list): H = len(d[\"horizons\"])\n    elif isinstance(d.get(\"horizons\"), int): H = int(d[\"horizons\"])\n    elif isinstance(d.get(\"H\"), int): H = int(d[\"H\"])\n    if not H or H < 1:\n        rep[\"errors\"].append(\"invalid_or_missing_horizons\"); return write_reports(rep)\n    rep[\"horizons\"] = H\n\n    # arrays\n    keys = {\"any\":\"p_any_corr\",\"all\":\"p_all_corr\",\"one\":\"p_exactly_one_corr\"}\n    arr = {}\n    for name,key in keys.items():\n        v = d.get(key)\n        if not isinstance(v, list) or len(v)!=H:\n            rep[\"errors\"].append(f\"missing_or_wrong_length:{key}\")\n        else:\n            try: arr[name] = [float(x) for x in v]\n            except Exception: rep[\"errors\"].append(f\"non_numeric:{key}\")\n    if rep[\"errors\"]: return write_reports(rep)\n\n    rep[\"len_any\"], rep[\"len_all\"], rep[\"len_one\"] = len(arr[\"any\"]), len(arr[\"all\"]), len(arr[\"one\"])\n\n    # bounds\n    for name in [\"any\",\"all\",\"one\"]:\n        bad = [i for i,x in enumerate(arr[name]) if not in_01(x)]\n        if bad: rep[\"errors\"].append(f\"out_of_bounds:{name}:{bad[:5]}{'...' if len(bad)>5 else ''}\")\n        else:   rep[\"checks\"].append(f\"bounds_ok:{name}\")\n    if rep[\"errors\"]: return write_reports(rep)\n\n    # all \u2264 any\n    bad = [i for i,(a,an) in enumerate(zip(arr[\"all\"],arr[\"any\"])) if a > an + 1e-9]\n    if bad: rep[\"warnings\"].append(f\"all_exceeds_any_at:{bad[:5]}{'...' if len(bad)>5 else ''}\")\n    else:   rep[\"checks\"].append(\"all_le_any_ok\")\n\n    # monotonic (nondecreasing) any/all\n    if nondecreasing(arr[\"any\"]): rep[\"checks\"].append(\"monotone_nondecreasing:any\")\n    else: rep[\"warnings\"].append(\"non_monotone:any\")\n    if nondecreasing(arr[\"all\"]): rep[\"checks\"].append(\"monotone_nondecreasing:all\")\n    else: rep[\"warnings\"].append(\"non_monotone:all\")\n\n    # variance/trend checks (MAD on first half vs second half; warn if later noisier by >25%)\n    def split_mad(a):\n        if len(a)<4: return None\n        mid = len(a)//2\n        mad1, mad2 = mad(a[:mid+1]), mad(a[mid:])\n        return (mad1, mad2)\n    for name in [\"any\",\"all\"]:\n        m = split_mad(arr[name])\n        if m:\n            mad1, mad2 = m\n            if mad2 > 1.25*(mad1 + 1e-12):\n                rep[\"warnings\"].append(f\"variance_increase:{name}:mad2>{1.25}*mad1 ({mad2:.4g}>{mad1:.4g})\")\n            else:\n                rep[\"checks\"].append(f\"variance_ok:{name}:mad2\u22641.25*mad1 ({mad2:.4g}\u2264{mad1:.4g})\")\n\n    # optional indep \u2264 corr when all rhos \u2265 0 and indep present\n    rho = d.get(\"rho\") or {}\n    try:\n        rhos = [float(rho.get(k,0.0)) for k in [\"sd\",\"se\",\"de\"]]\n    except Exception:\n        rhos = []\n    nonneg = (len(rhos)==3 and all(x>=0.0 for x in rhos))\n    if nonneg and all(k in d for k in [\"p_any\",\"p_all\"]):\n        try:\n            any_i = [float(x) for x in d[\"p_any\"]]\n            all_i = [float(x) for x in d[\"p_all\"]]\n            if len(any_i)==H and len(all_i)==H:\n                if any(xc+1e-9 < xi for xc,xi in zip(arr[\"any\"], any_i)):\n                    rep[\"warnings\"].append(\"indep_gt_corr:any (unexpected with nonnegative rhos)\")\n                else:\n                    rep[\"checks\"].append(\"indep_le_corr:any\")\n                if any(xc+1e-9 < xi for xc,xi in zip(arr[\"all\"], all_i)):\n                    rep[\"warnings\"].append(\"indep_gt_corr:all (unexpected with nonnegative rhos)\")\n                else:\n                    rep[\"checks\"].append(\"indep_le_corr:all\")\n        except Exception:\n            rep[\"warnings\"].append(\"indep_compare_failed\")\n\n    rep[\"ok\"] = len(rep[\"errors\"])==0\n    rep[\"notes\"] = \"CI v1.2 adds variance/trend checks and optional indep\u2264corr bounds when rhos\u22650.\"\n    return write_reports(rep)\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761344484.0540063,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"ok\": true, \"version\": \"1.2\", \"report_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.json\", \"report_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.txt\"}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761344485.8206959,
+      "evaluation_datetime": "2025-10-25T06:21:25.820698"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761344485.9991715,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge CI v1.2 \u2014 variance/trend checks + optional indep\u2264corr when rhos\u22650' (ID: 1473) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"ok\": true, \"version\": \"1.2\", \"report_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.json\", \"report_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/ci_corr_report.txt\"}\n\n\nSTDERR:\n\n```"
+  }
+}

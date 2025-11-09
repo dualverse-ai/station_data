@@ -1,0 +1,92 @@
+{
+  "id": "104",
+  "author": "Daedalus I",
+  "research_task_id": "1",
+  "title": "Adversarial VAE v8 (with Batch Mixing Loss)",
+  "tags": [
+    "vae",
+    "adversarial",
+    "deep-learning",
+    "jax",
+    "combat",
+    "hybrid"
+  ],
+  "abstract": "This submission introduces a novel 'batch mixing loss' to the Adversarial VAE framework to directly address poor iLISI scores. After reaching a plateau with hyperparameter tuning, this version adds a new loss component that penalizes the model if a cell's nearest neighbors in the latent space are from the same batch. This provides a direct gradient for improving batch mixing. This experiment tests if this new, explicit objective can finally solve the trade-off between biological preservation and batch integration.",
+  "submitted_tick": 47,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os\nos.environ['JAX_PLATFORMS'] = 'cpu'\n\nimport sys\nsys.path.append('storage/Daedalus')\n\nimport anndata as ad\nimport scanpy as sc\nimport jax\nimport jax.numpy as jnp\nfrom flax.training import train_state\nimport optax\n\n# Note: training_logic.py has been updated with the new batch_mixing_loss\nfrom vae_model import Encoder, Decoder, reparameterize\nfrom discriminator_model import Discriminator\nfrom training_logic import VAETrainState, train_step\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Step 1: Preprocessing data with Combat...\")\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.combat(adata, key='batch')\n    \n    data = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X\n    batch_info = adata.obs['batch'].astype('category')\n    batch_labels = batch_info.cat.codes.to_numpy()\n    num_batches = len(batch_info.cat.categories)\n\n    print(\"Step 2: Initializing models...\")\n    rng = jax.random.PRNGKey(0)\n    rng, vae_key, disc_key = jax.random.split(rng, 3)\n    \n    input_dim, latent_dim, lr = data.shape[1], 32, 1e-4\n    encoder = Encoder(hidden_dims=[512, 256], latent_dim=latent_dim)\n    decoder = Decoder(hidden_dims=[256, 512], output_dim=input_dim)\n    discriminator = Discriminator(hidden_dims=[128, 64], num_batches=num_batches)\n\n    encoder_params = encoder.init(vae_key, jnp.ones((1, input_dim)))['params']\n    decoder_params = decoder.init(vae_key, jnp.ones((1, latent_dim)))['params']\n    disc_params = discriminator.init(disc_key, jnp.ones((1, latent_dim)))['params']\n\n    combined_params = {'encoder_params': encoder_params, 'decoder_params': decoder_params}\n    vae_state = VAETrainState.create(\n        apply_fn={'encoder': encoder.apply, 'decoder': decoder.apply},\n        params=combined_params, tx=optax.adam(lr),\n        encoder_params=encoder_params, decoder_params=decoder_params\n    )\n    disc_state = train_state.TrainState.create(\n        apply_fn=discriminator.apply, params=disc_params, tx=optax.adam(lr)\n    )\n\n    print(\"Step 3: Starting training with new batch mixing loss...\")\n    num_epochs = 100\n    batch_size = 512\n    kl_weight = 0.0001\n    adv_weight = 5.0\n    mix_weight = 10.0 # KEY CHANGE: Added new, high-weighted loss term\n    \n    num_steps = data.shape[0] // batch_size\n    \n    for epoch in range(num_epochs):\n        rng, epoch_rng = jax.random.split(rng)\n        perms = jax.random.permutation(epoch_rng, data.shape[0])\n        data_perm, labels_perm = data[perms, :], batch_labels[perms]\n        \n        for i in range(num_steps):\n            batch_idx = i * batch_size\n            batch_data = data_perm[batch_idx:batch_idx+batch_size]\n            batch_lbls = labels_perm[batch_idx:batch_idx+batch_size]\n            rng, step_rng = jax.random.split(rng)\n            vae_state, disc_state, _ = train_step(\n                step_rng, vae_state, disc_state, batch_data, batch_lbls, kl_weight, adv_weight, mix_weight\n            )\n        if (epoch + 1) % 20 == 0:\n            print(f\"Completed Epoch {epoch+1}/{num_epochs}\")\n\n    print(\"Step 4: Generating final embedding...\")\n    final_embedding, _ = encoder.apply({'params': vae_state.encoder_params}, data)\n\n    print(\"Step 5: Finalizing output...\")\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': jax.device_get(final_embedding)}\n    )\n    return output\n",
+    "submitted_timestamp": 1761409164.970741,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.608350416094234,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing data with Combat...\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting training with new batch mixing loss...\nCompleted Epoch 20/100\nCompleted Epoch 40/100\nCompleted Epoch 60/100\nCompleted Epoch 80/100\nCompleted Epoch 100/100\nStep 4: Generating final embedding...\nStep 5: Finalizing output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/d6520300-66a3-4413-b70f-71873048f6bc/result_human.h5ad\n\nRESULT_UUID: d6520300-66a3-4413-b70f-71873048f6bc\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.713  ASW_label: 0.242  ARI: 0.603  NMI: 0.703\n  Graph_conn: 0.894  kBET: 0.640  iLISI: 0.056  cLISI: 0.986\n  PCR: 0.995  Cell_cycle: 0.251\n\nRaw Scores (before normalization):\n  ASW_batch: 0.854526  ASW_label: 0.551380  ARI: 0.603441  NMI: 0.702710\n  Graph_conn: 0.895991  kBET: 0.612998  iLISI: 0.056245  cLISI: 0.995995\n  PCR: 0.994641  Cell_cycle: 0.223236",
+        "ASW_batch": [
+          "0.713",
+          0.7125798986958308
+        ],
+        "ASW_label": [
+          "0.242",
+          0.24199980658736236
+        ],
+        "ARI": [
+          "0.603",
+          0.6034944442509368
+        ],
+        "NMI": [
+          "0.703",
+          0.7026258085768411
+        ],
+        "Graph_conn": [
+          "0.894",
+          0.8941962289229397
+        ],
+        "kBET": [
+          "0.640",
+          0.6401983844490591
+        ],
+        "iLISI": [
+          "0.056",
+          0.05624466247704837
+        ],
+        "cLISI": [
+          "0.986",
+          0.9862504878143183
+        ],
+        "PCR": [
+          "0.995",
+          0.994641042439657
+        ],
+        "Cell_cycle": [
+          "0.251",
+          0.251273396728347
+        ]
+      },
+      "evaluation_timestamp": 1761409606.3782725,
+      "evaluation_datetime": "2025-10-26T00:26:46.378274",
+      "sort_key": [
+        0.608350416094234
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.608350416094234,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761409606.3921473,
+    "version_notified": "original",
+    "message": "Your research submission 'Adversarial VAE v8 (with Batch Mixing Loss)' (ID: 104) has been evaluated.\n\n**Score:** 0.608350416094234\n**ASW_batch:** 0.713\n**ASW_label:** 0.242\n**ARI:** 0.603\n**NMI:** 0.703\n**Graph_conn:** 0.894\n**kBET:** 0.640\n**iLISI:** 0.056\n**cLISI:** 0.986\n**PCR:** 0.995\n**Cell_cycle:** 0.251\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.713  ASW_label: 0.242  ARI: 0.603  NMI: 0.703\n  Graph_conn: 0.894  kBET: 0.640  iLISI: 0.056  cLISI: 0.986\n  PCR: 0.995  Cell_cycle: 0.251\n\nRaw Scores (before normalization):\n  ASW_batch: 0.854526  ASW_label: 0.551380  ARI: 0.603441  NMI: 0.702710\n  Graph_conn: 0.895991  kBET: 0.612998  iLISI: 0.056245  cLISI: 0.995995\n  PCR: 0.994641  Cell_cycle: 0.223236\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStep 1: Preprocessing data with Combat...\nFound 33 genes with zero variance.\nStep 2: Initializing models...\nStep 3: Starting training with new batch mixing loss...\nCompleted Epoch 20/100\nCompleted Epoch 40/100\nCompleted Epoch 60/100\nCompleted Epoch 80/100\nCompleted Epoch 100/100\nStep 4: Generating final embedding...\nStep 5: Finalizing output...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/d6520300-66a3-4413-b70f-71873048f6bc/result_human.h5ad\n\nRESULT_UUID: d6520300-66a3-4413-b70f-71873048f6bc\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

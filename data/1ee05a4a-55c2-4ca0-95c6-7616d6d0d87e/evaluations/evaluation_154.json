@@ -1,0 +1,47 @@
+{
+  "id": "154",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Joint metrics v2.9 (hotfix): causal graph edges from VAR tests (aggregate v2.7 + v2.8)",
+  "tags": [
+    "causal",
+    "graph",
+    "var",
+    "granger",
+    "aggregation",
+    "hotfix"
+  ],
+  "abstract": "Fixes SyntaxError by wrapping in main(); aggregates significant causal edges from v2.7 (2-var VAR(2)) and v2.8 (3-var VAR(P)). Thresholds: p\u22640.05 (strict); else dAIC<0 flagged exploratory. Outputs TXT, CSV, and DOT.",
+  "submitted_tick": 66,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, json\n\nANAL_BASE = \"storage/shared/agency_lab/analyses\"\nCSV_DIR = os.path.join(ANAL_BASE, \"csv\")\n\nSRC_27 = os.path.join(CSV_DIR, \"joint_metrics_v2_7_var_granger.csv\")  # cause,effect,F,df1,df2,pvalue,dAIC\nSRC_28 = os.path.join(CSV_DIR, \"joint_metrics_v2_8_var_granger.csv\")  # cause,effect,P,F,df1,df2,pvalue,dAIC\n\ndef parse_float(x):\n    try:\n        return float(x)\n    except Exception:\n        return None\n\ndef add_edge(edges, cause, effect, model, pval, dAIC, extra=None):\n    key = (cause, effect)\n    e = edges.setdefault(key, {\"strict\": False, \"explore\": False, \"evidence\": []})\n    strict = (pval is not None and pval <= 0.05)\n    explore = (not strict) and (dAIC is not None and dAIC < 0)\n    e[\"strict\"] = e[\"strict\"] or strict\n    e[\"explore\"] = e[\"explore\"] or explore\n    ev = {\"model\": model, \"pvalue\": pval, \"dAIC\": dAIC}\n    if extra:\n        ev.update(extra)\n    e[\"evidence\"].append(ev)\n\ndef main():\n    os.makedirs(ANAL_BASE, exist_ok=True)\n    os.makedirs(CSV_DIR, exist_ok=True)\n\n    edges = {}\n    # v2.7 edges\n    if os.path.exists(SRC_27):\n        with open(SRC_27, \"r\", encoding=\"utf-8\") as f:\n            r = csv.DictReader(f)\n            for row in r:\n                cause = (row.get(\"cause\") or \"\").strip().lower()\n                effect = (row.get(\"effect\") or \"\").strip().lower()\n                if not cause or not effect:\n                    continue\n                pval = parse_float(row.get(\"pvalue\"))\n                dAIC = parse_float(row.get(\"dAIC\"))\n                add_edge(edges, cause, effect, model=\"v2.7_VAR2_2var\", pval=pval, dAIC=dAIC, extra={})\n\n    # v2.8 edges\n    if os.path.exists(SRC_28):\n        with open(SRC_28, \"r\", encoding=\"utf-8\") as f:\n            r = csv.DictReader(f)\n            for row in r:\n                cause = (row.get(\"cause\") or \"\").strip().lower()\n                effect = (row.get(\"effect\") or \"\").strip().lower()\n                if not cause or not effect:\n                    continue\n                P = row.get(\"P\")\n                pval = parse_float(row.get(\"pvalue\"))\n                dAIC = parse_float(row.get(\"dAIC\"))\n                add_edge(edges, cause, effect, model=f\"v2.8_VAR3_P{P}\", pval=pval, dAIC=dAIC, extra={\"P\": P})\n\n    # Outputs\n    out_csv = os.path.join(CSV_DIR, \"joint_metrics_v2_9_causal_edges.csv\")\n    with open(out_csv, \"w\", newline=\"\", encoding=\"utf-8\") as f:\n        w = csv.writer(f)\n        w.writerow([\"cause\",\"effect\",\"selected\",\"exploratory\",\"evidence_json\"])\n        for (cause,effect), info in sorted(edges.items()):\n            selected = bool(info[\"strict\"])\n            exploratory = (not selected) and bool(info[\"explore\"])\n            w.writerow([cause, effect, selected, exploratory, json.dumps(info[\"evidence\"])])\n\n    out_txt = os.path.join(ANAL_BASE, \"joint_metrics_v2_9_causal_graph.txt\")\n    lines = []\n    lines.append(\"JOINT METRICS v2.9 \u2014 Causal graph edges aggregated from VAR tests (v2.7 + v2.8)\")\n    lines.append(\"Selection: p<=0.05 (strict); dAIC<0 = exploratory (if no p<=0.05 evidence).\")\n    lines.append(\"\")\n    if edges:\n        lines.append(\"Edges:\")\n        lines.append(\"cause\\teffect\\tselected\\texploratory\\tevidence\")\n        for (cause,effect), info in sorted(edges.items()):\n            sel = \"1\" if info[\"strict\"] else \"0\"\n            exp = \"1\" if (not info[\"strict\"] and info[\"explore\"]) else \"0\"\n            ev_desc = \"; \".join([f\"{e['model']}: p={e['pvalue']}, dAIC={e['dAIC']}\" for e in info[\"evidence\"]])\n            lines.append(f\"{cause}\\t{effect}\\t{sel}\\t{exp}\\t{ev_desc}\")\n    else:\n        lines.append(\"No edges found under current criteria.\")\n    with open(out_txt, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(lines) + \"\\n\")\n\n    out_dot = os.path.join(ANAL_BASE, \"joint_metrics_v2_9_causal_graph.dot\")\n    dot_lines = [\"digraph G {\", '  rankdir=LR;', '  node [shape=ellipse];']\n    for (cause,effect), info in edges.items():\n        if info[\"strict\"]:\n            color=\"black\"; style=\"solid\"\n        elif info[\"explore\"]:\n            color=\"gray50\"; style=\"dashed\"\n        else:\n            continue\n        dot_lines.append(f'  \"{cause}\" -> \"{effect}\" [color={color}, style={style}];')\n    dot_lines.append(\"}\")\n    with open(out_dot, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(dot_lines) + \"\\n\")\n\n    print(\"V2_9_DONE\", out_txt, out_csv, out_dot, \"EDGES\", len(edges))\n    return 0\n\nif __name__ == \"__main__\":\n    import sys\n    try:\n        sys.exit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e))\n        sys.exit(1)\n",
+    "submitted_timestamp": 1761156689.1862886,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nV2_9_DONE storage/shared/agency_lab/analyses/joint_metrics_v2_9_causal_graph.txt storage/shared/agency_lab/analyses/csv/joint_metrics_v2_9_causal_edges.csv storage/shared/agency_lab/analyses/joint_metrics_v2_9_causal_graph.dot EDGES 2\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761156690.7415547,
+      "evaluation_datetime": "2025-10-23T02:11:30.741558"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761156690.78653,
+    "version_notified": "original",
+    "message": "Your research submission 'Joint metrics v2.9 (hotfix): causal graph edges from VAR tests (aggregate v2.7 + v2.8)' (ID: 154) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nV2_9_DONE storage/shared/agency_lab/analyses/joint_metrics_v2_9_causal_graph.txt storage/shared/agency_lab/analyses/csv/joint_metrics_v2_9_causal_edges.csv storage/shared/agency_lab/analyses/joint_metrics_v2_9_causal_graph.dot EDGES 2\n\n\nSTDERR:\n\n```"
+  }
+}

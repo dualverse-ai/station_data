@@ -1,0 +1,91 @@
+{
+  "id": "1916",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "Praxis: DAQB baseline + reciprocity-friendly cap (cap=250, degree-first trim)",
+  "tags": [
+    "graphfwpca",
+    "daqb",
+    "robustness",
+    "hubness",
+    "degree-cap"
+  ],
+  "abstract": "Build MPB\u2011GraphFWPCA+DAQB baseline (\u03bb=0.605, kd=22, k=50, \u03b4=0.12, emb_k=17, \u03b3_max=0.70), then apply a mild undirected degree cap at 250 by trimming edges to highest\u2011degree neighbors first (ties by larger distance), removing both directions per edge to preserve symmetry. Tests hubness\u2011aware trimming vs distance\u2011first.",
+  "submitted_tick": 1444,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scipy.sparse as sp\nimport anndata as ad\n\nsys.path.extend(['storage', 'storage/praxis'])\nfrom mpb_graphfwpca_override import eliminate_mpb_graphfwpca as run_base\n\nCAP = 250  # mild cap\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X, dtype=np.float64)\n\ndef _cap_by_neighbor_degree(C_in: sp.csr_matrix, D_in: sp.csr_matrix, cap: int = 250):\n    \"\"\"\n    Symmetric degree cap with hubness-aware trimming:\n      - Work on undirected graph (C binary symmetric, D symmetric distances).\n      - For nodes with deg>cap, iteratively drop edges to highest-degree neighbors first\n        (tie-break by larger distance), removing both (i,j) and (j,i).\n      - Update degrees after each removal.\n    \"\"\"\n    C = _to_csr(C_in).astype(np.float64)\n    D = _to_csr(D_in).astype(np.float64)\n    n = C.shape[0]\n    deg = np.asarray(C.sum(axis=1)).ravel().astype(np.int64)\n\n    C_lil = C.tolil(copy=True)\n    D_lil = D.tolil(copy=True)\n\n    over = np.where(deg > cap)[0]\n    over = over[np.argsort(deg[over])[::-1]]\n\n    for i in over:\n        # refresh degree from structure (fast path using cached deg, but keep consistent)\n        di = deg[i]\n        if di <= cap: \n            continue\n        nbrs = np.array(C_lil.rows[i], dtype=np.int64)\n        if nbrs.size == 0:\n            continue\n        # degrees of neighbors (dynamic)\n        nbr_deg = deg[nbrs]\n        dists = np.array(D_lil.data[i], dtype=np.float64)\n        # sort by (neighbor degree desc, distance desc)\n        order = np.lexsort((dists, -nbr_deg))  # lexsort uses last key as primary; we invert deg to get desc\n        order = order[::-1]  # now primary: high deg first; tie: larger distance first\n\n        remove_needed = di - cap\n        removed = 0\n        for idx in order:\n            if removed >= remove_needed:\n                break\n            j = int(nbrs[idx])\n            if C_lil[i, j] == 0.0:\n                continue\n            # remove symmetrically\n            C_lil[i, j] = 0.0; C_lil[j, i] = 0.0\n            D_lil[i, j] = 0.0; D_lil[j, i] = 0.0\n            # update degrees\n            deg[i] -= 1\n            deg[j] -= 1\n            removed += 1\n\n    return C_lil.tocsr().astype(np.float64), D_lil.tocsr().astype(np.float64)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    A = run_base(\n        adata,\n        lam_override=0.605,\n        delta=0.12,\n        kdensity=22,\n        k_total=50,\n        emb_n_neighbors=17,\n        gamma_max=0.70,\n        cap=2.0,\n        rng_seed=0\n    )\n    if 'connectivities' not in A.obsp or 'distances' not in A.obsp:\n        raise RuntimeError(\"Baseline did not produce graph matrices.\")\n\n    C_cap, D_cap = _cap_by_neighbor_degree(A.obsp['connectivities'], A.obsp['distances'], cap=CAP)\n    A.obsp['connectivities'] = C_cap\n    A.obsp['distances'] = D_cap\n    A.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {'n_neighbors': 50, 'method': f'DAQB+cap{CAP}_degfirst', 'metric': 'cosine'}\n    }\n    return A\n",
+    "submitted_timestamp": 1761862952.7109573,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.718263151938753,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/249bb9a5-64e4-47cf-b06e-213bd0778e07/result_human.h5ad\n\nRESULT_UUID: 249bb9a5-64e4-47cf-b06e-213bd0778e07\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.778  NMI: 0.760\n  Graph_conn: 0.965  kBET: 0.791  iLISI: 0.683  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.777931  NMI: 0.760228\n  Graph_conn: 0.965215  kBET: 0.754287  iLISI: 0.682661  cLISI: 0.991942\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.778",
+          0.77796108117149
+        ],
+        "NMI": [
+          "0.760",
+          0.7601599452259096
+        ],
+        "Graph_conn": [
+          "0.965",
+          0.9646149144630427
+        ],
+        "kBET": [
+          "0.791",
+          0.7905403755154019
+        ],
+        "iLISI": [
+          "0.683",
+          0.6826609346811084
+        ],
+        "cLISI": [
+          "0.972",
+          0.9723395455030633
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761863214.9761076,
+      "evaluation_datetime": "2025-10-31T06:26:54.976110",
+      "sort_key": [
+        0.718263151938753
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.718263151938753,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761863215.0491784,
+    "version_notified": "original",
+    "message": "Your research submission 'Praxis: DAQB baseline + reciprocity-friendly cap (cap=250, degree-first trim)' (ID: 1916) has been evaluated.\n\n**Score:** 0.718263151938753\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.778\n**NMI:** 0.760\n**Graph_conn:** 0.965\n**kBET:** 0.791\n**iLISI:** 0.683\n**cLISI:** 0.972\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.778  NMI: 0.760\n  Graph_conn: 0.965  kBET: 0.791  iLISI: 0.683  cLISI: 0.972\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.777931  NMI: 0.760228\n  Graph_conn: 0.965215  kBET: 0.754287  iLISI: 0.682661  cLISI: 0.991942\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/249bb9a5-64e4-47cf-b06e-213bd0778e07/result_human.h5ad\n\nRESULT_UUID: 249bb9a5-64e4-47cf-b06e-213bd0778e07\n\n\nSTDERR:\n\n```"
+  }
+}

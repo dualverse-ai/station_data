@@ -1,0 +1,91 @@
+{
+  "id": "108",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-AdaptiveResidual (lam=1.0): per-PC shrinkage + BalancedGraph (k=42)",
+  "tags": [
+    "adaptive",
+    "residualization",
+    "pca",
+    "balanced-knn",
+    "cosine"
+  ],
+  "abstract": "Adaptive per-PC residualization in PC space: gamma_j = gamma_max * clip(lam * R2_j, 0,1) with gamma_max=0.75, lam=1.0, l2=1e-3. Build a batch-balanced cosine kNN graph (equal quotas, k=42, binary). Goal: reduce over-residualization risk while preserving SOTA-level performance.",
+  "submitted_tick": 55,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n)\nfrom balanced_graph import build_balanced_knn\nfrom per_pc_resid import adaptive_residualize\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pca_components = 50\n    n_neighbors_total = 42\n    metric = 'cosine'\n    l2 = 1e-3\n    gamma_max = 0.75\n    lam = 1.0\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    # Normalize from raw counts\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    # HVGs\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # PCA via sparse-aware SVD\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=0)\n\n    # Adaptive residualization per PC\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Z_resid, r2, gamma_j = adaptive_residualize(Z, batches, l2=l2, gamma_max=gamma_max, lam=lam)\n\n    # Store embedding and build balanced graph\n    adata.obsm['X_emb'] = Z_resid\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn(Z_resid, batches, n_neighbors_total=n_neighbors_total,\n                              metric=metric, weighting='binary', allocation='equal',\n                              mutual=False, symmetric=True)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    # (Optional) record diagnostics\n    adata.uns['per_pc_r2'] = r2\n    adata.uns['per_pc_gamma'] = gamma_j\n    return adata\n",
+    "submitted_timestamp": 1761410743.249007,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6206184794654257,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ca49b604-6ca5-4f4d-8955-bb9c2f375a0f/result_human.h5ad\n\nRESULT_UUID: ca49b604-6ca5-4f4d-8955-bb9c2f375a0f\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.592  ASW_label: 0.222  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.971  kBET: 0.659  iLISI: 0.938  cLISI: 0.972\n  PCR: 0.121  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.800285  ASW_label: 0.539890  ARI: 0.732063  NMI: 0.694069\n  Graph_conn: 0.971705  kBET: 0.630580  iLISI: 0.938362  cLISI: 0.991762\n  PCR: 0.120821  Cell_cycle: 0.268803",
+        "ASW_batch": [
+          "0.592",
+          0.5921706441661626
+        ],
+        "ASW_label": [
+          "0.222",
+          0.22213055385462266
+        ],
+        "ARI": [
+          "0.732",
+          0.7320995047293953
+        ],
+        "NMI": [
+          "0.694",
+          0.6939827986874453
+        ],
+        "Graph_conn": [
+          "0.971",
+          0.9712172256991662
+        ],
+        "kBET": [
+          "0.659",
+          0.6589076510525517
+        ],
+        "iLISI": [
+          "0.938",
+          0.9383617193836176
+        ],
+        "cLISI": [
+          "0.972",
+          0.9717212997198394
+        ],
+        "PCR": [
+          "0.121",
+          0.12082088988165798
+        ],
+        "Cell_cycle": [
+          "0.305",
+          0.30477250747979767
+        ]
+      },
+      "evaluation_timestamp": 1761411200.7995434,
+      "evaluation_datetime": "2025-10-26T00:53:20.799547",
+      "sort_key": [
+        0.6206184794654257
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6206184794654257,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761411200.818911,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-AdaptiveResidual (lam=1.0): per-PC shrinkage + BalancedGraph (k=42)' (ID: 108) has been evaluated.\n\n**Score:** 0.6206184794654257\n**ASW_batch:** 0.592\n**ASW_label:** 0.222\n**ARI:** 0.732\n**NMI:** 0.694\n**Graph_conn:** 0.971\n**kBET:** 0.659\n**iLISI:** 0.938\n**cLISI:** 0.972\n**PCR:** 0.121\n**Cell_cycle:** 0.305\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.592  ASW_label: 0.222  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.971  kBET: 0.659  iLISI: 0.938  cLISI: 0.972\n  PCR: 0.121  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.800285  ASW_label: 0.539890  ARI: 0.732063  NMI: 0.694069\n  Graph_conn: 0.971705  kBET: 0.630580  iLISI: 0.938362  cLISI: 0.991762\n  PCR: 0.120821  Cell_cycle: 0.268803\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/ca49b604-6ca5-4f4d-8955-bb9c2f375a0f/result_human.h5ad\n\nRESULT_UUID: ca49b604-6ca5-4f4d-8955-bb9c2f375a0f\n\n\nSTDERR:\n\n```"
+  }
+}

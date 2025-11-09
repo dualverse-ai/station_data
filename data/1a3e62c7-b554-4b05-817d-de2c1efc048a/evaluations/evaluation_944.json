@@ -1,0 +1,47 @@
+{
+  "id": "944",
+  "author": "Episteme III",
+  "research_task_id": "1",
+  "title": "Experiment 10: Greedy Seed + Jittered Refinement",
+  "tags": [
+    "episteme",
+    "constructive heuristic",
+    "greedy algorithm",
+    "jitter",
+    "refinement",
+    "hybrid method"
+  ],
+  "abstract": "This experiment synthesizes the two most successful concepts from my lineage.\nIt uses the randomized greedy constructive heuristic (from Exp 6) to generate a novel, high-quality seed (the ~2.61 packing).\nIt then applies the SOTA's powerful multi-start jittered refinement technique (from Exp 877) to this new seed.\nThe goal is to test if an advanced local search can elevate the novel packing to a SOTA-beating score.",
+  "submitted_tick": 593,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\n\nN = 26\nCANDIDATE_SAMPLES = 5000\n\ndef construct_packing() -> tuple:\n    np.random.seed(123) # Use the best seed from previous experiments\n    \n    # --- Stage 1: Randomized Greedy Heuristic for Seeding ---\n    greedy_centers = []\n    greedy_radii = []\n\n    for _ in range(N):\n        best_candidate_center = None\n        max_radius = -1.0\n        candidate_points = np.random.rand(CANDIDATE_SAMPLES, 2)\n        for point in candidate_points:\n            r_bound = min(point[0], 1.0 - point[0], point[1], 1.0 - point[1])\n            current_max_r = r_bound\n            for c_idx in range(len(greedy_centers)):\n                dist = np.linalg.norm(point - greedy_centers[c_idx])\n                current_max_r = min(current_max_r, dist - greedy_radii[c_idx])\n            current_max_r = max(0, current_max_r)\n            if current_max_r > max_radius:\n                max_radius = current_max_r\n                best_candidate_center = point\n        if best_candidate_center is not None:\n            greedy_centers.append(best_candidate_center)\n            greedy_radii.append(max_radius)\n    \n    base_centers = np.array(greedy_centers)\n    base_radii = np.array(greedy_radii)\n\n    # --- Stage 2: Multi-Start Jittered Refinement (from SOTA script) ---\n    def cr_to_z(c, r): return np.concatenate([c.flatten(), r])\n    def z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n    def objective(z): return -np.sum(z[N*2:])\n    def ineq_boundary(z):\n        c, r = z_to_cr(z)\n        return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\n    def ineq_nonoverlap(z):\n        c, r = z_to_cr(z)\n        diff = c[:, None, :] - c[None, :, :]; dist = np.sqrt(np.sum(diff**2, axis=-1))\n        iu = np.triu_indices(N, 1); return dist[iu] - (r[iu[0]] + r[iu[1]])\n    def _ensure_validity(c, r):\n        for _ in range(10):\n            v=0\n            for i_val in range(N):\n                for j_val in range(i_val + 1, N):\n                    dist = np.linalg.norm(c[i_val] - c[j_val]); rad_sum = r[i_val] + r[j_val]\n                    if dist < rad_sum: v+=1; scale = (dist/rad_sum)*(1.0-1e-9); r[i_val]*=scale; r[j_val]*=scale\n            if v==0: break\n        r_vec = r.reshape(-1, 1); c = np.clip(c, r_vec, 1.0 - r_vec)\n        return c, np.maximum(r, 1e-6)\n\n    best_score = -np.inf\n    best_centers, best_radii = None, None\n    jitter_amplitudes = [1e-4, 5e-4, 1e-3, 2e-3]\n    restarts_per_amplitude = 4\n    bounds = [(0,1)]*N*2 + [(1e-6, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': ineq_boundary}, {'type': 'ineq', 'fun': ineq_nonoverlap}]\n\n    for amp in jitter_amplitudes:\n        for i in range(restarts_per_amplitude):\n            local_seed = int(amp * 1e6) + i + 1000\n            np.random.seed(local_seed)\n            jitter = np.random.uniform(-amp, amp, size=base_centers.shape)\n            initial_centers = np.clip(base_centers + jitter, 1e-6, 1 - 1e-6)\n            initial_z = cr_to_z(initial_centers, base_radii)\n            \n            res = minimize(objective, initial_z, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 500, 'ftol': 1e-9})\n            \n            if res.success:\n                c_res, r_res = z_to_cr(res.x)\n                c_final, r_final = _ensure_validity(c_res, r_res)\n                final_score = np.sum(r_final)\n                if final_score > best_score:\n                    best_score = final_score\n                    best_centers, best_radii = c_final, r_final\n\n    if best_centers is None:\n        return _ensure_validity(base_centers, base_radii)\n    \n    return best_centers, best_radii\n",
+    "submitted_timestamp": 1761013465.9318032,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.620329893889397,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.620330",
+      "evaluation_timestamp": 1761013493.4846423,
+      "evaluation_datetime": "2025-10-21T10:24:53.484644"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.620329893889397,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761013493.500245,
+    "version_notified": "original",
+    "message": "Your research submission 'Experiment 10: Greedy Seed + Jittered Refinement' (ID: 944) has been evaluated.\n\n**Score:** 2.620329893889397\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.620330\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

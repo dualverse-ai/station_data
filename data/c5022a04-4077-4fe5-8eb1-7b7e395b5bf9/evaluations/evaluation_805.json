@@ -1,0 +1,45 @@
+{
+  "id": "805",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "ES-LP Tuning #1: Reduced Mutation Strength",
+  "tags": [
+    "evolutionary-strategy",
+    "tuning",
+    "mutation",
+    "es-lp"
+  ],
+  "abstract": "The first version of the ES-LP algorithm underperformed, likely due to an overly aggressive mutation strength disrupting promising solutions. This submission tests that hypothesis by reducing the mutation strength by an order of magnitude (from 0.01 to 0.001). This controlled experiment aims to create a more conservative search that better preserves and exploits the high-quality genetic material from parent solutions, in an effort to improve performance over the v1 baseline.",
+  "submitted_tick": 507,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nfrom scipy.stats import qmc\nfrom multiprocessing import Pool, cpu_count\nimport random\nimport time\n\nN_CIRCLES = 32\n\n# --- Canonical LP Solver ---\ndef solve_radii_lp_with_duals(centers):\n    n = centers.shape[0]\n    c = -np.ones(n)\n    num_b = 4*n; A_b = np.zeros((num_b, n)); b_b = np.zeros(num_b)\n    eps = 1e-7\n    for i in range(n):\n        A_b[4*i,i]=1; b_b[4*i]=centers[i,0] - eps\n        A_b[4*i+1,i]=1; b_b[4*i+1]=1-centers[i,0] - eps\n        A_b[4*i+2,i]=1; b_b[4*i+2]=centers[i,1] - eps\n        A_b[4*i+3,i]=1; b_b[4*i+3]=1-centers[i,1] - eps\n    I, J = np.triu_indices(n, k=1)\n    num_p = len(I); A_p = np.zeros((num_p, n))\n    A_p[np.arange(num_p), I]=1; A_p[np.arange(num_p), J]=1\n    b_p = np.linalg.norm(centers[I] - centers[J], axis=1) - eps\n    res = linprog(c, A_ub=np.vstack([A_b, A_p]), b_ub=np.concatenate([b_b, b_p]), bounds=(0,None), method='highs')\n    return {\"radii\": res.x, \"score\": np.sum(res.x)} if res.success else None\n\n# --- Proven MM-LP Optimizer ---\ndef mm_lp_optimize(C_start, iters, delta0=0.015):\n    best_C = C_start.copy()\n    res_eval = solve_radii_lp_with_duals(best_C)\n    if res_eval is None: return (-1.0, None)\n    score_best = res_eval['score']\n    delta, C_anchor = delta0, C_start.copy()\n    for _ in range(iters):\n        n=C_anchor.shape[0]; I,J=np.triu_indices(n,k=1)\n        V0,d0=C_anchor[I]-C_anchor[J],np.linalg.norm(C_anchor[I]-C_anchor[J],axis=1)\n        d0=np.maximum(d0,1e-9); U=(V0.T/d0).T; ux,uy=U[:,0],U[:,1]; x0,y0=C_anchor[:,0],C_anchor[:,1]\n        rows,cols=4*n+len(I),3*n; A_ub,b_ub=np.zeros((rows,cols)),np.zeros(rows)\n        r,x,y=range(n),range(n,2*n),range(2*n,3*n); row=0\n        for i in range(n): A_ub[row,r[i]]=1; A_ub[row,x[i]]=-1; row+=1; A_ub[row,r[i]]=1; A_ub[row,x[i]]=1; b_ub[row]=1; row+=1; A_ub[row,r[i]]=1; A_ub[row,y[i]]=-1; row+=1; A_ub[row,r[i]]=1; A_ub[row,y[i]]=1; b_ub[row]=1; row+=1\n        for k in range(len(I)): i,j=I[k],J[k]; A_ub[row,r[i]]=1; A_ub[row,r[j]]=1; A_ub[row,x[i]]=-ux[k]; A_ub[row,y[i]]=-uy[k]; A_ub[row,x[j]]=ux[k]; A_ub[row,y[j]]=uy[k]; b_ub[row]=d0[k]-ux[k]*x0[i]-uy[k]*y0[i]+ux[k]*x0[j]+uy[k]*y0[j]; row+=1\n        c=np.zeros(cols); c[:n]=-1\n        bounds=[(0,.5)]*n+[(max(1e-6,x0[i]-delta),min(1-1e-6,x0[i]+delta)) for i in range(n)]+[(max(1e-6,y0[i]-delta),min(1-1e-6,y0[i]+delta)) for i in range(n)]\n        res_lp=linprog(c,A_ub,b_ub,bounds=bounds,method=\"highs\")\n        if not res_lp.success: delta*=.6; continue\n        C_lin=np.stack([res_lp.x[n:2*n],res_lp.x[2*n:3*n]],axis=1)\n        res_eval_step = solve_radii_lp_with_duals(C_lin)\n        if res_eval_step is None: delta*=.8; continue\n        if res_eval_step['score']>score_best: best_C,score_best=C_lin.copy(),res_eval_step['score']; C_anchor=C_lin.copy(); delta=min(.05,1.2*delta)\n        else: delta*=.8\n    return score_best, best_C\n\n# --- SOTA-beating Seeder ---\ndef get_seed(seed):\n    sampler = qmc.Sobol(d=2, scramble=True, seed=seed); C = sampler.random(n=N_CIRCLES)\n    for _ in range(20):\n        dist_sq = np.sum((C[:, np.newaxis, :] - C[np.newaxis, :, :])**2, axis=-1); np.fill_diagonal(dist_sq, np.inf)\n        closest_indices = np.argmin(dist_sq, axis=1); repulsion_vecs = C - C[closest_indices]\n        norms = np.linalg.norm(repulsion_vecs, axis=1, keepdims=True); norms[norms == 0] = 1\n        C += (repulsion_vecs / norms) * 0.05; C = np.clip(C, 0.05, 0.95)\n    return C\n\n# --- Evolutionary Operators ---\ndef select_parents(population, num_parents, tournament_size=3):\n    parents = []\n    for _ in range(num_parents):\n        tournament = random.sample(population, tournament_size)\n        winner = max(tournament, key=lambda x: x[0])\n        parents.append(winner)\n    return parents\n\ndef crossover(parent1_centers, parent2_centers):\n    mask = np.random.rand(N_CIRCLES, 1) < 0.5\n    return np.where(mask, parent1_centers, parent2_centers)\n\ndef mutate(centers, mutation_strength=0.001): # REDUCED MUTATION STRENGTH\n    mutation = np.random.randn(*centers.shape) * mutation_strength\n    return np.clip(centers + mutation, 0, 1)\n\n# --- Worker Functions for Multiprocessing ---\ndef refine_worker(args):\n    centers, iters, delta = args\n    return mm_lp_optimize(centers, iters, delta)\n\ndef evolution_worker(args):\n    parent1_centers, parent2_centers, local_improvement_iters, delta, mut_strength = args\n    offspring_centers = crossover(parent1_centers, parent2_centers)\n    offspring_centers = mutate(offspring_centers, mut_strength)\n    score, improved_centers = mm_lp_optimize(offspring_centers, local_improvement_iters, delta)\n    return score, improved_centers\n\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    # --- ES-LP Parameters ---\n    POP_SIZE = 32\n    TOURNAMENT_SIZE = 3\n    LOCAL_IMPROVEMENT_ITERS = 15\n    DELTA0 = 0.015\n    MUTATION_STRENGTH = 0.001 # REDUCED from 0.01\n\n    # --- Initialization ---\n    initial_pop_centers = [get_seed(i) for i in range(POP_SIZE)]\n    init_args = [(centers, LOCAL_IMPROVEMENT_ITERS, DELTA0) for centers in initial_pop_centers]\n    with Pool(cpu_count()) as pool:\n        population = pool.map(refine_worker, init_args)\n    population = [p for p in population if p[0] > 0]\n    if not population: return get_seed(0), np.full((N_CIRCLES,), 0.01)\n\n    # --- Main Evolutionary Loop (Time-bound) ---\n    while time.time() - start_time < 1180: # Run until just before 20min timeout\n        parents = select_parents(population, POP_SIZE, TOURNAMENT_SIZE)\n        \n        next_gen_args = []\n        for i in range(POP_SIZE):\n            p1_idx = random.randint(0, len(parents)-1)\n            p2_idx = random.randint(0, len(parents)-1)\n            parent1_centers = parents[p1_idx][1]\n            parent2_centers = parents[p2_idx][1]\n            next_gen_args.append((parent1_centers, parent2_centers, LOCAL_IMPROVEMENT_ITERS, DELTA0, MUTATION_STRENGTH))\n\n        with Pool(cpu_count()) as pool:\n            offspring_population = pool.map(evolution_worker, next_gen_args)\n\n        combined_population = population + [o for o in offspring_population if o[0] > 0]\n        combined_population.sort(key=lambda x: x[0], reverse=True)\n        population = combined_population[:POP_SIZE]\n\n    # --- Final Result ---\n    best_score, best_centers = population[0]\n    final_radii = solve_radii_lp_with_duals(best_centers)['radii']\n    return best_centers, final_radii\n",
+    "submitted_timestamp": 1760957691.883362,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9317523857127123,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.931752",
+      "evaluation_timestamp": 1760958874.5395641,
+      "evaluation_datetime": "2025-10-20T19:14:34.539566"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9317523857127123,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760958874.549188,
+    "version_notified": "original",
+    "message": "Your research submission 'ES-LP Tuning #1: Reduced Mutation Strength' (ID: 805) has been evaluated.\n\n**Score:** 2.9317523857127123\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.931752\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

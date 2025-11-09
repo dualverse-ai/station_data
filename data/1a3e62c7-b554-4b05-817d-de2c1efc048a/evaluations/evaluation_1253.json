@@ -1,0 +1,47 @@
+{
+  "id": "1253",
+  "author": "Aletheia III",
+  "research_task_id": "1",
+  "title": "Replication of Quest II SOTA: Nudge Pair (18,25) + Refinement",
+  "tags": [
+    "replication",
+    "sota",
+    "nudging",
+    "refinement",
+    "two-stage",
+    "synthesis"
+  ],
+  "abstract": "This experiment attempts to replicate the true SOTA methodology, which appears to be a two-stage process combining 'nudging' with 'exhaustive refinement'. This submission first uses a penalized objective to nudge the base packing towards forming a contact between circles 18 and 25, the pair identified by Quest II. The resulting configuration is then used as the starting point for a second, non-penalized, multi-start local search to deeply refine the solution. This is a synthesis of the station's most advanced techniques.",
+  "submitted_tick": 740,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize, Bounds\nfrom scipy.spatial.distance import pdist, squareform\nimport os \n\n# --- Constants ---\nN = 26\nBASE_PACKING_PATH = 'storage/Scientia/nmap/n26/sota_nudged_375_data'\n\n# --- Stage 1: Nudging Parameters ---\nALPHA_ENCOURAGE = 1e2\nEPS_CLOSE = 0.005\nENCOURAGE_PAIRS = [(17, 24)] # Circles 18 and 25 -> indices 17 and 24\n\n# --- Stage 2: Refinement Parameters ---\nJITTER_AMPLITUDES = [1.0e-4, 5.0e-4, 1.0e-3, 2.0e-3]\nRESTARTS_PER_AMPLITUDE = 5\n\n# --- Helper functions ---\ndef pack_to_x(c, r):\n    x = np.zeros(N * 3); x[0::3], x[1::3], x[2::3] = c[:,0], c[:,1], r; return x\n\ndef x_to_pack(x):\n    c = x.reshape(N, 3)[:, :2]; r = x[2::3]; return c, r\n\n# --- Objective Functions ---\ndef penalized_objective(x):\n    c, r = x_to_pack(x)\n    base_obj = -np.sum(r)\n    penalty = 0.0\n    for i, j in ENCOURAGE_PAIRS:\n        dist = np.linalg.norm(c[i] - c[j])\n        target_dist = r[i] + r[j] + EPS_CLOSE\n        penalty += ALPHA_ENCOURAGE * max(0, dist - target_dist)**2\n    return base_obj + penalty\n\ndef standard_objective(x):\n    return -np.sum(x[2::3])\n\n# --- Constraints ---\ndef constraints(x):\n    c, r = x_to_pack(x)\n    b = np.concatenate([c[:,0]-r, 1-(c[:,0]+r), c[:,1]-r, 1-(c[:,1]+r)])\n    iu = np.triu_indices(N, 1)\n    o = squareform(pdist(c))[iu] - (r[iu[0]] + r[iu[1]])\n    return np.concatenate([b, o])\n\ndef construct_packing() -> tuple:\n    try:\n        base_centers = np.loadtxt(os.path.join(BASE_PACKING_PATH, 'centers.txt'))\n        base_radii = np.loadtxt(os.path.join(BASE_PACKING_PATH, 'radii.txt'))\n    except Exception as e:\n        print(f\"FATAL: Could not load base packing. {e}\")\n        return np.random.rand(N, 2), np.full(N, 0.05)\n\n    # --- STAGE 1: NUDGING ---\n    print(\"--- Stage 1: Nudging pair (18,25) ---\")\n    initial_guess = pack_to_x(base_centers, base_radii)\n    bounds = Bounds(np.tile([0,0,1e-6], N), np.tile([1,1,0.5], N))\n    ineq_constraints = {'type': 'ineq', 'fun': constraints}\n    \n    nudge_result = minimize(\n        penalized_objective, initial_guess, method='SLSQP', bounds=bounds,\n        constraints=[ineq_constraints], options={'maxiter': 500, 'ftol': 1e-10}\n    )\n    \n    if not nudge_result.success:\n        print(\"Nudging stage failed. Aborting.\")\n        return base_centers, base_radii * (1.0 - 1e-7)\n    \n    nudged_centers, nudged_radii = x_to_pack(nudge_result.x)\n    print(f\"Nudging complete. Intermediate score: {np.sum(nudged_radii)}\")\n\n    # --- STAGE 2: EXHAUSTIVE REFINEMENT ---\n    print(\"--- Stage 2: Exhaustive Local Refinement ---\")\n    best_score = np.sum(nudged_radii)\n    best_x = nudge_result.x\n    \n    for jitter_mag in JITTER_AMPLITUDES:\n        for _ in range(RESTARTS_PER_AMPLITUDE):\n            perturbed_c = nudged_centers + np.random.uniform(-jitter_mag, jitter_mag, nudged_centers.shape)\n            initial_guess_2 = pack_to_x(np.clip(perturbed_c, 0, 1), nudged_radii)\n            \n            refine_result = minimize(\n                standard_objective, initial_guess_2, method='SLSQP', bounds=bounds,\n                constraints=[ineq_constraints], options={'maxiter': 500, 'ftol': 1e-10}\n            )\n\n            if refine_result.success:\n                current_score = -refine_result.fun\n                if current_score > best_score:\n                    best_score = current_score\n                    best_x = refine_result.x\n                    print(f\"Refinement found new best score: {best_score}\")\n\n    final_centers, final_radii = x_to_pack(best_x)\n    return final_centers, final_radii * (1.0 - 1e-7)\n",
+    "submitted_timestamp": 1761103734.3382926,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.621049047826773,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: Nudging pair (18,25) ---\nNudging complete. Intermediate score: 2.5636378158068958\n--- Stage 2: Exhaustive Local Refinement ---\nRefinement found new best score: 2.6210493099277454\nRefinement found new best score: 2.6210493099278636\nRefinement found new best score: 2.621049309931703\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.621049",
+      "evaluation_timestamp": 1761103753.623863,
+      "evaluation_datetime": "2025-10-22T11:29:13.623864"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.621049047826773,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761103753.6424236,
+    "version_notified": "original",
+    "message": "Your research submission 'Replication of Quest II SOTA: Nudge Pair (18,25) + Refinement' (ID: 1253) has been evaluated.\n\n**Score:** 2.621049047826773\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.621049\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: Nudging pair (18,25) ---\nNudging complete. Intermediate score: 2.5636378158068958\n--- Stage 2: Exhaustive Local Refinement ---\nRefinement found new best score: 2.6210493099277454\nRefinement found new best score: 2.6210493099278636\nRefinement found new best score: 2.621049309931703\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

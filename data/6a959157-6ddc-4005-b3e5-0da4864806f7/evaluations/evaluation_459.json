@@ -1,0 +1,92 @@
+{
+  "id": "459",
+  "author": "Aether II",
+  "research_task_id": "1",
+  "title": "Aether II EtC-BRBG: Batch-Specific Winsorization (Pre-PCA)",
+  "tags": [
+    "etc",
+    "pca",
+    "combat",
+    "winsorization",
+    "preprocessing",
+    "stagnation protocol"
+  ],
+  "abstract": "This experiment applies batch-specific winsorization as a preprocessing step *before* PCA within the Embed-then-Correct (EtC) pipeline. For each highly variable gene, expression values within each batch are winsorized to the batch-specific 1st and 99th percentiles. This aims to reduce the impact of outliers in gene expression data before PCA, potentially providing a more robust input for the EtC pipeline and improving overall integration performance.",
+  "submitted_tick": 269,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, issparse\nimport sys\nsys.path.append('storage/aether')\nfrom aether_utils import _normalize_log1p_inplace, _batch_specific_winsorize, _build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    sc.set_figure_params(dpi=80, facecolor='white')\n    print(\"Aether II EtC-BRBG: Batch-Specific Winsorization (Pre-PCA) initialized.\")\n\n    # Ensure normalized and log1p transformed\n    _normalize_log1p_inplace(adata)\n\n    # Parameters\n    n_pca_components = 60 # From Daedalus II's SOTA (EID 378)\n    n_neighbors_graph = 48 # From Daedalus II's SOTA (EID 378)\n    random_state_val = 0\n\n    # --- Pre-processing for Embedding Path: Batch-Specific Winsorization ---\n    print(\"Applying batch-specific winsorization on HVGs before PCA...\")\n    # Assume adata.var['batch_hvg'] is already set from previous steps or default data loading\n    adata.X = _batch_specific_winsorize(adata, adata.obs['batch'].astype('category'), limits=(0.01, 0.99))\n    print(\"Batch-specific winsorization complete.\")\n\n    # --- Embedding Path: PCA -> ComBat ---\n    print(f\"Embedding Path: Running PCA (n={n_pca_components})\")\n    sc.tl.pca(adata, n_comps=n_pca_components, random_state=random_state_val)\n    \n    print(\"Running ComBat on PCs...\")\n    tmp_adata_combat = sc.AnnData(adata.obsm['X_pca'], obs=adata.obs)\n    sc.pp.combat(tmp_adata_combat, key='batch')\n    adata.obsm['X_emb'] = tmp_adata_combat.X\n    print(f\"Embedding path complete. Final embedding shape: {adata.obsm['X_emb'].shape}\")\n\n    # --- Graph Path: Balanced kNN Graph on Integrated Embedding ---\n    print(f\"Graph Path: Building balanced kNN graph (n_neighbors={n_neighbors_graph}) on integrated embedding...\")\n    tmp_adata_graph = sc.AnnData(adata.obsm['X_emb'], obs=adata.obs)\n    # Using _build_balanced_knn from aether_utils.py, which internally calls sc.pp.neighbors\n    # with the correct parameters for the graph path.\n    tmp_adata_graph.obsp['connectivities'], tmp_adata_graph.obsp['distances'] = _build_balanced_knn(\n        tmp_adata_graph, # Pass the AnnData object containing the embedding\n        n_neighbors=n_neighbors_graph, \n        metric='cosine', \n        random_state=random_state_val\n    )\n\n    adata.obsp['connectivities'] = tmp_adata_graph.obsp['connectivities']\n    adata.obsp['distances'] = tmp_adata_graph.obsp['distances']\n    print(\"Graph path complete.\")\n\n    return adata\n",
+    "submitted_timestamp": 1761479456.2201974,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6210430974659084,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAether II EtC-BRBG: Batch-Specific Winsorization (Pre-PCA) initialized.\nApplying batch-specific winsorization on HVGs before PCA...\nBatch-specific winsorization complete.\nEmbedding Path: Running PCA (n=60)\nRunning ComBat on PCs...\nEmbedding path complete. Final embedding shape: (20000, 60)\nGraph Path: Building balanced kNN graph (n_neighbors=48) on integrated embedding...\nGraph path complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4b828958-1df3-43da-ae2f-f465a3b7e449/result_human.h5ad\n\nRESULT_UUID: 4b828958-1df3-43da-ae2f-f465a3b7e449\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.683  ASW_label: 0.208  ARI: 0.574  NMI: 0.677\n  Graph_conn: 0.875  kBET: 0.793  iLISI: 0.035  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.378\n\nRaw Scores (before normalization):\n  ASW_batch: 0.841293  ASW_label: 0.531796  ARI: 0.573497  NMI: 0.677480\n  Graph_conn: 0.876922  kBET: 0.756807  iLISI: 0.035486  cLISI: 0.996151\n  PCR: 0.999978  Cell_cycle: 0.331070",
+        "ASW_batch": [
+          "0.683",
+          0.6832032603378037
+        ],
+        "ASW_label": [
+          "0.208",
+          0.20813266400945316
+        ],
+        "ARI": [
+          "0.574",
+          0.5735550639360677
+        ],
+        "NMI": [
+          "0.677",
+          0.6773886413937431
+        ],
+        "Graph_conn": [
+          "0.875",
+          0.8747987711490253
+        ],
+        "kBET": [
+          "0.793",
+          0.7932215028812252
+        ],
+        "iLISI": [
+          "0.035",
+          0.03548583636788486
+        ],
+        "cLISI": [
+          "0.987",
+          0.9867887686456847
+        ],
+        "PCR": [
+          "1.000",
+          0.99997756959085
+        ],
+        "Cell_cycle": [
+          "0.378",
+          0.3778788963473468
+        ]
+      },
+      "evaluation_timestamp": 1761480060.8317482,
+      "evaluation_datetime": "2025-10-26T20:01:00.831749",
+      "sort_key": [
+        0.6210430974659084
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6210430974659084,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761480060.8627875,
+    "version_notified": "original",
+    "message": "Your research submission 'Aether II EtC-BRBG: Batch-Specific Winsorization (Pre-PCA)' (ID: 459) has been evaluated.\n\n**Score:** 0.6210430974659084\n**ASW_batch:** 0.683\n**ASW_label:** 0.208\n**ARI:** 0.574\n**NMI:** 0.677\n**Graph_conn:** 0.875\n**kBET:** 0.793\n**iLISI:** 0.035\n**cLISI:** 0.987\n**PCR:** 1.000\n**Cell_cycle:** 0.378\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.683  ASW_label: 0.208  ARI: 0.574  NMI: 0.677\n  Graph_conn: 0.875  kBET: 0.793  iLISI: 0.035  cLISI: 0.987\n  PCR: 1.000  Cell_cycle: 0.378\n\nRaw Scores (before normalization):\n  ASW_batch: 0.841293  ASW_label: 0.531796  ARI: 0.573497  NMI: 0.677480\n  Graph_conn: 0.876922  kBET: 0.756807  iLISI: 0.035486  cLISI: 0.996151\n  PCR: 0.999978  Cell_cycle: 0.331070\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAether II EtC-BRBG: Batch-Specific Winsorization (Pre-PCA) initialized.\nApplying batch-specific winsorization on HVGs before PCA...\nBatch-specific winsorization complete.\nEmbedding Path: Running PCA (n=60)\nRunning ComBat on PCs...\nEmbedding path complete. Final embedding shape: (20000, 60)\nGraph Path: Building balanced kNN graph (n_neighbors=48) on integrated embedding...\nGraph path complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4b828958-1df3-43da-ae2f-f465a3b7e449/result_human.h5ad\n\nRESULT_UUID: 4b828958-1df3-43da-ae2f-f465a3b7e449\n\n\nSTDERR:\n\n```"
+  }
+}

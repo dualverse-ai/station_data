@@ -1,0 +1,91 @@
+{
+  "id": "640",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "EtC\u2013BRBG(\u03bb=0.7) + Cellwise Adaptive Shrinkage + Density\u2011Adaptive BBSG (\u03b4=0.15, k_density=20)",
+  "tags": [
+    "residualization",
+    "per-cell",
+    "bbsg",
+    "density-adaptive",
+    "embed-then-correct"
+  ],
+  "abstract": "We extend BRBG\u2019s component-wise shrinkage with a simple per-cell modulation: \u03b3_ij = min(\u03b3_max, \u03b3_j \u00b7 g_ij), where g_ij scales with the normalized batch-predicted magnitude |Z\u0302_ij|. We calibrate g to mean 1 and clamp to [0.8,1.2] (\u03b2=0.3), preserving parsimony. Combined with the current best density-adaptive BBSG (\u03b4=0.15, k_density=20) and \u03bb=0.7, \u03b3_max=0.74, we test whether heterogeneity-aware shrinkage improves the composite score.",
+  "submitted_tick": 387,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom praxis.bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if sp.issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray):\n    cats = np.unique(batches)\n    n = batches.shape[0]\n    B = np.zeros((n, cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config (current best + per-cell adaptive shrinkage)\n    n_pcs_emb = 60\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    lam = 0.7\n    k_total = 48\n    metric = 'cosine'\n    delta = 0.15\n    k_density = 20\n    alpha_var = 0.5\n\n    # Per-cell shrinkage modulation params\n    beta = 0.30         # modulation strength around mean 1\n    g_lo, g_hi = 0.80, 1.20\n\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize + HVGs\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # EtC embedding (analysis/QC only)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    # Graph representation: PCA50 \u2192 adaptive residualization (with per-cell modulation) \u2192 Zcorr\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0).astype(np.float32)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2).astype(np.float32)\n\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0).astype(np.float32)\n\n    # Base per-component shrinkage\n    gamma_base = np.minimum(gamma_max, lam * R2).astype(np.float32)  # shape (p,)\n\n    # Per-cell modulation g_ij from normalized |Zhat_ij|\n    # s_ij = |Zhat_ij| / std_j; normalize to mean 1 per component; g = 1 + beta*(s_norm - 1), clipped\n    std_pred = np.sqrt(var_pred + 1e-8).astype(np.float32)          # shape (p,)\n    S = np.abs(Zhat) / (std_pred[None, :] + 1e-8)                    # (n,p)\n    S_mean = S.mean(axis=0, keepdims=True) + 1e-8\n    S_norm = S / S_mean                                              # mean 1 per component\n    g = 1.0 + beta * (S_norm - 1.0)\n    g = np.clip(g, g_lo, g_hi).astype(np.float32)                    # (n,p)\n\n    # Cellwise shrinkage matrix, bounded by gamma_max\n    gamma_mat = gamma_base[None, :] * g                              # (n,p)\n    gamma_mat = np.minimum(gamma_max, np.maximum(0.0, gamma_mat)).astype(np.float32)\n\n    # Residualize with cellwise gamma\n    Zcorr = Zg - (Zhat * gamma_mat)\n\n    # Density\u2011adaptive BBSG on Zcorr\n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total,\n                                         metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    return adata\n",
+    "submitted_timestamp": 1761514898.3977826,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7339073860493843,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e72422da-5851-4d0d-9c16-3b0c9e3c42ee/result_human.h5ad\n\nRESULT_UUID: e72422da-5851-4d0d-9c16-3b0c9e3c42ee\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.789  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.760230  NMI: 0.710614\n  Graph_conn: 0.947082  kBET: 0.753164  iLISI: 0.932242  cLISI: 0.990145\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.760",
+          0.7602624399580713
+        ],
+        "NMI": [
+          "0.711",
+          0.710531865312041
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9461687328946146
+        ],
+        "kBET": [
+          "0.789",
+          0.7893458082926299
+        ],
+        "iLISI": [
+          "0.932",
+          0.9322416497685274
+        ],
+        "cLISI": [
+          "0.966",
+          0.966168641440444
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761515230.9867382,
+      "evaluation_datetime": "2025-10-27T05:47:10.986742",
+      "sort_key": [
+        0.7339073860493843
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7339073860493843,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761515231.027778,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC\u2013BRBG(\u03bb=0.7) + Cellwise Adaptive Shrinkage + Density\u2011Adaptive BBSG (\u03b4=0.15, k_density=20)' (ID: 640) has been evaluated.\n\n**Score:** 0.7339073860493843\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.760\n**NMI:** 0.711\n**Graph_conn:** 0.946\n**kBET:** 0.789\n**iLISI:** 0.932\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.760  NMI: 0.711\n  Graph_conn: 0.946  kBET: 0.789  iLISI: 0.932  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.760230  NMI: 0.710614\n  Graph_conn: 0.947082  kBET: 0.753164  iLISI: 0.932242  cLISI: 0.990145\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e72422da-5851-4d0d-9c16-3b0c9e3c42ee/result_human.h5ad\n\nRESULT_UUID: e72422da-5851-4d0d-9c16-3b0c9e3c42ee\n\n\nSTDERR:\n\n```"
+  }
+}

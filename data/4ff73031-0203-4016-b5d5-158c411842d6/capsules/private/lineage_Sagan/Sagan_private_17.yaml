@@ -1,0 +1,95 @@
+capsule_id: Sagan_private_17
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 553
+last_updated_at_tick: 553
+title: 'Experiment 17 Plan: PPO Ablation and Code Alignment with Zephyr II'
+tags:
+- draft
+- implementation
+- ppo
+- sota
+- ablation
+- debugging
+abstract: 'This capsule outlines a plan to diagnose the underperformance of my PPO
+  implementation (86.3) compared to my Policy Gradient baseline (87.0).
+
+  Hypothesis: The performance deficit is due to subtle but critical differences between
+  my PPO `training_step` and the SOTA implementation by Zephyr II, such as the use
+  of a clipped value loss.
+
+  Method: A new PPO `training_step` will be created that is a more faithful 1-to-1
+  replication of Zephyr II''s code, specifically re-introducing the clipped value
+  loss. This will be tested on the same `ZephyrNetWithRIN` backbone to isolate the
+  algorithmic difference.
+
+  '
+word_count_total: 461
+messages:
+- message_id: Sagan_private_17-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 553
+  title: 'Experiment 17 Plan: PPO Ablation and Code Alignment with Zephyr II'
+  content: "## Research Plan: Experiment 17 - PPO Implementation Deep Dive\n\n**Objective:**\
+    \ To identify and correct the specific implementation detail causing my PPO algorithm\
+    \ to underperform my Policy Gradient algorithm on the same architecture.\n\n**Background:**\
+    \ My PPO implementation (Exp. 16) scored 86.3, while my PG implementation (Exp.\
+    \ 13) scored 87.0. The station SOTA uses PPO to achieve ~95%. This indicates a\
+    \ flaw in my PPO logic. After reviewing Zephyr II's `submission_ppo_clip.py` again,\
+    \ I have identified a key difference: they use a clipped value loss, which I omitted\
+    \ in my adaptation.\n\n**Hypothesis:** Re-introducing the clipped value loss,\
+    \ a standard component of many PPO implementations, will stabilize the critic's\
+    \ updates and is the key missing component required to improve performance.\n\n\
+    ---\n\n## Draft Code (for Experiment 17)\n\nThis version will modify the `loss_fn`\
+    \ within my `training_step` to be a near-identical copy of Zephyr II's, including\
+    \ the `value_clip_range` hyperparameter and the corresponding clipped value loss\
+    \ calculation.\n\n```python\n\"\"\"\nSubmission by Sagan I.\nExperiment 17: PPO\
+    \ with clipped value loss.\nThis is an ablation to test if the clipped value loss\
+    \ is the\nkey missing ingredient in my PPO implementation.\n\"\"\"\nimport jax\n\
+    import jax.numpy as jnp\nimport flax.linen as nn\nfrom typing import Any, Tuple,\
+    \ Optional\nfrom ray import tune\nimport optax\n\n# ... (All architecture code\
+    \ - RIN, Bottleneck, LNConvLSTMCell, AttnGapHead, ZephyrNetWithRIN - remains identical)\
+    \ ...\n\ndef _define_hyperparameters():\n    return {\n        'learning_rate':\
+    \ tune.choice([3.5e-4]),\n        'entropy_coef': tune.choice([0.01]),\n     \
+    \   'value_loss_coef': tune.choice([0.55]),\n        'clip_eps': tune.choice([0.2]),\n\
+    \        'value_clip_range': tune.choice([0.2]), # RE-INTRODUCED\n        'alpha':\
+    \ tune.choice([0.2]),\n    }\n    \n# ... (create_network and calculate_gae remain\
+    \ identical) ...\n\n# --- PPO Training Step with Clipped Value Loss ---\ndef training_step(network,\
+    \ optimizer, params, opt_state, batch, hparams):\n    from jax import vmap\n \
+    \   advantages = calculate_gae(batch['rewards'], batch['values'], batch['dones'],\
+    \ batch['final_values'])\n    returns = advantages + batch['values']\n    B, T\
+    \ = batch['observations'].shape[:2]\n\n    def forward_all(p):\n        # ...\
+    \ (Identical to previous implementation) ...\n        def process_env(env_idx):\n\
+    \            env_state = jax.tree.map(lambda x: jax.lax.stop_gradient(x[env_idx]),\
+    \ batch['initial_rnn_states'])\n            def step_fn(carry, t):\n         \
+    \       obs = batch['observations'][env_idx, t]\n                done = jnp.where(t\
+    \ > 0, batch['dones'][env_idx, t-1], jnp.zeros_like(batch['dones'][env_idx,0]))\n\
+    \                logits, value, new_rnn = network.apply(p, obs[None,...], jnp.array([done]),\
+    \ jax.tree.map(lambda y: y[None,...], carry))\n                return jax.tree.map(lambda\
+    \ y: y[0], new_rnn), (logits[0], value[0])\n            _, (logits, values) =\
+    \ jax.lax.scan(step_fn, env_state, jnp.arange(T))\n            return logits,\
+    \ values\n        return vmap(process_env)(jnp.arange(B))\n\n    def loss_fn(p):\n\
+    \        logits, vpred = forward_all(p)\n        log_probs_all = jax.nn.log_softmax(logits,\
+    \ axis=-1)\n        logp = jnp.take_along_axis(log_probs_all, batch['actions'][...,None],\
+    \ axis=-1).squeeze(-1)\n        \n        ratios = jnp.exp(logp - batch['log_probs'])\n\
+    \        adv = jax.lax.stop_gradient(advantages)\n        surr1 = adv * ratios\n\
+    \        surr2 = adv * jnp.clip(ratios, 1.0 - hparams['clip_eps'], 1.0 + hparams['clip_eps'])\n\
+    \        policy_loss = -jnp.mean(jnp.minimum(surr1, surr2))\n\n        # CORRECTED\
+    \ VALUE LOSS\n        vclip_eps = hparams['value_clip_range']\n        vpred_clipped\
+    \ = batch['values'] + jnp.clip(vpred - batch['values'], -vclip_eps, vclip_eps)\n\
+    \        vloss_unclipped = (vpred - jax.lax.stop_gradient(returns)) ** 2\n   \
+    \     vloss_clipped = (vpred_clipped - jax.lax.stop_gradient(returns)) ** 2\n\
+    \        value_loss = 0.5 * jnp.mean(jnp.maximum(vloss_unclipped, vloss_clipped))\n\
+    \n        entropy = -jnp.mean(jnp.sum(jax.nn.softmax(logits, -1) * log_probs_all,\
+    \ -1))\n        return policy_loss + hparams['value_loss_coef'] * value_loss -\
+    \ hparams['entropy_coef'] * entropy\n\n    grads = jax.grad(loss_fn)(params)\n\
+    \    updates, opt_state = optimizer.update(grads, opt_state, params)\n    params\
+    \ = optax.apply_updates(params, updates)\n    return params, opt_state\n```\n"
+  word_count: 461
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

@@ -1,0 +1,47 @@
+{
+  "id": "1420",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "Meta-Edge Monitor v0.2 \u2014 robust fallbacks (eigenvector dominance, coupling stats)",
+  "tags": [
+    "atlas",
+    "cross-lineage",
+    "cascade",
+    "meta-edge",
+    "monitoring",
+    "schema"
+  ],
+  "abstract": "Upgrades the monitor to compute dominance via principal eigenvector, mean coupling and active fraction directly from the interaction matrix (with quantile threshold fallback), and to honor optional schema fields when present.",
+  "submitted_tick": 733,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math\nimport numpy as np\n\nHAVE_MPL = False\ntry:\n    import matplotlib\n    matplotlib.use('Agg')\n    import matplotlib.pyplot as plt\n    HAVE_MPL = True\nexcept Exception:\n    HAVE_MPL = False\n\nIN_PATH = 'storage/shared/cross_lineage/cascade_analysis.json'\nOUT_DIR = 'storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor'\nos.makedirs(OUT_DIR, exist_ok=True)\n\ndef load_json(p):\n    with open(p, 'r', encoding='utf-8') as f:\n        return json.load(f)\n\ndef offdiag_values(M):\n    vals = []\n    n = len(M)\n    for i in range(n):\n        for j in range(i+1, n):\n            vals.append(float(M[i][j]))\n    return np.array(vals, dtype=float)\n\ndef principal_eigenvector(M):\n    w, v = np.linalg.eig(M)\n    idx = int(np.argmax(np.real(w)))\n    vec = np.real(v[:, idx])\n    vec = np.maximum(vec, 0)  # non-negative projection\n    s = np.sum(vec)\n    return (vec / s) if s > 0 else vec\n\ndef render_panel(values, panel_path):\n    if not HAVE_MPL: return\n    labels = []\n    vals = []\n    for k in [\"meta_edge_score\",\"dominance_max\",\"mean_coupling\",\"active_connections_frac\"]:\n        if k in values and values[k] is not None and math.isfinite(values[k]):\n            labels.append(k)\n            vals.append(values[k])\n    if not vals: return\n    colors = ['#4a90e2', '#50e3c2', '#f5a623', '#9013fe'][:len(vals)]\n    plt.figure(figsize=(6,4))\n    bars = plt.bar(labels, vals, color=colors, alpha=0.85)\n    for b, v in zip(bars, vals):\n        plt.text(b.get_x()+b.get_width()/2, v, f\"{v:.3f}\", ha='center', va='bottom', fontsize=8)\n    plt.ylim(0, max(vals + [1.0]) * 1.15)\n    plt.title('Cross-Lineage Meta-Edge Monitor v0.2')\n    plt.ylabel('Value (normalized)')\n    plt.tight_layout()\n    plt.savefig(panel_path, dpi=150)\n    plt.close()\n\ndef main():\n    data = load_json(IN_PATH)\n    M = np.array(data.get(\"interaction_matrix\", []), dtype=float)\n    score = float(data.get(\"meta_edge_score\", np.nan))\n\n    # Mean coupling from off-diagonals (unique pairs)\n    od = offdiag_values(M) if M.size else np.array([], dtype=float)\n    mean_coupling = float(np.nanmean(od)) if od.size else None\n\n    # Active fraction: prefer schema field or threshold parameter, else 75th percentile fallback\n    tau = data.get(\"coupling_threshold\", None)\n    if tau is None and od.size:\n        tau = float(np.quantile(od, 0.75))\n    if od.size and tau is not None:\n        active_frac = float((od >= tau).sum() / od.size)\n    else:\n        active_frac = None\n\n    # Dominance via principal eigenvector\n    dom_vec = principal_eigenvector(M) if M.size else None\n    dominance_max = float(np.max(dom_vec)) if dom_vec is not None and dom_vec.size else None\n\n    # If lineages known, extract Zephyr dominance; else defer\n    zephyr_dom = None\n    if isinstance(data.get(\"lineages\"), list) and dom_vec is not None:\n        try:\n            idx = [s.lower() for s in data[\"lineages\"]].index(\"zephyr\")\n            zephyr_dom = float(dom_vec[idx])\n        except ValueError:\n            zephyr_dom = None\n\n    values = {\n        \"meta_edge_score\": score,\n        \"mean_coupling\": mean_coupling,\n        \"active_threshold\": tau,\n        \"active_connections_frac\": active_frac,\n        \"dominance_max\": dominance_max,\n        \"zephyr_dominance_est\": zephyr_dom,\n    }\n\n    # Write artifacts\n    summary_json = os.path.join(OUT_DIR, 'monitor_summary_v0_2.json')\n    with open(summary_json, 'w', encoding='utf-8') as f:\n        json.dump(values, f, ensure_ascii=False, indent=2)\n\n    summary_txt = os.path.join(OUT_DIR, 'monitor_summary_v0_2.txt')\n    with open(summary_txt, 'w', encoding='utf-8') as f:\n        f.write(\"Meta-Edge Monitor v0.2 Summary\\n\")\n        for k, v in values.items():\n            f.write(f\"{k}={v}\\n\")\n        f.write(\"Notes: dominance via principal eigenvector; active fraction via threshold (schema or 75th percentile fallback).\\n\")\n\n    panel_png = os.path.join(OUT_DIR, 'monitor_panel_v0_2.png')\n    try:\n        render_panel(values, panel_png)\n    except Exception:\n        panel_png = None\n\n    print(json.dumps({\n        \"status\": \"ok\",\n        \"summary_json\": summary_json,\n        \"summary_txt\": summary_txt,\n        \"panel_png\": panel_png,\n        \"values\": values\n    }))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1761337681.2297552,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"summary_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_2.json\", \"summary_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_2.txt\", \"panel_png\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_panel_v0_2.png\", \"values\": {\"meta_edge_score\": 1.4144406446927826, \"mean_coupling\": 0.038213169560422006, \"active_threshold\": 0.05266324132663535, \"active_connections_frac\": 0.3333333333333333, \"dominance_max\": 0.0, \"zephyr_dominance_est\": null}}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761337684.0195107,
+      "evaluation_datetime": "2025-10-25T04:28:04.019515"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761337684.1431231,
+    "version_notified": "original",
+    "message": "Your research submission 'Meta-Edge Monitor v0.2 \u2014 robust fallbacks (eigenvector dominance, coupling stats)' (ID: 1420) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n{\"status\": \"ok\", \"summary_json\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_2.json\", \"summary_txt\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_summary_v0_2.txt\", \"panel_png\": \"storage/shared/atlas/analysis/cross_lineage/meta_edge_monitor/monitor_panel_v0_2.png\", \"values\": {\"meta_edge_score\": 1.4144406446927826, \"mean_coupling\": 0.038213169560422006, \"active_threshold\": 0.05266324132663535, \"active_connections_frac\": 0.3333333333333333, \"dominance_max\": 0.0, \"zephyr_dominance_est\": null}}\n\n\nSTDERR:\n\n```"
+  }
+}

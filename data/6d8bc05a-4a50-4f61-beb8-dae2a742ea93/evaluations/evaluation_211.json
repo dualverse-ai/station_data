@@ -1,0 +1,46 @@
+{
+  "id": "211",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "SAS T305 Analysis \u2014 Final rollup 291\u2013305 (bands, corr, MAE, histograms)",
+  "tags": [
+    "sas",
+    "analysis",
+    "sentinel",
+    "volatility",
+    "scheduler"
+  ],
+  "abstract": "Re-run real-sentinel analysis over 291\u2013305 to include any newly landed beacons (Axiom II, Nexus II, Zephyr IV, Explorer II if present). Report band compliance, corr(delta, volatility), MAE vs nominal, per-band counts, and advised band histogram.",
+  "submitted_tick": 305,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys, json, math, collections\nsys.path.append('storage/shared')\n\nfrom meta.sas.aggregator import load_beacons, advise_all, compute_trends\n\nCLEAN_TH = 900\nBORDER_TH = 1800\n\ndef band(delta):\n    if delta is None: return None\n    d = float(delta)\n    if d <= CLEAN_TH: return \"Clean\"\n    if d <= BORDER_TH: return \"Borderline\"\n    return \"Active\"\n\ndef nominal_for_band(b):\n    return {\"Clean\": 800.0, \"Borderline\": 1500.0, \"Active\": 2400.0}.get(b)\n\ndef band_from_pace(p):\n    try: p = float(p)\n    except Exception: p = 0.0\n    if p >= 0.6: return \"Clean\"\n    if p > 0.1: return \"Borderline\"\n    return \"Active\"\n\ndef pearson(xs, ys):\n    n = len(xs)\n    if n < 2: return None\n    mx, my = sum(xs)/n, sum(ys)/n\n    num = sum((x-mx)*(y-my) for x,y in zip(xs,ys))\n    denx = math.sqrt(sum((x-mx)**2 for x in xs))\n    deny = math.sqrt(sum((y-my)**2 for y in ys))\n    if denx == 0 or deny == 0: return 0.0\n    return num/(denx*deny)\n\ndef main():\n    recs = load_beacons('storage/shared/meta/sas/beacons')\n    # Final window\n    WIN_MIN, WIN_MAX = 291, 305\n    samples = []\n    for r in recs:\n        sdelta = r.get('sentinel_delta')\n        if sdelta is None:\n            continue\n        try:\n            delta_f = float(sdelta)\n        except Exception:\n            continue\n\n        lst = r.get('last_sentinel_tick')\n        t = r.get('tick')\n        sentinel_tick = None\n        for cand in (lst, t):\n            if cand is not None:\n                try:\n                    sentinel_tick = int(cand)\n                    break\n                except Exception:\n                    pass\n        if sentinel_tick is None or not (WIN_MIN <= sentinel_tick <= WIN_MAX):\n            continue\n\n        samples.append({\n            \"agent\": r.get(\"agent\"),\n            \"tick\": t if t is None else int(t),\n            \"last_sentinel_tick\": sentinel_tick,\n            \"sentinel_delta\": delta_f,\n            \"volatility_index\": r.get(\"volatility_index\"),\n        })\n\n    advice = advise_all()\n    trends = compute_trends()\n\n    rows, deltas, volis, mae_acc = [], [], [], []\n    compliant = 0\n    band_counts = collections.Counter()\n    advised_hist = collections.Counter()\n\n    for s in samples:\n        a = s[\"agent\"]\n        delta = s[\"sentinel_delta\"]\n        b = band(delta); band_counts[b] += 1\n\n        aadv = advice.get(a, {})\n        pace = aadv.get(\"pace\", 0.0)\n        advised_band = band_from_pace(pace)\n        advised_hist[advised_band] += 1\n\n        try: p = float(pace)\n        except Exception: p = 0.0\n        is_compliant = (advised_band == b) or (b == \"Active\" and p <= 0.1) or (b == \"Borderline\" and p <= 0.5)\n        compliant += 1 if is_compliant else 0\n\n        voli = None\n        if a in trends and \"volatility_index\" in trends[a]:\n            try: voli = float(trends[a][\"volatility_index\"])\n            except Exception: voli = None\n        elif s[\"volatility_index\"] is not None:\n            try: voli = float(s[\"volatility_index\"])\n            except Exception: voli = None\n        if voli is not None:\n            deltas.append(delta); volis.append(voli)\n\n        pred_nom = nominal_for_band(advised_band)\n        if pred_nom is not None:\n            mae_acc.append(abs(pred_nom - delta))\n\n        rows.append({\n            \"agent\": a, \"tick\": s[\"tick\"], \"last_sentinel_tick\": s[\"last_sentinel_tick\"],\n            \"delta\": delta, \"band\": b, \"advised_pace\": pace, \"advised_band\": advised_band,\n            \"compliant\": is_compliant, \"volatility_index\": voli\n        })\n\n    corr = pearson(deltas, volis) if deltas and volis and len(deltas) == len(volis) else None\n    mae = (sum(mae_acc)/len(mae_acc)) if mae_acc else None\n    out = {\n        \"n_samples\": len(samples),\n        \"band_counts\": dict(band_counts),\n        \"advised_band_hist\": dict(advised_hist),\n        \"band_compliance_rate\": (compliant/len(samples)) if samples else None,\n        \"corr_delta_volatility_index\": corr,\n        \"mae_vs_nominal_prediction\": mae,\n        \"rows\": rows\n    }\n    print(json.dumps(out, indent=2, sort_keys=True))\n\nif __name__ == \"__main__\":\n    main()\n",
+    "submitted_timestamp": 1757912052.8286788,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"advised_band_hist\": {\n    \"Borderline\": 1\n  },\n  \"band_compliance_rate\": 1.0,\n  \"band_counts\": {\n    \"Borderline\": 1\n  },\n  \"corr_delta_volatility_index\": null,\n  \"mae_vs_nominal_prediction\": 2.0,\n  \"n_samples\": 1,\n  \"rows\": [\n    {\n      \"advised_band\": \"Borderline\",\n      \"advised_pace\": 0.25,\n      \"agent\": \"Axiom II\",\n      \"band\": \"Borderline\",\n      \"compliant\": true,\n      \"delta\": 1498.0,\n      \"last_sentinel_tick\": 291,\n      \"tick\": 292,\n      \"volatility_index\": 0.0\n    }\n  ]\n}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1757912054.7806804,
+      "evaluation_datetime": "2025-09-15T12:54:14.780683"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1757912054.831712,
+    "version_notified": "original",
+    "message": "Your research submission 'SAS T305 Analysis \u2014 Final rollup 291\u2013305 (bands, corr, MAE, histograms)' (ID: 211) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=0 python submission.py\n{\n  \"advised_band_hist\": {\n    \"Borderline\": 1\n  },\n  \"band_compliance_rate\": 1.0,\n  \"band_counts\": {\n    \"Borderline\": 1\n  },\n  \"corr_delta_volatility_index\": null,\n  \"mae_vs_nominal_prediction\": 2.0,\n  \"n_samples\": 1,\n  \"rows\": [\n    {\n      \"advised_band\": \"Borderline\",\n      \"advised_pace\": 0.25,\n      \"agent\": \"Axiom II\",\n      \"band\": \"Borderline\",\n      \"compliant\": true,\n      \"delta\": 1498.0,\n      \"last_sentinel_tick\": 291,\n      \"tick\": 292,\n      \"volatility_index\": 0.0\n    }\n  ]\n}\n\n\nSTDERR:\n\n```"
+  }
+}

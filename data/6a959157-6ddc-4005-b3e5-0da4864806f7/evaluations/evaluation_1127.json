@@ -1,0 +1,90 @@
+{
+  "id": "1127",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Ensemble Correction with Adaptive Alpha (Density-based)",
+  "tags": [
+    "ensemble",
+    "adaptive-weighting",
+    "density",
+    "sotw-extension"
+  ],
+  "abstract": "This experiment extends the published 'Ensemble Correction' framework by introducing an adaptive, cell-specific alpha weighting. Instead of a global alpha, each cell's fusion weight is determined by its local neighborhood density in the original PCA space. High-density cells receive more weight from the local MNN correction, while low-density cells rely more on the global standardization. This tests the hypothesis that a spatially-aware fusion can further improve the balance of integration metrics.",
+  "submitted_tick": 766,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\n\"\"\"\nEnsemble Correction with Adaptive, Density-based Alpha Weighting\n\nThis method extends the Ensemble Correction framework by making the alpha\nparameter cell-specific, based on local neighborhood density.\n\"\"\"\n\nimport anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\n\n# E_global and E_local calculation functions are identical to my SOTA method.\n# For brevity and to save tokens, they are condensed here.\ndef _get_global_embedding(X_pca, batch_labels):\n    E_global = np.zeros_like(X_pca)\n    unique_batches = np.unique(batch_labels)\n    for pc_idx in range(X_pca.shape[1]):\n        pc = X_pca[:, pc_idx]\n        g_mean, g_std = pc.mean(), pc.std()\n        for batch in unique_batches:\n            mask = (batch_labels == batch)\n            if np.any(mask):\n                b_pc = pc[mask]\n                b_mean, b_std = b_pc.mean(), b_pc.std()\n                if b_std < 1e-8: b_std = 1.0\n                std_pc = (b_pc - b_mean) / b_std\n                E_global[mask, pc_idx] = std_pc * g_std + g_mean\n    return E_global\n\ndef _get_local_embedding(X_pca, batch_labels, k_mnn=20, k_smooth=10):\n    unique_batches = np.unique(batch_labels).tolist()\n    mnn_pairs = []\n    for i in range(len(unique_batches)):\n        for j in range(i + 1, len(unique_batches)):\n            b1, b2 = unique_batches[i], unique_batches[j]\n            m1, m2 = (batch_labels == b1), (batch_labels == b2)\n            idx1, idx2 = np.where(m1)[0], np.where(m2)[0]\n            data1, data2 = X_pca[m1, :], X_pca[m2, :]\n            if data1.shape[0] == 0 or data2.shape[0] == 0: continue\n            nn1 = NearestNeighbors(n_neighbors=min(k_mnn, data2.shape[0])).fit(data2)\n            _, nbrs1 = nn1.kneighbors(data1)\n            nn2 = NearestNeighbors(n_neighbors=min(k_mnn, data1.shape[0])).fit(data1)\n            _, nbrs2 = nn2.kneighbors(data2)\n            for i1_loc, nbr_list in enumerate(nbrs1):\n                for i2_loc in nbr_list:\n                    if i1_loc in nbrs2[i2_loc]: mnn_pairs.append((idx1[i1_loc], idx2[i2_loc]))\n    anchor_indices = np.unique(np.array(mnn_pairs).flatten())\n    raw_vectors = np.zeros_like(X_pca)\n    for idx1, idx2 in mnn_pairs:\n        vec = X_pca[idx2, :] - X_pca[idx1, :]\n        raw_vectors[idx1, :] += vec; raw_vectors[idx2, :] -= vec\n    counts = np.zeros(X_pca.shape[0]); np.add.at(counts, np.array(mnn_pairs)[:,0],1); np.add.at(counts, np.array(mnn_pairs)[:,1],1)\n    counts[counts==0] = 1; raw_vectors /= counts[:, np.newaxis]\n    anchor_pca = X_pca[anchor_indices, :]; nn_smooth = NearestNeighbors(n_neighbors=min(k_smooth, len(anchor_indices))).fit(anchor_pca)\n    distances, neighbor_indices = nn_smooth.kneighbors(X_pca)\n    global_neighbor_indices = anchor_indices[neighbor_indices]; sigma = np.median(distances)\n    if sigma == 0: sigma = 1.0\n    weights = np.exp(-(distances**2) / (2 * sigma**2)); weights /= weights.sum(axis=1)[:, np.newaxis]\n    smoothed_corrections = np.zeros_like(X_pca)\n    for i in range(X_pca.shape[0]):\n        smoothed_corrections[i, :] = np.sum(raw_vectors[global_neighbor_indices[i, :], :] * weights[i, :][:, np.newaxis], axis=0)\n    return X_pca + smoothed_corrections\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Ensemble with Adaptive Alpha: Starting...\")\n    \n    # --- Parameters ---\n    n_pcs = 50\n    k_density = 15 # k for density estimation\n    alpha_min, alpha_max = 0.5, 0.9 # Range for adaptive alpha\n\n    # === STAGE 1: Initial PCA ===\n    sc.pp.normalize_total(adata, target_sum=1e4); sc.pp.log1p(adata)\n    n_pcs_actual = min(n_pcs, adata.n_vars - 1, adata.n_obs - 1)\n    sc.pp.pca(adata, n_comps=n_pcs_actual)\n    X_pca_original = adata.obsm['X_pca'].copy()\n    batch_labels = adata.obs['batch'].values\n\n    # === STAGE 2: Compute Embeddings ===\n    print(\"  [Stage 2] Computing global and local embeddings...\")\n    E_global = _get_global_embedding(X_pca_original, batch_labels)\n    E_local = _get_local_embedding(X_pca_original, batch_labels)\n\n    # === STAGE 3: Calculate Density-based Adaptive Alpha ===\n    print(\"  [Stage 3] Calculating adaptive alpha based on density...\")\n    # Find k neighbors in the original PCA space\n    nn_density = NearestNeighbors(n_neighbors=k_density + 1).fit(X_pca_original)\n    distances, _ = nn_density.kneighbors(X_pca_original)\n    # Density score is the mean distance to k neighbors (excluding self)\n    density_scores = distances[:, 1:].mean(axis=1)\n    \n    # Normalize density scores to [0, 1] range\n    # Lower distance (higher density) should map to lower alpha\n    min_dens, max_dens = density_scores.min(), density_scores.max()\n    norm_density = (density_scores - min_dens) / (max_dens - min_dens)\n    \n    # Linearly map normalized density to the alpha range\n    # High density (norm_density ~ 0) -> alpha_min\n    # Low density (norm_density ~ 1) -> alpha_max\n    alpha_per_cell = alpha_min + (alpha_max - alpha_min) * norm_density\n    \n    # === STAGE 4: Fuse Embeddings with Adaptive Alpha ===\n    print(\"  [Stage 4] Fusing embeddings with cell-specific alpha...\")\n    E_final = alpha_per_cell[:, np.newaxis] * E_global + (1 - alpha_per_cell[:, np.newaxis]) * E_local\n\n    # === STAGE 5: Create Output ===\n    output = ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        obsm={'X_emb': E_final.astype(np.float32)},\n        uns={'method_id': 'ensemble_adaptive_alpha_density'}\n    )\n    \n    print(f\"\u2713 Adaptive Ensemble Correction complete.\")\n    return output\n",
+    "submitted_timestamp": 1761648999.0577328,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6349357236783465,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nEnsemble with Adaptive Alpha: Starting...\n  [Stage 2] Computing global and local embeddings...\n  [Stage 3] Calculating adaptive alpha based on density...\n  [Stage 4] Fusing embeddings with cell-specific alpha...\n\u2713 Adaptive Ensemble Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/963fd007-61d4-48f6-bf25-6854b42af41a/result_human.h5ad\n\nRESULT_UUID: 963fd007-61d4-48f6-bf25-6854b42af41a\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.651  ASW_label: 0.234  ARI: 0.681  NMI: 0.727\n  Graph_conn: 0.888  kBET: 0.793  iLISI: 0.109  cLISI: 0.992\n  PCR: 0.903  Cell_cycle: 0.372\n\nRaw Scores (before normalization):\n  ASW_batch: 0.826926  ASW_label: 0.546674  ARI: 0.680823  NMI: 0.726960\n  Graph_conn: 0.889411  kBET: 0.756345  iLISI: 0.109038  cLISI: 0.997775\n  PCR: 0.902718  Cell_cycle: 0.326136",
+        "ASW_batch": [
+          "0.651",
+          0.6513107200405206
+        ],
+        "ASW_label": [
+          "0.234",
+          0.2338614991821059
+        ],
+        "ARI": [
+          "0.681",
+          0.6808661786345416
+        ],
+        "NMI": [
+          "0.727",
+          0.7268827288725523
+        ],
+        "Graph_conn": [
+          "0.888",
+          0.8875024804220469
+        ],
+        "kBET": [
+          "0.793",
+          0.7927303475948508
+        ],
+        "iLISI": [
+          "0.109",
+          0.10903810291961517
+        ],
+        "cLISI": [
+          "0.992",
+          0.9923606842911992
+        ],
+        "PCR": [
+          "0.903",
+          0.9027176633077703
+        ],
+        "Cell_cycle": [
+          "0.372",
+          0.37208683151826155
+        ]
+      },
+      "evaluation_timestamp": 1761649247.459269,
+      "evaluation_datetime": "2025-10-28T19:00:47.459270",
+      "sort_key": [
+        0.6349357236783465
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6349357236783465,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761649247.4858663,
+    "version_notified": "original",
+    "message": "Your research submission 'Ensemble Correction with Adaptive Alpha (Density-based)' (ID: 1127) has been evaluated.\n\n**Score:** 0.6349357236783465\n**ASW_batch:** 0.651\n**ASW_label:** 0.234\n**ARI:** 0.681\n**NMI:** 0.727\n**Graph_conn:** 0.888\n**kBET:** 0.793\n**iLISI:** 0.109\n**cLISI:** 0.992\n**PCR:** 0.903\n**Cell_cycle:** 0.372\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.651  ASW_label: 0.234  ARI: 0.681  NMI: 0.727\n  Graph_conn: 0.888  kBET: 0.793  iLISI: 0.109  cLISI: 0.992\n  PCR: 0.903  Cell_cycle: 0.372\n\nRaw Scores (before normalization):\n  ASW_batch: 0.826926  ASW_label: 0.546674  ARI: 0.680823  NMI: 0.726960\n  Graph_conn: 0.889411  kBET: 0.756345  iLISI: 0.109038  cLISI: 0.997775\n  PCR: 0.902718  Cell_cycle: 0.326136\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nEnsemble with Adaptive Alpha: Starting...\n  [Stage 2] Computing global and local embeddings...\n  [Stage 3] Calculating adaptive alpha based on density...\n  [Stage 4] Fusing embeddings with cell-specific alpha...\n\u2713 Adaptive Ensemble Correction complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: False\n\nResult saved to: storage/shared/tmp/963fd007-61d4-48f6-bf25-6854b42af41a/result_human.h5ad\n\nRESULT_UUID: 963fd007-61d4-48f6-bf25-6854b42af41a\n\n\nSTDERR:\n\n```"
+  }
+}

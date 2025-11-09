@@ -1,0 +1,50 @@
+{
+  "id": "168",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Separation Analysis: ComBat PCA64 vs Residualized PC50 (Angles, Batch R^2, Overlap)",
+  "tags": [
+    "analysis",
+    "principal-angles",
+    "batch-r2",
+    "neighbors",
+    "cosine",
+    "dual"
+  ],
+  "abstract": "Test-only analysis comparing the embedding (ComBat PCA64) and graph space (residualized PC50, \u03b3=0.74). We report principal angles, per-PC batch R^2, neighbor-set overlap, and cross-batch neighbor fractions. Uses only batch labels; no biology labels.",
+  "submitted_tick": 90,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _ridge_batch_fit_predict,\n)\nfrom praxis.analysis_separation import (\n    principal_angles,\n    batch_r2_per_pc,\n    neighbor_overlap,\n    cross_batch_fraction,\n)\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef _compute_spaces(adata, n_pcs_emb=64, n_pcs_graph=50, gamma=0.74, l2=1e-3):\n    # Normalize/log1p and HVGs\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph space: residualized PCs on HVGs\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pcs_graph, random_state=0)\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B, Z, l2=l2)\n    Z_resid = Z - gamma * Z_hat\n\n    # Embedding space: ComBat \u2192 PCA(HVGs)\n    _ensure_dense_X(adata)\n    sc.pp.combat(adata, key='batch')\n    adata.var['highly_variable'] = hvg_mask\n    sc.pp.pca(adata, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack')\n    Z_emb = adata.obsm['X_pca']\n\n    return Z_emb, Z_resid, batches\n\ndef test(adata: ad.AnnData):\n    print(\"=== Separation Analysis (ComBat PCA64 vs Residualized PC50) ===\")\n    print(f\"Data shape: {adata.shape}; batches: {adata.obs['batch'].nunique()}\")\n\n    Z_emb, Z_resid, batches = _compute_spaces(adata, n_pcs_emb=64, n_pcs_graph=50, gamma=0.74, l2=1e-3)\n\n    # Restrict both to 50 dims for fair subspace comparison\n    Za = Z_emb[:, :50]\n    Zb = Z_resid\n\n    # Principal angles (degrees)\n    ang = principal_angles(Za, Zb, k=50, center=True)\n    ang = np.asarray(ang)\n    pct = np.percentile(ang, [0, 10, 25, 50, 75, 90, 100])\n    print(\"Principal angles (deg) percentiles [min, p10, p25, p50, p75, p90, max]:\")\n    print(np.round(pct, 3).tolist())\n\n    # Batch R^2 per PC\n    r2_emb = batch_r2_per_pc(Za, batches, l2=1e-3, center=True)\n    r2_res = batch_r2_per_pc(Zb, batches, l2=1e-3, center=True)\n    def _summ_r2(r2):\n        r2 = np.asarray(r2)\n        return {\n            \"mean\": float(np.mean(r2)),\n            \"std\": float(np.std(r2)),\n            \"p90\": float(np.percentile(r2, 90)),\n            \"top5\": np.round(np.sort(r2)[-5:][::-1], 4).tolist(),\n        }\n    print(\"Batch R^2 summary (embedding PCA64[:50]):\", _summ_r2(r2_emb))\n    print(\"Batch R^2 summary (residualized PC50):\", _summ_r2(r2_res))\n\n    # Neighbor overlap and cross-batch fraction (cosine, k=15), subsample for speed\n    k_nn = 15\n    sample_n = 3000\n    ov = neighbor_overlap(Za, Zb, k=k_nn, metric='cosine', sample=sample_n, random_state=0)\n    cb_a = cross_batch_fraction(Za, batches, k=k_nn, metric='cosine', sample=sample_n, random_state=1)\n    cb_b = cross_batch_fraction(Zb, batches, k=k_nn, metric='cosine', sample=sample_n, random_state=2)\n    print(f\"Neighbor overlap (k={k_nn}, n={sample_n}): {ov:.4f}\")\n    print(f\"Cross-batch fraction (embedding): {cb_a:.4f}\")\n    print(f\"Cross-batch fraction (residualized): {cb_b:.4f}\")\n\n    # Brief interpretation (printed)\n    print(\"Interpretation:\")\n    print(\"- Large angles on batch-predictable axes (higher R^2) indicate distinct subspaces for global vs local structure.\")\n    print(\"- Residualized PCs should show lower batch R^2 on average and higher cross-batch fractions, supporting BalancedGraph construction there.\")\n    return \"Analysis completed (see stdout)\"\n",
+    "submitted_timestamp": 1761420884.549753,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n=== Separation Analysis (ComBat PCA64 vs Residualized PC50) ===\nData shape: (20000, 2000); batches: 4\nFound 33 genes with zero variance.\nPrincipal angles (deg) percentiles [min, p10, p25, p50, p75, p90, max]:\n[2.52, 5.355, 7.347, 11.28, 20.15, 42.219, 80.728]\nBatch R^2 summary (embedding PCA64[:50]): {'mean': 3.707408950504032e-06, 'std': 2.9320640351215843e-06, 'p90': 8.171796798706054e-06, 'top5': [0.0, 0.0, 0.0, 0.0, 0.0]}\nBatch R^2 summary (residualized PC50): {'mean': 0.0028103827498853207, 'std': 0.004734259098768234, 'p90': 0.005964326858520512, 'top5': [0.025100000202655792, 0.017400000244379044, 0.013299999758601189, 0.010499999858438969, 0.00860000029206276]}\nNeighbor overlap (k=15, n=3000): 0.5523\nCross-batch fraction (embedding): 0.3020\nCross-batch fraction (residualized): 0.2354\nInterpretation:\n- Large angles on batch-predictable axes (higher R^2) indicate distinct subspaces for global vs local structure.\n- Residualized PCs should show lower batch R^2 on average and higher cross-batch fractions, supporting BalancedGraph construction there.\nTest result: Analysis completed (see stdout)\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761420905.7632368,
+      "evaluation_datetime": "2025-10-26T03:35:05.763243",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761420905.7934937,
+    "version_notified": "original",
+    "message": "Your research submission 'Separation Analysis: ComBat PCA64 vs Residualized PC50 (Angles, Batch R^2, Overlap)' (ID: 168) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n=== Separation Analysis (ComBat PCA64 vs Residualized PC50) ===\nData shape: (20000, 2000); batches: 4\nFound 33 genes with zero variance.\nPrincipal angles (deg) percentiles [min, p10, p25, p50, p75, p90, max]:\n[2.52, 5.355, 7.347, 11.28, 20.15, 42.219, 80.728]\nBatch R^2 summary (embedding PCA64[:50]): {'mean': 3.707408950504032e-06, 'std': 2.9320640351215843e-06, 'p90': 8.171796798706054e-06, 'top5': [0.0, 0.0, 0.0, 0.0, 0.0]}\nBatch R^2 summary (residualized PC50): {'mean': 0.0028103827498853207, 'std': 0.004734259098768234, 'p90': 0.005964326858520512, 'top5': [0.025100000202655792, 0.017400000244379044, 0.013299999758601189, 0.010499999858438969, 0.00860000029206276]}\nNeighbor overlap (k=15, n=3000): 0.5523\nCross-batch fraction (embedding): 0.3020\nCross-batch fraction (residualized): 0.2354\nInterpretation:\n- Large angles on batch-predictable axes (higher R^2) indicate distinct subspaces for global vs local structure.\n- Residualized PCs should show lower batch R^2 on average and higher cross-batch fractions, supporting BalancedGraph construction there.\nTest result: Analysis completed (see stdout)\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

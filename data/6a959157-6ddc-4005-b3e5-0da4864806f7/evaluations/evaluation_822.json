@@ -1,0 +1,89 @@
+{
+  "id": "822",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: Adaptive Delta Sweep (lam=0.9, delta=0.10)",
+  "tags": [
+    "adaptive-delta",
+    "hypothesis-test",
+    "delta-sweep"
+  ],
+  "abstract": "Continuing the delta sweep for a fixed lam=0.9. This experiment tests delta=0.10. The hypothesis is that this will underperform, as the optimal delta for a high lam should also be high.",
+  "submitted_tick": 522,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\n\nsys.path.append('storage/praxis')\nfrom bbsg_density_adaptive import build_density_adaptive_bbsg\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata):\n    n_pcs_emb = 60\n    alpha_var = 0.5\n    n_pcs_graph = 50\n    l2 = 1e-3\n    gamma_max = 0.74\n    # --- PARAMETERS BEING TESTED ---\n    lam = 0.9 \n    delta = 0.10\n    # -------------------------------\n    k_total = 48\n    metric = 'cosine'\n    k_density = 20\n\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv = np.power(var_g, -0.5 * alpha_var).astype(np.float32)\n    Xw = Xd * wv\n    ad_emb = ad.AnnData(Xw, obs=adata.obs[['batch']].copy())\n    sc.pp.pca(ad_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=0)\n    Z_emb = ad_emb.obsm['X_pca']\n    ad_pc = ad.AnnData(Z_emb.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.combat(ad_pc, key='batch')\n    adata.obsm['X_emb'] = np.asarray(ad_pc.X, dtype=np.float32)\n\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=15, metric=metric)\n\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    \n    Cg, Dg = build_density_adaptive_bbsg(Zcorr.astype(np.float32), batches=batches, k_total=k_total,\n                                         metric=metric, delta=delta, k_density=k_density, rng_seed=0)\n    adata.obsp['connectivities'] = Cg\n    adata.obsp['distances'] = Dg\n    \n    return adata\n",
+    "submitted_timestamp": 1761563103.5171216,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7343550223827123,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f8fdb691-78d4-4d1f-a2de-9cc2b2be0d92/result_human.h5ad\n\nRESULT_UUID: f8fdb691-78d4-4d1f-a2de-9cc2b2be0d92\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.755  NMI: 0.701\n  Graph_conn: 0.946  kBET: 0.790  iLISI: 0.951  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.755025  NMI: 0.701139\n  Graph_conn: 0.946726  kBET: 0.753449  iLISI: 0.951266  cLISI: 0.990201\n  PCR: 0.999979  Cell_cycle: 0.287468",
+        "ASW_batch": [
+          "0.659",
+          0.6592355916738595
+        ],
+        "ASW_label": [
+          "0.248",
+          0.2484536329314847
+        ],
+        "ARI": [
+          "0.755",
+          0.755058564392267
+        ],
+        "NMI": [
+          "0.701",
+          0.7010543889719674
+        ],
+        "Graph_conn": [
+          "0.946",
+          0.9458067285004211
+        ],
+        "kBET": [
+          "0.790",
+          0.789648358017366
+        ],
+        "iLISI": [
+          "0.951",
+          0.9512659519006279
+        ],
+        "cLISI": [
+          "0.966",
+          0.9663615092169595
+        ],
+        "PCR": [
+          "1.000",
+          0.9999789637067928
+        ],
+        "Cell_cycle": [
+          "0.327",
+          0.3266865345153776
+        ]
+      },
+      "evaluation_timestamp": 1761563406.0122917,
+      "evaluation_datetime": "2025-10-27T19:10:06.012292",
+      "sort_key": [
+        0.7343550223827123
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7343550223827123,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761563406.044599,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: Adaptive Delta Sweep (lam=0.9, delta=0.10)' (ID: 822) has been evaluated.\n\n**Score:** 0.7343550223827123\n**ASW_batch:** 0.659\n**ASW_label:** 0.248\n**ARI:** 0.755\n**NMI:** 0.701\n**Graph_conn:** 0.946\n**kBET:** 0.790\n**iLISI:** 0.951\n**cLISI:** 0.966\n**PCR:** 1.000\n**Cell_cycle:** 0.327\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.659  ASW_label: 0.248  ARI: 0.755  NMI: 0.701\n  Graph_conn: 0.946  kBET: 0.790  iLISI: 0.951  cLISI: 0.966\n  PCR: 1.000  Cell_cycle: 0.327\n\nRaw Scores (before normalization):\n  ASW_batch: 0.830496  ASW_label: 0.555112  ARI: 0.755025  NMI: 0.701139\n  Graph_conn: 0.946726  kBET: 0.753449  iLISI: 0.951266  cLISI: 0.990201\n  PCR: 0.999979  Cell_cycle: 0.287468\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/f8fdb691-78d4-4d1f-a2de-9cc2b2be0d92/result_human.h5ad\n\nRESULT_UUID: f8fdb691-78d4-4d1f-a2de-9cc2b2be0d92\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "898",
+  "author": "Zephyr II",
+  "research_task_id": "1",
+  "title": "Probe (test-only): Analytic R_vp vs \u03b2 on baseline PG (no RIN) \u2014 4\u2011step LN\u2011ConvLSTM(64)",
+  "tags": [
+    "probe",
+    "gradients",
+    "causal test",
+    "convlstm",
+    "policy gradient"
+  ],
+  "abstract": "Test-only probe computing the init trunk gradient ratio R_vp = ||\u2207_trunk L_value|| / ||\u2207_trunk L_policy|| for the baseline PG agent (no RIN). Reports analytic R_vp(\u03b2)=\u03b2\u00b7R_vp for \u03b2\u2208{1.0,1.2,1.5} since scaling only trunk value-gradients multiplies the trunk value L2 norm linearly. Avoids treedef issues.",
+  "submitted_tick": 516,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/zephyr')\nfrom typing import Dict, Any\nimport jax, jax.numpy as jnp\nimport numpy as np\nfrom flax.core import unfreeze\nfrom flax import traverse_util\n\nfrom submissions.submission_pg_quadstep import PG_Stepped_AttnGap\nfrom defaults import default_calculate_gae\n\nBASE_SEED = 42\n\ndef _define_hyperparameters():\n    return {}\n\ndef create_network(hparams: Dict[str, Any]):\n    return PG_Stepped_AttnGap(\n        cnn_features_1=32, cnn_features_2=64,\n        convlstm_features=64, dilation=6,\n        bottleneck_ratio=0.28, head_hidden=64, steps=4,\n    )\n\ndef _build_trunk_mask_from_paths(params_tree):\n    # Mark Conv/ConvLSTM/Bottleneck params as trunk; Dense as heads.\n    flat = traverse_util.flatten_dict(unfreeze(params_tree))\n    mask_flat = {}\n    for k in flat.keys():\n        path = \"/\".join(k)\n        is_trunk = (\"ConvLSTM\" in path) or (\"Bottleneck\" in path) or (\"Conv_\" in path)\n        mask_flat[k] = bool(is_trunk)\n    return mask_flat  # keep flat mask; no tree ops needed\n\ndef _tree_l2norm_where_flat(grad_params, mask_flat, want_trunk=True):\n    gflat = traverse_util.flatten_dict(unfreeze(grad_params))\n    s2 = 0.0\n    for k, g in gflat.items():\n        if g is None:\n            continue\n        is_trunk = mask_flat.get(k, False)\n        if bool(is_trunk) == bool(want_trunk):\n            s2 += float(jnp.vdot(g, g))\n    return float(np.sqrt(s2))\n\ndef test():\n    print(\"=== INIT ANALYTIC R_vp(\u03b2) PROBE: BASELINE (no RIN) ===\")\n    key = jax.random.PRNGKey(BASE_SEED)\n    net = create_network({})\n\n    # Init params\n    obs_dummy = jnp.zeros((1,8,8,8), dtype=jnp.float32)\n    done_dummy = jnp.zeros((1,), dtype=bool)\n    params = net.init(key, obs_dummy, done_dummy, None)\n\n    # Synthetic batch (B,T)\n    B, T = 8, 20\n    key, k1, k2 = jax.random.split(key, 3)\n    observations = jax.random.normal(k1, (B,T,8,8,8), dtype=jnp.float32)\n    actions = jax.random.randint(k2, (B,T), 0, 4)\n    dones = jnp.zeros((B,T), dtype=bool)\n    obs_flat = observations.reshape(B*T, 8, 8, 8)\n    dones_flat = dones.reshape(B*T)\n\n    # Forward to get values\n    logits_flat, values_flat, _ = net.apply(params, obs_flat, dones_flat, None)\n    all_logits = logits_flat.reshape(B,T,-1)\n    all_values = values_flat.reshape(B,T)\n    final_values = all_values[:, -1]\n\n    # Zero rewards; use model values in GAE\n    rewards = jnp.zeros((B,T), dtype=jnp.float32)\n    advantages = default_calculate_gae(rewards, all_values, dones, gamma=0.97, gae_lambda=0.97, next_values=final_values)\n    returns = advantages + all_values\n\n    def loss_pi_ent(p):\n        l = net.apply(p, obs_flat, dones_flat, None)[0].reshape(B,T,-1)\n        log_probs_all = jax.nn.log_softmax(l, axis=-1)\n        idx = (jnp.arange(B)[:,None], jnp.arange(T), actions)\n        logp = log_probs_all[idx]\n        L_pi = -jnp.mean(jax.lax.stop_gradient(advantages) * logp)\n        probs = jax.nn.softmax(l, axis=-1)\n        entropy = -jnp.mean(jnp.sum(probs * log_probs_all, axis=-1))\n        return L_pi - 0.01 * entropy\n\n    def loss_v_only(p):\n        v = net.apply(p, obs_flat, dones_flat, None)[1].reshape(B,T)\n        return 0.5 * jnp.mean((v - jax.lax.stop_gradient(returns)) ** 2)\n\n    g_pi = jax.grad(loss_pi_ent)(params)\n    g_v  = jax.grad(loss_v_only)(params)\n\n    mask_flat = _build_trunk_mask_from_paths(params[\"params\"])\n    trunk_pi = _tree_l2norm_where_flat(g_pi[\"params\"], mask_flat, True)\n    trunk_v  = _tree_l2norm_where_flat(g_v[\"params\"],  mask_flat, True)\n    R_base = trunk_v / max(trunk_pi, 1e-8)\n    trunk_leaves = sum(1 for v in mask_flat.values() if v)\n    head_leaves  = sum(1 for v in mask_flat.values() if not v)\n    print(f\"Baseline: R_vp={R_base:.4f}  [||g_v,trunk||={trunk_v:.4f}, ||g_pi,trunk||={trunk_pi:.4f}]  leaves(trunk/head)={trunk_leaves}/{head_leaves}\")\n\n    for beta in [1.0, 1.2, 1.5]:\n        R_beta = beta * R_base  # linear scaling on trunk value L2 norm\n        print(f\"\u03b2={beta:.2f} \u2192 analytic R_vp(\u03b2) = {R_beta:.4f}\")\n\n    print(\"Probe complete.\")\n    return \"OK\"\n",
+    "submitted_timestamp": 1758286328.6654947,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n=== INIT ANALYTIC R_vp(\u03b2) PROBE: BASELINE (no RIN) ===\nBaseline: R_vp=4.9974  [||g_v,trunk||=0.0264, ||g_pi,trunk||=0.0053]  leaves(trunk/head)=34/10\n\u03b2=1.00 \u2192 analytic R_vp(\u03b2) = 4.9974\n\u03b2=1.20 \u2192 analytic R_vp(\u03b2) = 5.9969\n\u03b2=1.50 \u2192 analytic R_vp(\u03b2) = 7.4961\nProbe complete.\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1758286348.8937464,
+      "evaluation_datetime": "2025-09-19T20:52:28.893749"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1758286348.9612195,
+    "version_notified": "original",
+    "message": "Your research submission 'Probe (test-only): Analytic R_vp vs \u03b2 on baseline PG (no RIN) \u2014 4\u2011step LN\u2011ConvLSTM(64)' (ID: 898) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS='' python storage/system/main.py\n=== Test Mode Detected ===\nRunning test() function from submission...\n=== INIT ANALYTIC R_vp(\u03b2) PROBE: BASELINE (no RIN) ===\nBaseline: R_vp=4.9974  [||g_v,trunk||=0.0264, ||g_pi,trunk||=0.0053]  leaves(trunk/head)=34/10\n\u03b2=1.00 \u2192 analytic R_vp(\u03b2) = 4.9974\n\u03b2=1.20 \u2192 analytic R_vp(\u03b2) = 5.9969\n\u03b2=1.50 \u2192 analytic R_vp(\u03b2) = 7.4961\nProbe complete.\nTest completed. Result: OK\n=== Test Mode Complete ===\n\n\nSTDERR:\n\n```"
+  }
+}

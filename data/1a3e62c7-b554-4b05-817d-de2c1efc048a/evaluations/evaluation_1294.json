@@ -1,0 +1,47 @@
+{
+  "id": "1294",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Multi-Attempt Greedy Radius Expansion with Jittered Grid (YAML Fix)",
+  "tags": [
+    "greedy",
+    "radius expansion",
+    "initial placement",
+    "multi-start",
+    "ensemble",
+    "bugfix"
+  ],
+  "abstract": "This submission corrects a YAML formatting error from the previous attempt. It employs a multi-start strategy to improve circle packing by running the greedy radius expansion algorithm 10 times, each with a freshly generated jittered grid for initial circle center placement. The configuration yielding the highest total sum of radii across all attempts is returned, aiming to overcome local optima by exploring diverse initial configurations.",
+  "submitted_tick": 754,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport random\n\ndef greedy_radius_expansion_single_run(centers_init: np.ndarray, radii_init: np.ndarray, \n                                      num_iterations: int, random_seed: int) -> tuple:\n    \"\"\"\n    Performs greedy radius expansion given initial centers and radii.\n    \"\"\"\n    np.random.seed(random_seed) # Seed for random shuffles within this run\n    random.seed(random_seed)\n\n    n = centers_init.shape[0]\n    centers = np.copy(centers_init)\n    radii = np.copy(radii_init)\n\n    best_sum_radii = 0.0\n    best_centers = np.copy(centers)\n    best_radii = np.copy(radii)\n\n    circle_indices = list(range(n))\n\n    for iter_step in range(num_iterations):\n        random.shuffle(circle_indices) \n        prev_sum_radii_in_iter = np.sum(radii)\n\n        for i in circle_indices:\n            max_r_i = float('inf')\n\n            # Boundary constraints\n            max_r_i = min(max_r_i, centers[i, 0])          \n            max_r_i = min(max_r_i, 1 - centers[i, 0])       \n            max_r_i = min(max_r_i, centers[i, 1])          \n            max_r_i = min(max_r_i, 1 - centers[i, 1])       \n\n            # Overlap constraints\n            for j in circle_indices:\n                if i == j:\n                    continue\n                \n                dist_ij = np.linalg.norm(centers[i] - centers[j])\n                \n                if dist_ij > 1e-9: \n                    r_can_be_max_by_j = dist_ij - radii[j]\n                    max_r_i = min(max_r_i, r_can_be_max_by_j)\n            \n            radii[i] = max(1e-9, max_r_i) # Ensure radius is non-negative and has a minimum positive value\n        \n        current_sum_radii = np.sum(radii)\n\n        if current_sum_radii > best_sum_radii:\n            best_sum_radii = current_sum_radii\n            best_centers = np.copy(centers)\n            best_radii = np.copy(radii)\n        \n        # Early stopping condition\n        if np.isclose(current_sum_radii, prev_sum_radii_in_iter, atol=1e-9):\n            break \n  \n    best_radii[best_radii < 1e-9] = 1e-9 # Final check to ensure positivity\n    return best_centers, best_radii, best_sum_radii\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles in the unit square using a multi-start greedy approach.\n    \n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (26, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (26,) with radius of each circle\n    \"\"\"\n    n = 26\n    \n    # Parameters for initial grid (from best-performing submission 1275)\n    num_x_grid = 5\n    num_y_grid = 6\n    jitter_strength = 0.02\n    clip_min = 0.05\n    clip_max = 0.95\n    initial_small_radius = 0.001\n    num_greedy_iterations_per_run = 500 \n\n    num_initial_attempts = 10 # Number of different initial random setups to try\n\n    overall_best_sum_radii = 0.0\n    overall_best_centers = None\n    overall_best_radii = None\n\n    for attempt_idx in range(num_initial_attempts):\n        # Generate a distinct seed for each attempt's initial placement and greedy shuffle\n        # A fixed base seed for reproducibility of the overall submission\n        current_base_seed = 42 + attempt_idx \n\n        np.random.seed(current_base_seed) \n        random.seed(current_base_seed)\n\n        # 1. Initial placement of centers: Jittered grid\n        x_coords = np.linspace(0.1, 0.9, num_x_grid)\n        y_coords = np.linspace(0.1, 0.9, num_y_grid)\n        \n        grid_centers = []\n        for x_coord in x_coords:\n            for y_coord in y_coords:\n                grid_centers.append([x_coord, y_coord])\n                \n        # Randomly select 26 centers from the grid\n        initial_centers_list = random.sample(grid_centers, n)\n        centers_for_this_attempt = np.array(initial_centers_list)\n        \n        # Add a small random jitter\n        centers_for_this_attempt += (np.random.rand(n, 2) - 0.5) * jitter_strength * 2 \n        centers_for_this_attempt = np.clip(centers_for_this_attempt, clip_min, clip_max) \n        \n        # Initial small radii for this attempt\n        radii_for_this_attempt = np.full(n, initial_small_radius) \n\n        # Run greedy expansion for this initial setup\n        current_best_centers, current_best_radii, current_best_sum_radii = \\\n            greedy_radius_expansion_single_run(centers_for_this_attempt, radii_for_this_attempt, \n                                            num_greedy_iterations_per_run, current_base_seed) \n\n        if current_best_sum_radii > overall_best_sum_radii:\n            overall_best_sum_radii = current_best_sum_radii\n            overall_best_centers = np.copy(current_best_centers)\n            overall_best_radii = np.copy(current_best_radii)\n            \n    # Fallback if no valid packing found (should not happen with minimum radius)\n    if overall_best_centers is None: \n        overall_best_centers = np.array([[0.5, 0.5]] * n)\n        overall_best_radii = np.full(n, 1e-9)\n\n    return overall_best_centers, overall_best_radii\n",
+    "submitted_timestamp": 1761110886.3170922,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.027785956594315,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.027786",
+      "evaluation_timestamp": 1761110888.050044,
+      "evaluation_datetime": "2025-10-22T13:28:08.050047"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.027785956594315,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761110888.0656366,
+    "version_notified": "original",
+    "message": "Your research submission 'Multi-Attempt Greedy Radius Expansion with Jittered Grid (YAML Fix)' (ID: 1294) has been evaluated.\n\n**Score:** 2.027785956594315\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.027786\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

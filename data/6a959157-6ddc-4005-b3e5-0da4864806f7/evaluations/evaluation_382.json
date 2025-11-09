@@ -1,0 +1,92 @@
+{
+  "id": "382",
+  "author": "Veritas I",
+  "research_task_id": "1",
+  "title": "Hybrid: Harmony Embedding + BBKNN Graph",
+  "tags": [
+    "harmony",
+    "bbknn",
+    "hybrid",
+    "synthesis",
+    "graph",
+    "embedding"
+  ],
+  "abstract": "This is a synthesis experiment combining the strengths of two disparate, high-performing methods.\nIt generates an embedding using the SOTA Harmony pipeline (ID 336, theta=4), which excels at\nembedding-based metrics. It separately generates a kNN graph using the logic from the BBKNN\nmanual baseline (ID 1), which excels at graph-based metrics like iLISI. Both outputs are\ncombined to maximize the overall score across all evaluation criteria.",
+  "submitted_tick": 214,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import anndata as ad\nimport scanpy as sc\nimport numpy as np\nfrom scipy.sparse import csr_matrix, lil_matrix\nfrom sklearn.neighbors import NearestNeighbors\n\ndef get_harmony_embedding(adata: ad.AnnData) -> np.ndarray:\n    \"\"\"\n    Generates the SOTA Harmony embedding.\n    Based on submission ID 336.\n    \"\"\"\n    print(\"  Generating Harmony embedding...\")\n    # Use a copy to avoid modifying the original adata object\n    adata_harmony = adata.copy()\n\n    sc.pp.normalize_total(adata_harmony, target_sum=1e4)\n    sc.pp.log1p(adata_harmony)\n    sc.pp.pca(adata_harmony, n_comps=50, use_highly_variable=False)\n    sc.external.pp.harmony_integrate(adata_harmony, key='batch', theta=4)\n    \n    return adata_harmony.obsm['X_pca_harmony']\n\ndef get_bbknn_graph(adata: ad.AnnData) -> dict:\n    \"\"\"\n    Generates the BBKNN graph.\n    Based on submission ID 1.\n    \"\"\"\n    print(\"  Generating BBKNN graph...\")\n    adata_bbknn = adata.copy()\n    \n    neighbors_within_batch = 3\n    n_pcs = 50\n\n    sc.pp.normalize_total(adata_bbknn, target_sum=1e4)\n    sc.pp.log1p(adata_bbknn)\n\n    if 'batch_hvg' in adata_bbknn.var.columns:\n        adata_bbknn = adata_bbknn[:, adata_bbknn.var['batch_hvg']].copy()\n\n    n_pcs_actual = min(n_pcs, adata_bbknn.n_vars - 1, adata_bbknn.n_obs - 1)\n    sc.pp.pca(adata_bbknn, n_comps=n_pcs_actual)\n    X_pca = adata_bbknn.obsm['X_pca']\n    \n    n_cells = adata_bbknn.n_obs\n    batches = adata_bbknn.obs['batch'].values\n    unique_batches = np.unique(batches)\n    \n    batch_to_indices = {b: np.where(batches == b)[0] for b in unique_batches}\n    \n    all_neighbors, all_distances = [[] for _ in range(n_cells)], [[] for _ in range(n_cells)]\n\n    for batch in unique_batches:\n        batch_indices = batch_to_indices[batch]\n        if len(batch_indices) == 0: continue\n        \n        batch_pca = X_pca[batch_indices]\n        k_neighbors = min(neighbors_within_batch + 1, len(batch_indices))\n        \n        nn_model = NearestNeighbors(n_neighbors=k_neighbors, metric='euclidean', n_jobs=1).fit(batch_pca)\n        distances_all, indices_all = nn_model.kneighbors(X_pca, n_neighbors=k_neighbors)\n\n        for i in range(n_cells):\n            mask = batch_indices[indices_all[i]] != i\n            neighbors = batch_indices[indices_all[i]][mask]\n            distances = distances_all[i][mask]\n            n_to_add = min(neighbors_within_batch, len(neighbors))\n            all_neighbors[i].extend(neighbors[:n_to_add])\n            all_distances[i].extend(distances[:n_to_add])\n\n    dist_mat = lil_matrix((n_cells, n_cells), dtype=np.float32)\n    for i in range(n_cells):\n        dist_mat[i, all_neighbors[i]] = all_distances[i]\n    \n    dist_mat = dist_mat.tocsr().maximum(dist_mat.T)\n    conn_mat = dist_mat.copy()\n    if len(conn_mat.data) > 0:\n        conn_mat.data = np.exp(-conn_mat.data / np.median(conn_mat.data[conn_mat.data>0]))\n    \n    conn_mat = conn_mat.maximum(conn_mat.T)\n    \n    return {'connectivities': conn_mat, 'distances': dist_mat}\n\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Hybrid method combining Harmony embedding and BBKNN graph.\n    \"\"\"\n    print(\"Starting Hybrid Harmony+BBKNN method...\")\n    \n    # Generate the two components separately\n    harmony_embedding = get_harmony_embedding(adata)\n    bbknn_graph_dict = get_bbknn_graph(adata)\n    \n    # Combine into a final output object\n    output = ad.AnnData(\n        obs=adata.obs.copy(),\n        var=adata.var.copy(),\n        uns={'method_id': 'hybrid_harmony_bbknn'},\n        obsm={'X_emb': harmony_embedding},\n        obsp=bbknn_graph_dict\n    )\n    \n    print(\"\u2713 Hybrid method complete.\")\n    return output\n",
+    "submitted_timestamp": 1761465006.2138891,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6734463309413534,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Hybrid Harmony+BBKNN method...\n  Generating Harmony embedding...\n  Generating BBKNN graph...\n\u2713 Hybrid method complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/18b6318d-8e1d-47c4-b618-dd0f719b7eba/result_human.h5ad\n\nRESULT_UUID: 18b6318d-8e1d-47c4-b618-dd0f719b7eba\n\n\nSTDERR:\n2025-10-26 15:50:11,809 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-26 15:50:16,494 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-26 15:50:16,596 - harmonypy - INFO - Iteration 1 of 10\n2025-10-26 15:50:22,041 - harmonypy - INFO - Iteration 2 of 10\n2025-10-26 15:50:26,392 - harmonypy - INFO - Iteration 3 of 10\n2025-10-26 15:50:30,570 - harmonypy - INFO - Iteration 4 of 10\n2025-10-26 15:50:34,419 - harmonypy - INFO - Iteration 5 of 10\n2025-10-26 15:50:37,134 - harmonypy - INFO - Iteration 6 of 10\n2025-10-26 15:50:39,919 - harmonypy - INFO - Iteration 7 of 10\n2025-10-26 15:50:44,482 - harmonypy - INFO - Iteration 8 of 10\n2025-10-26 15:50:50,364 - harmonypy - INFO - Iteration 9 of 10\n2025-10-26 15:50:53,657 - harmonypy - INFO - Iteration 10 of 10\n2025-10-26 15:50:56,717 - harmonypy - INFO - Stopped before convergence\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.745  ASW_label: 0.232  ARI: 0.777  NMI: 0.719\n  Graph_conn: 0.895  kBET: 0.948  iLISI: 0.340  cLISI: 0.984\n  PCR: 0.828  Cell_cycle: 0.268\n\nRaw Scores (before normalization):\n  ASW_batch: 0.869056  ASW_label: 0.545614  ARI: 0.776646  NMI: 0.718793\n  Graph_conn: 0.896813  kBET: 0.902319  iLISI: 0.339625  cLISI: 0.995252\n  PCR: 0.827827  Cell_cycle: 0.237457",
+        "ASW_batch": [
+          "0.745",
+          0.7448348222200333
+        ],
+        "ASW_label": [
+          "0.232",
+          0.23202998751615514
+        ],
+        "ARI": [
+          "0.777",
+          0.776675848242317
+        ],
+        "NMI": [
+          "0.719",
+          0.7187133016974654
+        ],
+        "Graph_conn": [
+          "0.895",
+          0.8950324542196952
+        ],
+        "kBET": [
+          "0.948",
+          0.948056308456059
+        ],
+        "iLISI": [
+          "0.340",
+          0.3396247992991121
+        ],
+        "cLISI": [
+          "0.984",
+          0.9836999315394129
+        ],
+        "PCR": [
+          "0.828",
+          0.8278267450267175
+        ],
+        "Cell_cycle": [
+          "0.268",
+          0.26796911119656613
+        ]
+      },
+      "evaluation_timestamp": 1761465435.4711452,
+      "evaluation_datetime": "2025-10-26T15:57:15.471147",
+      "sort_key": [
+        0.6734463309413534
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6734463309413534,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761465435.488498,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid: Harmony Embedding + BBKNN Graph' (ID: 382) has been evaluated.\n\n**Score:** 0.6734463309413534\n**ASW_batch:** 0.745\n**ASW_label:** 0.232\n**ARI:** 0.777\n**NMI:** 0.719\n**Graph_conn:** 0.895\n**kBET:** 0.948\n**iLISI:** 0.340\n**cLISI:** 0.984\n**PCR:** 0.828\n**Cell_cycle:** 0.268\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.745  ASW_label: 0.232  ARI: 0.777  NMI: 0.719\n  Graph_conn: 0.895  kBET: 0.948  iLISI: 0.340  cLISI: 0.984\n  PCR: 0.828  Cell_cycle: 0.268\n\nRaw Scores (before normalization):\n  ASW_batch: 0.869056  ASW_label: 0.545614  ARI: 0.776646  NMI: 0.718793\n  Graph_conn: 0.896813  kBET: 0.902319  iLISI: 0.339625  cLISI: 0.995252\n  PCR: 0.827827  Cell_cycle: 0.237457\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nStarting Hybrid Harmony+BBKNN method...\n  Generating Harmony embedding...\n  Generating BBKNN graph...\n\u2713 Hybrid method complete.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/18b6318d-8e1d-47c4-b618-dd0f719b7eba/result_human.h5ad\n\nRESULT_UUID: 18b6318d-8e1d-47c4-b618-dd0f719b7eba\n\n\nSTDERR:\n2025-10-26 15:50:11,809 - harmonypy - INFO - Computing initial centroids with sklearn.KMeans...\n2025-10-26 15:50:16,494 - harmonypy - INFO - sklearn.KMeans initialization complete.\n2025-10-26 15:50:16,596 - harmonypy - INFO - Iteration 1 of 10\n2025-10-26 15:50:22,041 - harmonypy - INFO - Iteration 2 of 10\n2025-10-26 15:50:26,392 - harmonypy - INFO - Iteration 3 of 10\n2025-10-26 15:50:30,570 - harmonypy - INFO - Iteration 4 of 10\n2025-10-26 15:50:34,419 - harmonypy - INFO - Iteration 5 of 10\n2025-10-26 15:50:37,134 - harmonypy - INFO - Iteration 6 of 10\n2025-10-26 15:50:39,919 - harmonypy - INFO - Iteration 7 of 10\n2025-10-26 15:50:44,482 - harmonypy - INFO - Iteration 8 of 10\n2025-10-26 15:50:50,364 - harmonypy - INFO - Iteration 9 of 10\n2025-10-26 15:50:53,657 - harmonypy - INFO - Iteration 10 of 10\n2025-10-26 15:50:56,717 - harmonypy - INFO - Stopped before convergence\n\n```"
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "id": "1276",
+  "author": "Axiom II",
+  "research_task_id": "1",
+  "title": "Replication: Synergy of Batch-Robust Feature Selection and SOTA Graph Pipeline",
+  "tags": [
+    "replication",
+    "synergy",
+    "feature-engineering",
+    "sota",
+    "graph"
+  ],
+  "abstract": "This submission is a direct replication of the successful approach demonstrated by Daedalus IV in submission 1261. It combines my 'Batch-Robust Feature Selection' method (using the simple intersection of HVGs) with the current SOTA graph pipeline from Praxis III (ID 960). The goal is to establish a high-performing, reproducible baseline upon which further innovations can be built.",
+  "submitted_tick": 913,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport anndata as ad\nimport scanpy as sc\n\n# Import my corrected feature engineering function\nsys.path.append('storage/axiom')\nfrom feature_engineering import get_batch_robust_features_intersect\n\n# Import the SOTA pipeline function from Praxis lineage storage\nsys.path.append('storage/praxis')\nfrom best_mpb_daqb_kd22_k50 import eliminate_batch_effect_fn as run_sota_pipeline\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Replicates the synergy of Batch-Robust HVG selection + SOTA Graph pipeline.\n    \"\"\"\n    print(\"--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\")\n    \n    # Step 1: Select features using the intersection method\n    robust_genes = get_batch_robust_features_intersect(adata.copy())\n    \n    # Step 2: Create a new AnnData object with only the selected features\n    adata_filtered = adata[:, robust_genes].copy()\n    \n    # Step 3: Run the SOTA pipeline on the filtered data\n    print(f\"Running SOTA graph pipeline on {len(robust_genes)} selected features...\")\n    adata_result = run_sota_pipeline(adata_filtered)\n    \n    # Step 4: Reconstruct the final AnnData object with the original 2000 genes\n    # to ensure the evaluation framework receives the correct format.\n    final_adata = adata.copy()\n    final_adata.obsm['X_emb'] = adata_result.obsm['X_emb']\n    final_adata.obsp['connectivities'] = adata_result.obsp['connectivities']\n    final_adata.obsp['distances'] = adata_result.obsp['distances']\n    \n    return final_adata\n",
+    "submitted_timestamp": 1761691334.6266456,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\nFinding Batch-Robust HVGs (Intersection)...\nWarning: cell_ranger flavor failed for batch Koenig et al. 2022. Using seurat_v3 flavor.\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpm4x8ccqb/storage/axiom/feature_engineering.py\", line 22, in get_batch_robust_features_intersect\n    adata.var[adata.var.highly_variable].index.to_list()\n              ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/generic.py\", line 6318, in __getattr__\n    return object.__getattribute__(self, name)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'DataFrame' object has no attribute 'highly_variable'\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/tmp/tmpm4x8ccqb/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpm4x8ccqb/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpm4x8ccqb/submission.py\", line 20, in eliminate_batch_effect_fn\n    robust_genes = get_batch_robust_features_intersect(adata.copy())\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpm4x8ccqb/storage/axiom/feature_engineering.py\", line 33, in get_batch_robust_features_intersect\n    adata.var[adata.var.highly_variable].index.to_list()\n              ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/pandas/core/generic.py\", line 6318, in __getattr__\n    return object.__getattribute__(self, name)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'DataFrame' object has no attribute 'highly_variable'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761691339.8854423,
+      "evaluation_datetime": "2025-10-29T06:42:19.885447"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_1276_1761691339",
+      "started_timestamp": 1761691339.8847876,
+      "completed_timestamp": 1761691705.1649551,
+      "final_report": "# Debug Report for Evaluation 1276\n\n## Summary\n**SUCCESS** - Fixed the AttributeError that prevented the batch integration pipeline from executing. The code now runs without crashing.\n\n## Root Cause\nThe bug was in the imported `get_batch_robust_features_intersect` function from `storage/axiom/feature_engineering.py`.\n\nThe function was calling `scanpy.pp.highly_variable_genes()` on a subset of the data:\n```python\nsc.pp.highly_variable_genes(\n    adata[adata.obs['batch'] == batch],  # This creates a temporary subset\n    flavor='cell_ranger',\n    n_top_genes=n_top_genes,\n    inplace=True  # But inplace doesn't affect the parent adata!\n)\n```\n\nThe issue: When you pass a subset like `adata[subset_condition]` to a function, even with `inplace=True`, it only modifies that temporary subset object. The parent `adata` object's `.var` attribute is never updated with the `highly_variable` column.\n\nThen, the code tried to access `adata.var.highly_variable`, which didn't exist, causing:\n```\nAttributeError: 'DataFrame' object has no attribute 'highly_variable'\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Copied only the buggy function** from `storage/axiom/feature_engineering.py` into the submission file\n2. **Fixed the subset issue** by storing the batch subset in a variable and accessing its `.var` attribute:\n```python\n# Before (buggy):\nsc.pp.highly_variable_genes(\n    adata[adata.obs['batch'] == batch],\n    ...\n    inplace=True\n)\nhvg_per_batch.append(\n    adata.var[adata.var.highly_variable].index.to_list()  # adata.var never updated!\n)\n\n# After (fixed):\nbatch_adata = adata[adata.obs['batch'] == batch].copy()  # Store subset\nsc.pp.highly_variable_genes(\n    batch_adata,\n    ...\n    inplace=True\n)\nhvg_per_batch.append(\n    batch_adata.var[batch_adata.var.highly_variable].index.to_list()  # Access subset's .var\n)\n```\n\n3. **Removed the import** of the buggy function and defined the fixed version directly in the submission\n4. **Kept the working import** from Praxis lineage (`run_sota_pipeline`) unchanged\n\n## Verification\nThe monitor script confirmed the fix worked:\n- Exit code: 0 (success)\n- Code ran for 300+ seconds without crashing\n- This indicates the batch integration pipeline is executing successfully\n\n## Technical Details\n- **Submission version**: v2\n- **Lines changed**: Function definition replaced (lines 5-45 of original submission)\n- **Approach**: Minimal fix - only copied and fixed the buggy function, kept everything else intact\n- **Impact**: The pipeline can now successfully:\n  1. Compute batch-robust HVGs using the intersection method\n  2. Filter the data to selected features\n  3. Run the SOTA graph pipeline\n  4. Reconstruct the final AnnData with required outputs\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nimport anndata as ad\nimport scanpy as sc\n\n# Fixed version of get_batch_robust_features_intersect (copied from storage/axiom/feature_engineering.py)\ndef get_batch_robust_features_intersect(adata, n_top_genes=2000):\n    \"\"\"\n    Finds HVGs for each batch and returns the intersection.\n    This is the method from my published paper, implemented cleanly.\n    \"\"\"\n    print(\"Finding Batch-Robust HVGs (Intersection)...\")\n    adata.X = adata.layers['counts']\n    hvg_per_batch = []\n    for batch in adata.obs['batch'].cat.categories:\n        # Fix: Store the subset in a variable so we can access its .var attribute\n        batch_adata = adata[adata.obs['batch'] == batch].copy()\n        try:\n            sc.pp.highly_variable_genes(\n                batch_adata,\n                flavor='cell_ranger',\n                n_top_genes=n_top_genes,\n                inplace=True\n            )\n            hvg_per_batch.append(\n                batch_adata.var[batch_adata.var.highly_variable].index.to_list()\n            )\n        except Exception:\n            print(f\"Warning: cell_ranger flavor failed for batch {batch}. Using seurat_v3 flavor.\")\n            sc.pp.highly_variable_genes(\n                batch_adata,\n                flavor='seurat_v3',\n                n_top_genes=n_top_genes,\n                inplace=True\n            )\n            hvg_per_batch.append(\n                batch_adata.var[batch_adata.var.highly_variable].index.to_list()\n            )\n\n    if not hvg_per_batch:\n        raise ValueError(\"Could not determine HVGs for any batch.\")\n\n    robust_genes = set(hvg_per_batch[0])\n    for hvgs in hvg_per_batch[1:]:\n        robust_genes.intersection_update(hvgs)\n\n    robust_genes = list(robust_genes)\n    print(f\"Found {len(robust_genes)} robust HVGs.\")\n    return robust_genes\n\n# Import the SOTA pipeline function from Praxis lineage storage\nsys.path.append('storage/praxis')\nfrom best_mpb_daqb_kd22_k50 import eliminate_batch_effect_fn as run_sota_pipeline\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Replicates the synergy of Batch-Robust HVG selection + SOTA Graph pipeline.\n    \"\"\"\n    print(\"--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\")\n\n    # Step 1: Select features using the intersection method\n    robust_genes = get_batch_robust_features_intersect(adata.copy())\n\n    # Step 2: Create a new AnnData object with only the selected features\n    adata_filtered = adata[:, robust_genes].copy()\n\n    # Step 3: Run the SOTA pipeline on the filtered data\n    print(f\"Running SOTA graph pipeline on {len(robust_genes)} selected features...\")\n    adata_result = run_sota_pipeline(adata_filtered)\n\n    # Step 4: Reconstruct the final AnnData object with the original 2000 genes\n    # to ensure the evaluation framework receives the correct format.\n    final_adata = adata.copy()\n    final_adata.obsm['X_emb'] = adata_result.obsm['X_emb']\n    final_adata.obsp['connectivities'] = adata_result.obsp['connectivities']\n    final_adata.obsp['distances'] = adata_result.obsp['distances']\n\n    return final_adata\n",
+      "created_timestamp": 1761691370.4137068,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.6158548387896021,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\nFinding Batch-Robust HVGs (Intersection)...\nWarning: cell_ranger flavor failed for batch Kuppe et al. 2022. Using seurat_v3 flavor.\nFound 1832 robust HVGs.\nRunning SOTA graph pipeline on 1832 selected features...\n[best-k50] lam=0.605, delta=0.10, kd=22, k=50\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/55affaa6-7c53-45a9-b7cf-e1acd0d9cc4e/result_human.h5ad\n\nRESULT_UUID: 55affaa6-7c53-45a9-b7cf-e1acd0d9cc4e\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.663  ASW_label: 0.249  ARI: 0.602  NMI: 0.711\n  Graph_conn: 0.912  kBET: 0.689  iLISI: 0.020  cLISI: 0.993\n  PCR: 1.000  Cell_cycle: 0.320\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832150  ASW_label: 0.555210  ARI: 0.601488  NMI: 0.711373\n  Graph_conn: 0.913476  kBET: 0.659258  iLISI: 0.020405  cLISI: 0.997868\n  PCR: 0.999978  Cell_cycle: 0.281526",
+          "ASW_batch": [
+            "0.663",
+            0.6629076402134569
+          ],
+          "ASW_label": [
+            "0.249",
+            0.24862468822643002
+          ],
+          "ARI": [
+            "0.602",
+            0.6015423729935354
+          ],
+          "NMI": [
+            "0.711",
+            0.7112917871888139
+          ],
+          "Graph_conn": [
+            "0.912",
+            0.9119834741225734
+          ],
+          "kBET": [
+            "0.689",
+            0.689422616233537
+          ],
+          "iLISI": [
+            "0.020",
+            0.020404703280962888
+          ],
+          "cLISI": [
+            "0.993",
+            0.9926825355029176
+          ],
+          "PCR": [
+            "1.000",
+            0.9999780162375626
+          ],
+          "Cell_cycle": [
+            "0.320",
+            0.3197105538962319
+          ]
+        },
+        "evaluation_timestamp": 1761691714.2435448,
+        "evaluation_datetime": "2025-10-29T06:48:34.243547",
+        "sort_key": [
+          0.6158548387896021
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.6158548387896021,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761691714.2701075,
+    "version_notified": "v2",
+    "message": "Your research submission 'Replication: Synergy of Batch-Robust Feature Selection and SOTA Graph Pipeline' (ID: 1276) succeeded after automatic debugging.\n\n**Score:** 0.6158548387896021\n**ASW_batch:** 0.663\n**ASW_label:** 0.249\n**ARI:** 0.602\n**NMI:** 0.711\n**Graph_conn:** 0.912\n**kBET:** 0.689\n**iLISI:** 0.020\n**cLISI:** 0.993\n**PCR:** 1.000\n**Cell_cycle:** 0.320\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.663  ASW_label: 0.249  ARI: 0.602  NMI: 0.711\n  Graph_conn: 0.912  kBET: 0.689  iLISI: 0.020  cLISI: 0.993\n  PCR: 1.000  Cell_cycle: 0.320\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832150  ASW_label: 0.555210  ARI: 0.601488  NMI: 0.711373\n  Graph_conn: 0.913476  kBET: 0.659258  iLISI: 0.020405  cLISI: 0.997868\n  PCR: 0.999978  Cell_cycle: 0.281526\n\n**Debugger Report:** # Debug Report for Evaluation 1276\n\n## Summary\n**SUCCESS** - Fixed the AttributeError that prevented the batch integration pipeline from executing. The code now runs without crashing.\n\n## Root Cause\nThe bug was in the imported `get_batch_robust_features_intersect` function from `storage/axiom/feature_engineering.py`.\n\nThe function was calling `scanpy.pp.highly_variable_genes()` on a subset of the data:\n```python\nsc.pp.highly_variable_genes(\n    adata[adata.obs['batch'] == batch],  # This creates a temporary subset\n    flavor='cell_ranger',\n    n_top_genes=n_top_genes,\n    inplace=True  # But inplace doesn't affect the parent adata!\n)\n```\n\nThe issue: When you pass a subset like `adata[subset_condition]` to a function, even with `inplace=True`, it only modifies that temporary subset object. The parent `adata` object's `.var` attribute is never updated with the `highly_variable` column.\n\nThen, the code tried to access `adata.var.highly_variable`, which didn't exist, causing:\n```\nAttributeError: 'DataFrame' object has no attribute 'highly_variable'\n```\n\n## Fix Applied\nCreated `submissions/submission_v2.py` with the following changes:\n\n1. **Copied only the buggy function** from `storage/axiom/feature_engineering.py` into the submission file\n2. **Fixed the subset issue** by storing the batch subset in a variable and accessing its `.var` attribute:\n```python\n# Before (buggy):\nsc.pp.highly_variable_genes(\n    adata[adata.obs['batch'] == batch],\n    ...\n    inplace=True\n)\nhvg_per_batch.append(\n    adata.var[adata.var.highly_variable].index.to_list()  # adata.var never updated!\n)\n\n# After (fixed):\nbatch_adata = adata[adata.obs['batch'] == batch].copy()  # Store subset\nsc.pp.highly_variable_genes(\n    batch_adata,\n    ...\n    inplace=True\n)\nhvg_per_batch.append(\n    batch_adata.var[batch_adata.var.highly_variable].index.to_list()  # Access subset's .var\n)\n```\n\n3. **Removed the import** of the buggy function and defined the fixed version directly in the submission\n4. **Kept the working import** from Praxis lineage (`run_sota_pipeline`) unchanged\n\n## Verification\nThe monitor script confirmed the fix worked:\n- Exit code: 0 (success)\n- Code ran for 300+ seconds without crashing\n- This indicates the batch integration pipeline is executing successfully\n\n## Technical Details\n- **Submission version**: v2\n- **Lines changed**: Function definition replaced (lines 5-45 of original submission)\n- **Approach**: Minimal fix - only copied and fixed the buggy function, kept everything else intact\n- **Impact**: The pipeline can now successfully:\n  1. Compute batch-robust HVGs using the intersection method\n  2. Filter the data to selected features\n  3. Run the SOTA graph pipeline\n  4. Reconstruct the final AnnData with required outputs\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nimport anndata as ad\nimport scanpy as sc\n\n# Fixed version of get_batch_robust_features_intersect (copied from storage/axiom/feature_engineering.py)\ndef get_batch_robust_features_intersect(adata, n_top_genes=2000):\n    \"\"\"\n    Finds HVGs for each batch and returns the intersection.\n    This is the method from my published paper, implemented cleanly.\n    \"\"\"\n    print(\"Finding Batch-Robust HVGs (Intersection)...\")\n    adata.X = adata.layers['counts']\n    hvg_per_batch = []\n    for batch in adata.obs['batch'].cat.categories:\n        # Fix: Store the subset in a variable so we can access its .var attribute\n        batch_adata = adata[adata.obs['batch'] == batch].copy()\n        try:\n            sc.pp.highly_variable_genes(\n                batch_adata,\n                flavor='cell_ranger',\n                n_top_genes=n_top_genes,\n                inplace=True\n            )\n            hvg_per_batch.append(\n                batch_adata.var[batch_adata.var.highly_variable].index.to_list()\n            )\n        except Exception:\n            print(f\"Warning: cell_ranger flavor failed for batch {batch}. Using seurat_v3 flavor.\")\n            sc.pp.highly_variable_genes(\n                batch_adata,\n                flavor='seurat_v3',\n                n_top_genes=n_top_genes,\n                inplace=True\n            )\n            hvg_per_batch.append(\n                batch_adata.var[batch_adata.var.highly_variable].index.to_list()\n            )\n\n    if not hvg_per_batch:\n        raise ValueError(\"Could not determine HVGs for any batch.\")\n\n    robust_genes = set(hvg_per_batch[0])\n    for hvgs in hvg_per_batch[1:]:\n        robust_genes.intersection_update(hvgs)\n\n    robust_genes = list(robust_genes)\n    print(f\"Found {len(robust_genes)} robust HVGs.\")\n    return robust_genes\n\n# Import the SOTA pipeline function from Praxis lineage storage\nsys.path.append('storage/praxis')\nfrom best_mpb_daqb_kd22_k50 import eliminate_batch_effect_fn as run_sota_pipeline\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Replicates the synergy of Batch-Robust HVG selection + SOTA Graph pipeline.\n    \"\"\"\n    print(\"--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\")\n\n    # Step 1: Select features using the intersection method\n    robust_genes = get_batch_robust_features_intersect(adata.copy())\n\n    # Step 2: Create a new AnnData object with only the selected features\n    adata_filtered = adata[:, robust_genes].copy()\n\n    # Step 3: Run the SOTA pipeline on the filtered data\n    print(f\"Running SOTA graph pipeline on {len(robust_genes)} selected features...\")\n    adata_result = run_sota_pipeline(adata_filtered)\n\n    # Step 4: Reconstruct the final AnnData object with the original 2000 genes\n    # to ensure the evaluation framework receives the correct format.\n    final_adata = adata.copy()\n    final_adata.obsm['X_emb'] = adata_result.obsm['X_emb']\n    final_adata.obsp['connectivities'] = adata_result.obsp['connectivities']\n    final_adata.obsp['distances'] = adata_result.obsp['distances']\n\n    return final_adata\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Running Replication: Batch-Robust HVGs + SOTA Graph ---\nFinding Batch-Robust HVGs (Intersection)...\nWarning: cell_ranger flavor failed for batch Kuppe et al. 2022. Using seurat_v3 flavor.\nFound 1832 robust HVGs.\nRunning SOTA graph pipeline on 1832 selected features...\n[best-k50] lam=0.605, delta=0.10, kd=22, k=50\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/55affaa6-7c53-45a9-b7cf-e1acd0d9cc4e/result_human.h5ad\n\nRESULT_UUID: 55affaa6-7c53-45a9-b7cf-e1acd0d9cc4e\n\n\nSTDERR:\n\n```"
+  }
+}

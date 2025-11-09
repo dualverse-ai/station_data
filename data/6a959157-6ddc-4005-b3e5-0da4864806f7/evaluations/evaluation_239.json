@@ -1,0 +1,91 @@
+{
+  "id": "239",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "Synergy Test 2: Logos's Stabilized ComBat + Praxis's Whitening",
+  "tags": [
+    "sota-attempt",
+    "synergy",
+    "whitening",
+    "stabilized-combat",
+    "dual-output"
+  ],
+  "abstract": "After the first synergy test failed, this experiment takes a more structured approach. It applies Praxis I's PCA-axis whitening technique to my own lineage's best method: the numerically stabilized ComBat pipeline (ID 200). This will provide a clean A/B test to validate my implementation of whitening and precisely quantify its effect on a well-understood baseline, particularly the trade-off between batch mixing and cell cycle preservation.",
+  "submitted_tick": 141,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport sys\nsys.path.append('storage/logos')\n\nimport numpy as np\nimport anndata as ad\nimport scanpy as sc\nfrom integration_utils import get_stabilized_combat_matrix, build_balanced_knn\n\ndef _whiten_pcs(adata_emb, key='X_pca', tau=0.95, eps=1e-8):\n    Z = adata_emb.obsm[key]\n    var = adata_emb.uns.get('pca', {}).get('variance', None)\n    if var is None: \n        print(\"Warning: PCA variance not found. Skipping whitening.\")\n        return Z\n    scale = np.sqrt(np.clip(var[:Z.shape[1]], eps, None))\n    Zw = (Z / scale) * float(tau)\n    return Zw - Zw.mean(axis=0, keepdims=True)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos II: SOTA Pipeline with Stabilized ComBat + Whitening\")\n    \n    # Using my lineage's optimized hyperparameters\n    n_comps=50\n    k_total=42\n    metric='cosine'\n    random_state = 0\n    tau_whiten=0.95\n\n    # Step 1: Stabilized ComBat Correction and PCA\n    # NOTE: My stabilized ComBat is called on the HVG-subsetted data, not full genes.\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n    sc.pp.highly_variable_genes(adata, batch_key='batch', n_top_genes=2000, subset=True)\n    \n    X_combat_corrected = get_stabilized_combat_matrix(adata)\n    adata_combat = ad.AnnData(X=X_combat_corrected, obs=adata.obs, var=adata.var)\n    sc.pp.pca(adata_combat, n_comps=n_comps, random_state=random_state)\n    \n    # Step 2: Apply Whitening to the embedding\n    Z_emb_whitened = _whiten_pcs(adata_combat, key='X_pca', tau=tau_whiten)\n\n    # Step 3: Balanced kNN Graph (built on the NON-whitened embedding, as per Praxis I's dual-output design)\n    Z_combat = adata_combat.obsm['X_pca']\n    C, D = build_balanced_knn(Z_combat, adata.obs['batch'].values, n_neighbors_total=k_total, metric=metric)\n    \n    # Step 4: Final Dual-Output AnnData with WHITENED embedding\n    return ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_stabilized_combat_whitened_v1', 'neighbors': {'connectivities_key': 'connectivities', 'distances_key': 'distances'}},\n        obsm={'X_emb': Z_emb_whitened},\n        obsp={'connectivities': C, 'distances': D}\n    )\n",
+    "submitted_timestamp": 1761433331.1171427,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7062440446586745,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: SOTA Pipeline with Stabilized ComBat + Whitening\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/91ef17d0-4bd5-49d5-82cc-c52e79a32486/result_human.h5ad\n\nRESULT_UUID: 91ef17d0-4bd5-49d5-82cc-c52e79a32486\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.847  ASW_label: 0.171  ARI: 0.668  NMI: 0.653\n  Graph_conn: 0.984  kBET: 0.743  iLISI: 0.933  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.105\n\nRaw Scores (before normalization):\n  ASW_batch: 0.915004  ASW_label: 0.510576  ARI: 0.668100  NMI: 0.653045\n  Graph_conn: 0.984216  kBET: 0.709463  iLISI: 0.932806  cLISI: 0.987949\n  PCR: 1.000000  Cell_cycle: 0.098526",
+        "ASW_batch": [
+          "0.847",
+          0.8468344873839588
+        ],
+        "ASW_label": [
+          "0.171",
+          0.17143684551492547
+        ],
+        "ARI": [
+          "0.668",
+          0.6681453429409092
+        ],
+        "NMI": [
+          "0.653",
+          0.652947121972787
+        ],
+        "Graph_conn": [
+          "0.984",
+          0.983943787811216
+        ],
+        "kBET": [
+          "0.743",
+          0.7428439842221517
+        ],
+        "iLISI": [
+          "0.933",
+          0.9328063241106722
+        ],
+        "cLISI": [
+          "0.959",
+          0.9586305268405525
+        ],
+        "PCR": [
+          "1.000",
+          0.9999999247627676
+        ],
+        "Cell_cycle": [
+          "0.105",
+          0.10485210102680519
+        ]
+      },
+      "evaluation_timestamp": 1761433645.3713992,
+      "evaluation_datetime": "2025-10-26T07:07:25.371400",
+      "sort_key": [
+        0.7062440446586745
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7062440446586745,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761433645.3890984,
+    "version_notified": "original",
+    "message": "Your research submission 'Synergy Test 2: Logos's Stabilized ComBat + Praxis's Whitening' (ID: 239) has been evaluated.\n\n**Score:** 0.7062440446586745\n**ASW_batch:** 0.847\n**ASW_label:** 0.171\n**ARI:** 0.668\n**NMI:** 0.653\n**Graph_conn:** 0.984\n**kBET:** 0.743\n**iLISI:** 0.933\n**cLISI:** 0.959\n**PCR:** 1.000\n**Cell_cycle:** 0.105\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.847  ASW_label: 0.171  ARI: 0.668  NMI: 0.653\n  Graph_conn: 0.984  kBET: 0.743  iLISI: 0.933  cLISI: 0.959\n  PCR: 1.000  Cell_cycle: 0.105\n\nRaw Scores (before normalization):\n  ASW_batch: 0.915004  ASW_label: 0.510576  ARI: 0.668100  NMI: 0.653045\n  Graph_conn: 0.984216  kBET: 0.709463  iLISI: 0.932806  cLISI: 0.987949\n  PCR: 1.000000  Cell_cycle: 0.098526\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: SOTA Pipeline with Stabilized ComBat + Whitening\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/91ef17d0-4bd5-49d5-82cc-c52e79a32486/result_human.h5ad\n\nRESULT_UUID: 91ef17d0-4bd5-49d5-82cc-c52e79a32486\n\n\nSTDERR:\nWARNING: adata.X seems to be already log-transformed.\n\n```"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "id": "41",
+  "author": "Noesis I",
+  "research_task_id": "1",
+  "title": "Radius-only LP polish at fixed centers (from saved best)",
+  "tags": [
+    "linear-programming",
+    "radii-polish",
+    "fixed-centers"
+  ],
+  "abstract": "Load saved best centers and recompute radii by solving a linear program that maximizes the sum of radii under boundary and non-overlap constraints. This provides an optimal radius allocation for fixed centers. Final tiny shrink ensures robustness; fallback uses the saved best if LP is unavailable.",
+  "submitted_tick": 23,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\ntry:\n    from scipy.optimize import linprog\nexcept Exception:\n    linprog = None\n\nN = 26\nR_MIN = 1e-6\nEPS = 1e-12  # tiny safety margin\n\ndef load_saved_best():\n    try:\n        c = np.loadtxt('storage/noesis/latest_centers.txt')\n        r = np.loadtxt('storage/noesis/latest_radii.txt')\n        c = np.array(c, dtype=float).reshape(N, 2)\n        r = np.array(r, dtype=float).reshape(N,)\n        return c, r\n    except Exception:\n        return None, None\n\ndef grid_plus_hole_seed(r0=0.1 - 1e-8, eps=1e-8):\n    coords = [0.1, 0.3, 0.5, 0.7, 0.9]\n    centers = [[x, y] for x in coords for y in coords]  # 25 grid centers\n    # interior hole at (0.2,0.2)\n    hole_center = np.array([0.2, 0.2], dtype=float)\n    neighbor = np.array([0.1, 0.1], dtype=float)\n    d = float(np.linalg.norm(hole_center - neighbor))  # sqrt(0.02)\n    r_hole = d - r0 - eps\n    radii = [float(r0)] * 25 + [float(r_hole)]\n    return np.array(centers, dtype=float), np.array(radii, dtype=float)\n\ndef compute_radii_lp(centers, eps=EPS):\n    \"\"\"\n    Maximize sum r subject to:\n      r_i >= R_MIN\n      r_i <= min(x_i,1-x_i,y_i,1-y_i) - eps\n      r_i + r_j <= ||c_i - c_j|| - eps\n    \"\"\"\n    if linprog is None:\n        return None, None\n\n    x = centers[:, 0]; y = centers[:, 1]\n    bcap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    if np.any(bcap < R_MIN):\n        # centers too close to boundary; enforce minimal feasible\n        bcap = np.maximum(bcap, R_MIN)\n\n    # Number of pairwise constraints\n    m_pairs = N * (N - 1) // 2\n    rows = N + m_pairs\n\n    # A_ub r <= b_ub\n    A_ub = np.zeros((rows, N), dtype=float)\n    b_ub = np.zeros(rows, dtype=float)\n\n    # Boundary caps\n    A_ub[0:N, np.arange(N)] = 1.0\n    b_ub[0:N] = bcap\n\n    # Pairwise distances\n    diff = centers[:, None, :] - centers[None, :, :]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n\n    # r_i + r_j <= d_ij - eps\n    idx = N\n    for i in range(N):\n        for j in range(i + 1, N):\n            A_ub[idx, i] = 1.0\n            A_ub[idx, j] = 1.0\n            b_ub[idx] = max(dist[i, j] - eps, 0.0)  # if negative, forces small radii\n            idx += 1\n\n    # Objective: minimize c^T r with c = -1 (i.e., maximize sum r)\n    cvec = -np.ones(N, dtype=float)\n    bounds = [(R_MIN, 0.5)] * N\n\n    res = linprog(cvec, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')\n    if not (res.success and res.x is not None):\n        return None, None\n\n    r = np.array(res.x, dtype=float)\n    # final tiny shrink for robustness\n    r = np.maximum(r - EPS, R_MIN)\n    return r, float(np.sum(r))\n\ndef construct_packing():\n    centers, radii = load_saved_best()\n    if centers is None:\n        # Fallback to constructive seed\n        centers, radii = grid_plus_hole_seed()\n\n    # LP polish radii for fixed centers\n    r_lp, s_lp = compute_radii_lp(centers)\n    if r_lp is None:\n        # LP unavailable or failed: return saved/seed with tiny shrink\n        radii = np.maximum(radii - EPS, R_MIN)\n        return centers.astype(float), radii.astype(float)\n\n    return centers.astype(float), r_lp.astype(float)\n",
+    "submitted_timestamp": 1760853588.1033704,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.06819125399800004,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.068191",
+      "evaluation_timestamp": 1760853590.0332851,
+      "evaluation_datetime": "2025-10-19T13:59:50.033288"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.06819125399800004,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760853590.0587587,
+    "version_notified": "original",
+    "message": "Your research submission 'Radius-only LP polish at fixed centers (from saved best)' (ID: 41) has been evaluated.\n\n**Score:** 0.06819125399800004\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.068191\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

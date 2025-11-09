@@ -1,0 +1,92 @@
+{
+  "id": "347",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Idea 3 \u2014 WINSOR q=0.01: Per-Batch HVG Winsorization + ComBat \u2192 PCA50 \u2192 kNN15",
+  "tags": [
+    "baseline",
+    "winsor",
+    "combat",
+    "hvg",
+    "pca",
+    "knn"
+  ],
+  "abstract": "Per-batch, per-gene winsorization of HVGs at [1%, 99%] prior to ComBat to reduce heavy-tail artifacts; then ComBat \u2192 PCA(50) \u2192 kNN(15, cosine). Goal: stabilize distances and batch estimates with minimal loss of biological extremes.",
+  "submitted_tick": 197,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\ndef _ensure_dense(X):\n    return X.A if sp.issparse(X) else X\n\ndef _winsor_inplace(Xd, batches, hv_mask, q=0.01):\n    batches = np.asarray(batches)\n    hv_idx = np.where(hv_mask)[0]\n    for b in np.unique(batches):\n        idx = np.where(batches == b)[0]\n        if idx.size == 0:\n            continue\n        Xb = Xd[idx[:, None], hv_idx]\n        lo = np.quantile(Xb, q, axis=0)\n        hi = np.quantile(Xb, 1.0 - q, axis=0)\n        Xb = np.minimum(np.maximum(Xb, lo), hi)\n        Xd[idx[:, None], hv_idx] = Xb\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    n_pcs = 50\n    n_neighbors = 15\n    metric = 'cosine'\n    assert 'batch' in adata.obs.columns and 'feature_name' in adata.var.columns\n\n    # Normalize/log1p\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=1e4)\n    sc.pp.log1p(adata)\n\n    # HVGs (batch-aware)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Winsorize HVGs per batch at [1%, 99%] (dense)\n    Xd = _ensure_dense(adata.X)\n    _winsor_inplace(Xd, batches=batches, hv_mask=hv, q=0.01)\n    adata.X = Xd\n\n    # ComBat on dense\n    sc.pp.combat(adata, key='batch')\n\n    # PCA on HVGs and kNN graph\n    sc.pp.pca(adata, n_comps=n_pcs, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    adata.obsm['X_emb'] = adata.obsm['X_pca']\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors, metric=metric)\n    return adata\n",
+    "submitted_timestamp": 1761458424.1333947,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6176072718377521,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 233 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/19d036bb-00d3-4349-98fc-26cc4c5c8645/result_human.h5ad\n\nRESULT_UUID: 19d036bb-00d3-4349-98fc-26cc4c5c8645\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.669  ASW_label: 0.214  ARI: 0.627  NMI: 0.700\n  Graph_conn: 0.894  kBET: 0.643  iLISI: 0.112  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.328\n\nRaw Scores (before normalization):\n  ASW_batch: 0.834911  ASW_label: 0.535041  ARI: 0.626996  NMI: 0.699612\n  Graph_conn: 0.895436  kBET: 0.615535  iLISI: 0.112412  cLISI: 0.997092\n  PCR: 0.999951  Cell_cycle: 0.288423",
+        "ASW_batch": [
+          "0.669",
+          0.6690347435301078
+        ],
+        "ASW_label": [
+          "0.214",
+          0.21374468269243047
+        ],
+        "ARI": [
+          "0.627",
+          0.627047095832681
+        ],
+        "NMI": [
+          "0.700",
+          0.6995273945565392
+        ],
+        "Graph_conn": [
+          "0.894",
+          0.8936317868580107
+        ],
+        "kBET": [
+          "0.643",
+          0.6428980046156605
+        ],
+        "iLISI": [
+          "0.112",
+          0.11241224088066515
+        ],
+        "cLISI": [
+          "0.990",
+          0.9900175292582943
+        ],
+        "PCR": [
+          "1.000",
+          0.9999507252480084
+        ],
+        "Cell_cycle": [
+          "0.328",
+          0.327808514905123
+        ]
+      },
+      "evaluation_timestamp": 1761458923.832471,
+      "evaluation_datetime": "2025-10-26T14:08:43.832471",
+      "sort_key": [
+        0.6176072718377521
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6176072718377521,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761458923.8965,
+    "version_notified": "original",
+    "message": "Your research submission 'Idea 3 \u2014 WINSOR q=0.01: Per-Batch HVG Winsorization + ComBat \u2192 PCA50 \u2192 kNN15' (ID: 347) has been evaluated.\n\n**Score:** 0.6176072718377521\n**ASW_batch:** 0.669\n**ASW_label:** 0.214\n**ARI:** 0.627\n**NMI:** 0.700\n**Graph_conn:** 0.894\n**kBET:** 0.643\n**iLISI:** 0.112\n**cLISI:** 0.990\n**PCR:** 1.000\n**Cell_cycle:** 0.328\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.669  ASW_label: 0.214  ARI: 0.627  NMI: 0.700\n  Graph_conn: 0.894  kBET: 0.643  iLISI: 0.112  cLISI: 0.990\n  PCR: 1.000  Cell_cycle: 0.328\n\nRaw Scores (before normalization):\n  ASW_batch: 0.834911  ASW_label: 0.535041  ARI: 0.626996  NMI: 0.699612\n  Graph_conn: 0.895436  kBET: 0.615535  iLISI: 0.112412  cLISI: 0.997092\n  PCR: 0.999951  Cell_cycle: 0.288423\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 233 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/19d036bb-00d3-4349-98fc-26cc4c5c8645/result_human.h5ad\n\nRESULT_UUID: 19d036bb-00d3-4349-98fc-26cc4c5c8645\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

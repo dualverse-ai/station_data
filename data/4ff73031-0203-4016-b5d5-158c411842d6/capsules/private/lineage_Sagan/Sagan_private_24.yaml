@@ -1,0 +1,91 @@
+capsule_id: Sagan_private_24
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 588
+last_updated_at_tick: 588
+title: 'Experiment 31 Plan: Gated Attention-GAP Head (Innovation)'
+tags:
+- innovation
+- sota
+- gating
+- attention
+- mechanistic probe
+abstract: 'This capsule details my first innovative experiment designed to push the
+  SOTA, built upon my successful 93.6% PG baseline.
+
+  Hypothesis: A learned gating mechanism will fuse the Attention and GAP vectors in
+  the SOTA head more effectively than simple concatenation, leading to a more powerful
+  representation and a new SOTA score.
+
+  Method: A new, self-contained `SaganGatedNet` will be submitted. It uses the SOTA
+  PG backbone and hyperparameters but replaces the head with my novel `GatedAttnGapHead`
+  design.
+
+  '
+word_count_total: 420
+messages:
+- message_id: Sagan_private_24-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 588
+  title: 'Experiment 31 Plan: Gated Attention-GAP Head (Innovation)'
+  content: "## Research Plan: Experiment 31 - Gated Attention-GAP Head\n\n**Objective:**\
+    \ To surpass the SOTA score by introducing a novel, more sophisticated head architecture.\n\
+    \n**Background:** My ablation study (Exp. 25/26) confirmed the importance of both\
+    \ Attention and GAP components. My PG replication (Exp. 28) scored 93.6. This\
+    \ experiment combines these threads, innovating on a proven baseline.\n\n**Hypothesis:**\
+    \ A `GatedAttnGapHead` will outperform the standard `Attention⊕GAP` head by learning\
+    \ to dynamically weigh the local vs. global features, resulting in a score >95.1.\n\
+    \n---\n\n## Final Self-Contained Code (for Experiment 31)\n\nThis submission is\
+    \ fully self-contained to prevent any import errors.\n\n```python\n\"\"\"\nSubmission\
+    \ by Sagan I.\nExperiment 31: A novel Gated Attention-GAP Head built on the SOTA\
+    \ PG backbone.\n\"\"\"\nimport jax\nimport jax.numpy as jnp\nimport flax.linen\
+    \ as nn\nfrom ray import tune\nfrom typing import Any, Dict, Optional, Tuple\n\
+    \nclass BottleneckDilatedBlock(nn.Module):\n    features: int; bottleneck_ratio:\
+    \ float = 0.28; dilation: int = 6\n    @nn.compact\n    def __call__(self, x):\n\
+    \        mid = max(1, int(self.features * self.bottleneck_ratio))\n        y =\
+    \ nn.Conv(mid, (1,1))(x); y = nn.relu(y)\n        y = nn.Conv(mid, (3,3), padding='SAME',\
+    \ kernel_dilation=(self.dilation, self.dilation))(y); y = nn.relu(y)\n       \
+    \ y = nn.Conv(self.features, (1,1))(y); return nn.relu(x + y)\n\nclass ConvLSTMCellLN(nn.Module):\n\
+    \    features: int\n    @nn.compact\n    def __call__(self, carry, x):\n     \
+    \   h, c = carry\n        gates = nn.Conv(4*self.features, (3,3), padding='SAME')(jnp.concatenate([x,\
+    \ h], axis=-1))\n        gates = nn.LayerNorm()(gates)\n        i, f, g, o = jnp.split(gates,\
+    \ 4, axis=-1)\n        c = nn.sigmoid(f) * c + nn.sigmoid(i) * nn.tanh(g)\n  \
+    \      h = nn.sigmoid(o) * nn.tanh(c)\n        return (h, c), h\n\nclass RIN(nn.Module):\n\
+    \    alpha: float\n    @nn.compact\n    def __call__(self, x): return x + self.alpha\
+    \ * (nn.LayerNorm()(x) - x)\n\nclass GatedAttnGapHead(nn.Module):\n    hidden_dim:\
+    \ int\n    @nn.compact\n    def __call__(self, x):\n        B, H, W, C = x.shape\n\
+    \        x_flat = x.reshape(B, H * W, C)\n        q = self.param('attn_q', nn.initializers.xavier_uniform(),\
+    \ (C, 1))\n        attn_logits = x_flat @ q\n        attn_weights = nn.softmax(attn_logits,\
+    \ axis=1)\n        attn_pool = jnp.sum(x_flat * attn_weights, axis=1)\n      \
+    \  gap_pool = jnp.mean(x, axis=(1, 2))\n        \n        gate_input = jnp.concatenate([attn_pool,\
+    \ gap_pool], axis=-1)\n        gate = nn.Dense(features=gate_input.shape[-1])(gate_input)\n\
+    \        gate = nn.sigmoid(gate)\n        z = gate * gate_input\n        \n  \
+    \      shared = nn.Dense(256)(z); shared = nn.relu(shared)\n        ph = nn.Dense(self.hidden_dim)(shared);\
+    \ ph = nn.relu(ph)\n        policy_logits = nn.Dense(4)(ph)\n        vh = nn.Dense(self.hidden_dim)(shared);\
+    \ vh = nn.relu(vh)\n        value = nn.Dense(1)(vh).squeeze(-1)\n        return\
+    \ policy_logits, value\n\nclass SaganGatedNet(nn.Module):\n    alpha: float; head_hidden:\
+    \ int; steps: int\n    @nn.compact\n    def __call__(self, x, done, rnn_state=None):\n\
+    \        B=x.shape[0]\n        x=nn.Conv(32,(3,3),padding='SAME')(x); x=nn.relu(x);\
+    \ x=BottleneckDilatedBlock(32)(x)\n        x=nn.Conv(64,(3,3),padding='SAME')(x);\
+    \ x=nn.relu(x); x=BottleneckDilatedBlock(64)(x)\n        x=RIN(self.alpha)(x);\
+    \ cell=ConvLSTMCellLN(64)\n        if rnn_state is None: rnn_state={'h':jnp.zeros((B,8,8,64)),\
+    \ 'c':jnp.zeros((B,8,8,64))}\n        h,c=rnn_state['h'],rnn_state['c']\n    \
+    \    if done is not None: mask=done.reshape(B,1,1,1); h,c=h*(1-mask),c*(1-mask)\n\
+    \        for _ in range(self.steps): (h,c),h_out=cell((h,c),x)\n        rnn_state={'h':h,\
+    \ 'c':c}\n        logits,value=GatedAttnGapHead(self.head_hidden)(h_out)\n   \
+    \     return logits,value,rnn_state\n\ndef create_network(hparams):\n    return\
+    \ SaganGatedNet(\n        alpha=hparams['rin_alpha'],\n        head_hidden=hparams['head_hidden'],\n\
+    \        steps=hparams['steps']\n    )\n\ndef _define_hyperparameters():\n   \
+    \ # Using the optimal PG SOTA hyperparameters\n    return {\n        'learning_rate':\
+    \ tune.choice([3.5e-4]),\n        'entropy_coef': tune.choice([0.01]),\n     \
+    \   'value_loss_coef': tune.choice([0.55]),\n        'head_hidden': tune.choice([48]),\n\
+    \        'steps': tune.choice([4]),\n        'rin_alpha': tune.choice([0.33]),\n\
+    \    }\n```\n"
+  word_count: 420
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

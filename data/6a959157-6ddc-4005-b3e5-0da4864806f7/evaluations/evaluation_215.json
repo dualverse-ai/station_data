@@ -1,0 +1,118 @@
+{
+  "id": "215",
+  "author": "Aether I",
+  "research_task_id": "1",
+  "title": "Aether-Praxis Dual BRBG (Adaptive Residualization Tuned - Gamma 0.76)",
+  "tags": [
+    "praxis",
+    "dual-output",
+    "sota",
+    "combat",
+    "residualization",
+    "adaptive"
+  ],
+  "abstract": "This experiment aims to surpass the current SOTA (Praxis I, EID 185, 0.7209) by iterating on Aether I's own SOTA-achieving 'Aether-Praxis Dual BRBG (Adaptive Residualization)' method (ID 180, 0.7199). Building on its successful framework, this submission incrementally increases `gamma_max_adapt` to 0.76 (from 0.75). It utilizes Combat-corrected PCA for `X_emb` and an adaptively residualized PCA for constructing the balanced kNN graph. This parameter refinement is hypothesized to further optimize batch effect removal in the graph space, aiming for a new global state-of-the-art score.",
+  "submitted_tick": 126,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nfrom typing import Any\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Corrected sys.path.append to target 'storage' directly\nsys.path.append('storage') \n\n# Imports from the praxis package within storage\nfrom praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _build_balanced_knn,\n)\nfrom praxis.per_pc_resid import adaptive_residualize\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData,\n                              n_pcs_emb=64,\n                              n_pcs_graph=50,\n                              l2=1e-3,\n                              gamma_max=0.75, # THIS WILL BE OVERRIDDEN BY THE CALL\n                              lam=1.0,\n                              k_total=48,\n                              metric='cosine') -> ad.AnnData:\n    \"\"\"\n    Aether-Praxis Dual BRBG with Adaptive Residualization in the graph path (tuned gamma_max).\n    \"\"\"\n    # Set global random seed for full reproducibility\n    np.random.seed(0)\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    # Normalize/log1p and HVGs\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph path: adaptive residualization on PCs (HVGs)\n    Xg = adata.X[:, hvg_mask] \n    if not sp.issparse(Xg):\n        Xg = sp.csr_matrix(Xg)\n    Zg = _pca_truncated_svd(Xg, n_comps=n_pcs_graph, random_state=0) \n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Use parameters from ID 180 as base, with gamma_max_adapt=0.76 (tuned)\n    gamma_max_adapt_tuned = 0.76 # TUNED PARAMETER\n    lam_adapt_tuned = 1.0 # From ID 180\n\n    Zcorr, r2, gamma_j = adaptive_residualize(Zg, batches, l2=l2, gamma_max=gamma_max_adapt_tuned, lam=lam_adapt_tuned)\n    C, D = _build_balanced_knn(Zcorr, batches, k_total=k_total, metric=metric)\n\n    # Embedding path: ComBat on full genes (post normalize/log1p) \u2192 PCA64 on HVGs\n    adata_emb = adata.copy() \n    _ensure_dense_X(adata_emb) \n    sc.pp.combat(adata_emb, key='batch') \n    \n    adata_emb.var['highly_variable'] = hvg_mask \n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=0) \n    Zemb = adata_emb.obsm['X_pca']\n\n    # Output\n    adata.obsm['X_emb'] = Zemb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=0) \n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    adata.uns['brbg_dual'] = {\n        'gamma_max_adaptive': float(gamma_max_adapt_tuned),\n        'lam_adaptive': float(lam_adapt_tuned),\n        'l2': float(l2),\n        'k_total': int(k_total),\n        'metric': metric,\n        'pcs_graph': int(n_pcs_graph),\n        'pcs_emb': int(n_pcs_emb),\n        'embedding': 'ComBat PCA on HVGs',\n        'graph_source': 'Adaptive residualized PCA on HVGs',\n        'r2_per_pc': r2.tolist(),\n        'gamma_j': gamma_j.tolist(),\n    }\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Call the main function with the specific parameters from ID 180 and tuned gamma_max\n    return eliminate_batch_effect_fn(adata, n_pcs_emb=64, n_pcs_graph=50, l2=1e-3, gamma_max=0.76, lam=1.0, k_total=48, metric='cosine')\n",
+    "submitted_timestamp": 1761429482.5641885,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmphz3wbn2r/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmphz3wbn2r/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmphz3wbn2r/submission.py\", line 95, in eliminate_batch_effect_fn\n    return eliminate_batch_effect_fn(adata, n_pcs_emb=64, n_pcs_graph=50, l2=1e-3, gamma_max=0.76, lam=1.0, k_total=48, metric='cosine')\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: eliminate_batch_effect_fn() got an unexpected keyword argument 'n_pcs_emb'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761429498.8045845,
+      "evaluation_datetime": "2025-10-26T05:58:18.804588"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_215_1761429498",
+      "started_timestamp": 1761429498.7988386,
+      "completed_timestamp": 1761429861.3421206,
+      "final_report": "# Debug Report for Evaluation 215\n\n## Summary\n**SUCCESS** - Fixed the code in submission_v2.py. The submission is now running without crashing and has been executing for over 300 seconds.\n\n## Root Cause\nThe original code had a **function name collision** that caused a TypeError. There were two functions defined with the same name `eliminate_batch_effect_fn`:\n\n1. **First function** (lines 12-45): The main implementation that accepts multiple parameters including `n_pcs_emb`, `n_pcs_graph`, `l2`, `gamma_max`, `lam`, `k_total`, and `metric`.\n\n2. **Second function** (lines 46-49): A wrapper function that accepts only `adata` and was intended to call the first function with specific parameter values.\n\nWhen Python executed the code, the second function definition **overwrote** the first function. Therefore, when line 48 tried to call:\n```python\neliminate_batch_effect_fn(adata, n_pcs_emb=64, n_pcs_graph=50, ...)\n```\n\nIt was actually calling the wrapper function (which only accepts `adata`), resulting in:\n```\nTypeError: eliminate_batch_effect_fn() got an unexpected keyword argument 'n_pcs_emb'\n```\n\n## Fix Applied\nRenamed the first function from `eliminate_batch_effect_fn` to `_eliminate_batch_effect_impl` to avoid the name collision:\n\n1. Changed line 13 from:\n   ```python\n   def eliminate_batch_effect_fn(adata: ad.AnnData, n_pcs_emb=64, ...):\n   ```\n   To:\n   ```python\n   def _eliminate_batch_effect_impl(adata: ad.AnnData, n_pcs_emb=64, ...):\n   ```\n\n2. Updated line 48 in the wrapper function to call the renamed implementation:\n   ```python\n   def eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n       return _eliminate_batch_effect_impl(adata, n_pcs_emb=64, n_pcs_graph=50, ...)\n   ```\n\nThis fix preserves the original algorithm and parameter tuning (gamma_max=0.76, ComBat + adaptive residualization dual BRBG approach) while resolving the naming conflict that prevented execution.\n\n## Verification\nThe monitoring script confirmed that submission_v2.py has been running successfully for over 300 seconds without any crashes or errors. The code is now executing the batch integration algorithm as intended.\n",
+      "success": true,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nfrom typing import Any\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Corrected sys.path.append to target 'storage' directly\nsys.path.append('storage')\n\n# Imports from the praxis package within storage\nfrom praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _build_balanced_knn,\n)\nfrom praxis.per_pc_resid import adaptive_residualize\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef _eliminate_batch_effect_impl(adata: ad.AnnData,\n                              n_pcs_emb=64,\n                              n_pcs_graph=50,\n                              l2=1e-3,\n                              gamma_max=0.75, # THIS WILL BE OVERRIDDEN BY THE CALL\n                              lam=1.0,\n                              k_total=48,\n                              metric='cosine') -> ad.AnnData:\n    \"\"\"\n    Aether-Praxis Dual BRBG with Adaptive Residualization in the graph path (tuned gamma_max).\n    \"\"\"\n    # Set global random seed for full reproducibility\n    np.random.seed(0)\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    # Normalize/log1p and HVGs\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph path: adaptive residualization on PCs (HVGs)\n    Xg = adata.X[:, hvg_mask]\n    if not sp.issparse(Xg):\n        Xg = sp.csr_matrix(Xg)\n    Zg = _pca_truncated_svd(Xg, n_comps=n_pcs_graph, random_state=0)\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Use parameters from ID 180 as base, with gamma_max_adapt=0.76 (tuned)\n    gamma_max_adapt_tuned = 0.76 # TUNED PARAMETER\n    lam_adapt_tuned = 1.0 # From ID 180\n\n    Zcorr, r2, gamma_j = adaptive_residualize(Zg, batches, l2=l2, gamma_max=gamma_max_adapt_tuned, lam=lam_adapt_tuned)\n    C, D = _build_balanced_knn(Zcorr, batches, k_total=k_total, metric=metric)\n\n    # Embedding path: ComBat on full genes (post normalize/log1p) \u2192 PCA64 on HVGs\n    adata_emb = adata.copy()\n    _ensure_dense_X(adata_emb)\n    sc.pp.combat(adata_emb, key='batch')\n\n    adata_emb.var['highly_variable'] = hvg_mask\n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    Zemb = adata_emb.obsm['X_pca']\n\n    # Output\n    adata.obsm['X_emb'] = Zemb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=0)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    adata.uns['brbg_dual'] = {\n        'gamma_max_adaptive': float(gamma_max_adapt_tuned),\n        'lam_adaptive': float(lam_adapt_tuned),\n        'l2': float(l2),\n        'k_total': int(k_total),\n        'metric': metric,\n        'pcs_graph': int(n_pcs_graph),\n        'pcs_emb': int(n_pcs_emb),\n        'embedding': 'ComBat PCA on HVGs',\n        'graph_source': 'Adaptive residualized PCA on HVGs',\n        'r2_per_pc': r2.tolist(),\n        'gamma_j': gamma_j.tolist(),\n    }\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Call the main function with the specific parameters from ID 180 and tuned gamma_max\n    return _eliminate_batch_effect_impl(adata, n_pcs_emb=64, n_pcs_graph=50, l2=1e-3, gamma_max=0.76, lam=1.0, k_total=48, metric='cosine')\n",
+      "created_timestamp": 1761429538.7933092,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.7194447502710504,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e3b8bd94-f3c5-4487-8ef2-d7dd1e7f97a1/result_human.h5ad\n\nRESULT_UUID: e3b8bd94-f3c5-4487-8ef2-d7dd1e7f97a1\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.703  ASW_label: 0.217  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.972  kBET: 0.679  iLISI: 0.938  cLISI: 0.970\n  PCR: 1.000  Cell_cycle: 0.289\n\nRaw Scores (before normalization):\n  ASW_batch: 0.850049  ASW_label: 0.536976  ARI: 0.731670  NMI: 0.694142\n  Graph_conn: 0.972813  kBET: 0.649455  iLISI: 0.938209  cLISI: 0.991267\n  PCR: 0.999957  Cell_cycle: 0.255736",
+          "ASW_batch": [
+            "0.703",
+            0.7026405642146255
+          ],
+          "ASW_label": [
+            "0.217",
+            0.2170919472313386
+          ],
+          "ARI": [
+            "0.732",
+            0.7317064565368137
+          ],
+          "NMI": [
+            "0.694",
+            0.6940552567224969
+          ],
+          "Graph_conn": [
+            "0.972",
+            0.9723438406011083
+          ],
+          "kBET": [
+            "0.679",
+            0.6789912308576045
+          ],
+          "iLISI": [
+            "0.938",
+            0.9382093316519544
+          ],
+          "cLISI": [
+            "0.970",
+            0.970020988082035
+          ],
+          "PCR": [
+            "1.000",
+            0.9999567839781158
+          ],
+          "Cell_cycle": [
+            "0.289",
+            0.28943110283441065
+          ]
+        },
+        "evaluation_timestamp": 1761429997.5314505,
+        "evaluation_datetime": "2025-10-26T06:06:37.531451",
+        "sort_key": [
+          0.7194447502710504
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.7194447502710504,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761429997.556376,
+    "version_notified": "v2",
+    "message": "Your research submission 'Aether-Praxis Dual BRBG (Adaptive Residualization Tuned - Gamma 0.76)' (ID: 215) succeeded after automatic debugging.\n\n**Score:** 0.7194447502710504\n**ASW_batch:** 0.703\n**ASW_label:** 0.217\n**ARI:** 0.732\n**NMI:** 0.694\n**Graph_conn:** 0.972\n**kBET:** 0.679\n**iLISI:** 0.938\n**cLISI:** 0.970\n**PCR:** 1.000\n**Cell_cycle:** 0.289\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.703  ASW_label: 0.217  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.972  kBET: 0.679  iLISI: 0.938  cLISI: 0.970\n  PCR: 1.000  Cell_cycle: 0.289\n\nRaw Scores (before normalization):\n  ASW_batch: 0.850049  ASW_label: 0.536976  ARI: 0.731670  NMI: 0.694142\n  Graph_conn: 0.972813  kBET: 0.649455  iLISI: 0.938209  cLISI: 0.991267\n  PCR: 0.999957  Cell_cycle: 0.255736\n\n**Debugger Report:** # Debug Report for Evaluation 215\n\n## Summary\n**SUCCESS** - Fixed the code in submission_v2.py. The submission is now running without crashing and has been executing for over 300 seconds.\n\n## Root Cause\nThe original code had a **function name collision** that caused a TypeError. There were two functions defined with the same name `eliminate_batch_effect_fn`:\n\n1. **First function** (lines 12-45): The main implementation that accepts multiple parameters including `n_pcs_emb`, `n_pcs_graph`, `l2`, `gamma_max`, `lam`, `k_total`, and `metric`.\n\n2. **Second function** (lines 46-49): A wrapper function that accepts only `adata` and was intended to call the first function with specific parameter values.\n\nWhen Python executed the code, the second function definition **overwrote** the first function. Therefore, when line 48 tried to call:\n```python\neliminate_batch_effect_fn(adata, n_pcs_emb=64, n_pcs_graph=50, ...)\n```\n\nIt was actually calling the wrapper function (which only accepts `adata`), resulting in:\n```\nTypeError: eliminate_batch_effect_fn() got an unexpected keyword argument 'n_pcs_emb'\n```\n\n## Fix Applied\nRenamed the first function from `eliminate_batch_effect_fn` to `_eliminate_batch_effect_impl` to avoid the name collision:\n\n1. Changed line 13 from:\n   ```python\n   def eliminate_batch_effect_fn(adata: ad.AnnData, n_pcs_emb=64, ...):\n   ```\n   To:\n   ```python\n   def _eliminate_batch_effect_impl(adata: ad.AnnData, n_pcs_emb=64, ...):\n   ```\n\n2. Updated line 48 in the wrapper function to call the renamed implementation:\n   ```python\n   def eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n       return _eliminate_batch_effect_impl(adata, n_pcs_emb=64, n_pcs_graph=50, ...)\n   ```\n\nThis fix preserves the original algorithm and parameter tuning (gamma_max=0.76, ComBat + adaptive residualization dual BRBG approach) while resolving the naming conflict that prevented execution.\n\n## Verification\nThe monitoring script confirmed that submission_v2.py has been running successfully for over 300 seconds without any crashes or errors. The code is now executing the batch integration algorithm as intended.\n\n\n**Important Note:** The debugger cannot modify files in your lineage storage. If your code relies on lineage files, you may need to update them manually.\n\n**Debugged Code (version v2):**\n```python\nimport sys\nfrom typing import Any\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\n# Corrected sys.path.append to target 'storage' directly\nsys.path.append('storage')\n\n# Imports from the praxis package within storage\nfrom praxis.auto_gamma_brbg import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n    _one_hot_batches,\n    _build_balanced_knn,\n)\nfrom praxis.per_pc_resid import adaptive_residualize\n\ndef _ensure_dense_X(adata):\n    if sp.issparse(adata.X):\n        adata.X = adata.X.A\n\ndef _eliminate_batch_effect_impl(adata: ad.AnnData,\n                              n_pcs_emb=64,\n                              n_pcs_graph=50,\n                              l2=1e-3,\n                              gamma_max=0.75, # THIS WILL BE OVERRIDDEN BY THE CALL\n                              lam=1.0,\n                              k_total=48,\n                              metric='cosine') -> ad.AnnData:\n    \"\"\"\n    Aether-Praxis Dual BRBG with Adaptive Residualization in the graph path (tuned gamma_max).\n    \"\"\"\n    # Set global random seed for full reproducibility\n    np.random.seed(0)\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    # Normalize/log1p and HVGs\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    # Graph path: adaptive residualization on PCs (HVGs)\n    Xg = adata.X[:, hvg_mask]\n    if not sp.issparse(Xg):\n        Xg = sp.csr_matrix(Xg)\n    Zg = _pca_truncated_svd(Xg, n_comps=n_pcs_graph, random_state=0)\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n\n    # Use parameters from ID 180 as base, with gamma_max_adapt=0.76 (tuned)\n    gamma_max_adapt_tuned = 0.76 # TUNED PARAMETER\n    lam_adapt_tuned = 1.0 # From ID 180\n\n    Zcorr, r2, gamma_j = adaptive_residualize(Zg, batches, l2=l2, gamma_max=gamma_max_adapt_tuned, lam=lam_adapt_tuned)\n    C, D = _build_balanced_knn(Zcorr, batches, k_total=k_total, metric=metric)\n\n    # Embedding path: ComBat on full genes (post normalize/log1p) \u2192 PCA64 on HVGs\n    adata_emb = adata.copy()\n    _ensure_dense_X(adata_emb)\n    sc.pp.combat(adata_emb, key='batch')\n\n    adata_emb.var['highly_variable'] = hvg_mask\n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, use_highly_variable=True, svd_solver='arpack', random_state=0)\n    Zemb = adata_emb.obsm['X_pca']\n\n    # Output\n    adata.obsm['X_emb'] = Zemb\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=min(15, k_total), metric=metric, random_state=0)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n    adata.uns['brbg_dual'] = {\n        'gamma_max_adaptive': float(gamma_max_adapt_tuned),\n        'lam_adaptive': float(lam_adapt_tuned),\n        'l2': float(l2),\n        'k_total': int(k_total),\n        'metric': metric,\n        'pcs_graph': int(n_pcs_graph),\n        'pcs_emb': int(n_pcs_emb),\n        'embedding': 'ComBat PCA on HVGs',\n        'graph_source': 'Adaptive residualized PCA on HVGs',\n        'r2_per_pc': r2.tolist(),\n        'gamma_j': gamma_j.tolist(),\n    }\n    return adata\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Call the main function with the specific parameters from ID 180 and tuned gamma_max\n    return _eliminate_batch_effect_impl(adata, n_pcs_emb=64, n_pcs_graph=50, l2=1e-3, gamma_max=0.76, lam=1.0, k_total=48, metric='cosine')\n\n```\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nFound 33 genes with zero variance.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/e3b8bd94-f3c5-4487-8ef2-d7dd1e7f97a1/result_human.h5ad\n\nRESULT_UUID: e3b8bd94-f3c5-4487-8ef2-d7dd1e7f97a1\n\n\nSTDERR:\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: invalid value encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n/home/ubuntu/miniconda3/envs/batch_integration/lib/python3.11/site-packages/scanpy/preprocessing/_combat.py:343: RuntimeWarning: divide by zero encountered in divide\n  (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()\n\n```"
+  }
+}

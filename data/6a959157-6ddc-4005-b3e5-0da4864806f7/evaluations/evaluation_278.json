@@ -1,0 +1,116 @@
+{
+  "id": "278",
+  "author": "Daedalus II",
+  "research_task_id": "1",
+  "title": "Ablation: Order of Operations in Sophia I's SOTA",
+  "tags": [
+    "ablation",
+    "sota-replication",
+    "full-gene-combat",
+    "hvg-selection"
+  ],
+  "abstract": "This is a critical ablation study to test a hypothesis about Sophia I's SOTA method (ID 166). Her method performs ComBat on the full gene set *before* HVG selection. I hypothesize this is the key to her high Cell_cycle score. This experiment inverts that order, performing HVG selection *before* ComBat. I predict this will cause a significant drop in performance, thereby isolating the importance of the full gene set for the correction step.",
+  "submitted_tick": 165,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\n\n# --- Sophia I's helper functions and robust ComBat (ID 166) ---\ndef get_robust_combat_corrected_matrix(adata_in: ad.AnnData) -> np.ndarray:\n    adata = adata_in.copy()\n    # This function now expects HVG-selected data\n    data = adata.X.toarray().T if sp.issparse(adata.X) else adata.X.copy().T\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n    u_batches, batch_counts = np.unique(batches, return_counts=True)\n    n_batches = len(u_batches)\n    batch_design = np.eye(n_batches)[batches]\n    n_genes, n_samples = data.shape\n    B_hat = np.linalg.solve(batch_design.T @ batch_design, batch_design.T)\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = (B_hat @ data.T).T\n    var_pooled = np.sum((data - batch_means[:, batches])**2, axis=1) / (n_samples - n_batches)\n    stand_mean = grand_mean.dot(np.ones((1, n_samples)))\n    s_data = (data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n    gamma_hat = (B_hat @ s_data.T).T\n    delta_hat = [np.var(s_data[:, batches == i], axis=1, ddof=1) for i in u_batches]\n    gamma_bar, t2 = np.mean(gamma_hat, axis=1), np.var(gamma_hat, axis=1, ddof=1)\n    def _aprior(d): m, s2 = np.mean(d), np.var(d); return (2 * s2 + m**2) / (s2 if s2 > 0 else 1e-8)\n    def _bprior(d): m, s2 = np.mean(d), np.var(d); return (m * s2 + m**3) / (s2 if s2 > 0 else 1e-8)\n    a_prior, b_prior = [_aprior(d) for d in delta_hat], [_bprior(d) for d in delta_hat]\n    gamma_star, delta_star = np.zeros_like(gamma_hat), np.zeros_like(gamma_hat)\n    for i, batch_idx in enumerate(u_batches):\n        n = batch_counts[i]; g_old, d_old = gamma_hat[:, i], delta_hat[i]; change, count = 1, 0\n        while change > 1e-4 and count < 100:\n            g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old + 1e-8); sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\n            d_new = (0.5 * sum2 + b_prior[i]) / (n / 2.0 + a_prior[i] - 1.0); change = max(np.abs(g_new - g_old).max(), np.abs(d_new - d_old).max()); g_old, d_old = g_new, d_new; count += 1\n        gamma_star[:, i], delta_star[:, i] = g_old, d_old\n    bayesdata = s_data.copy()\n    for i, batch_idx in enumerate(u_batches): bayesdata[:, batches == batch_idx] = (s_data[:, batches == batch_idx] - gamma_star[:, i, np.newaxis]) / np.sqrt(delta_star[:, i, np.newaxis] + 1e-8)\n    X_corrected = bayesdata * np.sqrt(var_pooled[:, np.newaxis]) + stand_mean\n    return np.nan_to_num(X_corrected.T)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Ablation Study: HVG selection BEFORE ComBat...\")\n    \n    # Use Praxis I's SOTA graph config, which is part of Sophia's SOTA\n    n_pcs_emb=64\n    n_pcs_graph=50\n    gamma=0.74\n    l2=1e-3\n    k_total=48 # Using Sophia's k, not Praxis's final k=45, to match ID 166\n    metric='cosine'\n    random_state = 0\n\n    adata_proc = adata.copy()\n    if 'counts' in adata_proc.layers:\n        adata_proc.X = adata_proc.layers['counts'].copy()\n    sc.pp.normalize_total(adata_proc, target_sum=1e4)\n    sc.pp.log1p(adata_proc)\n\n    # --- HYPOTHESIS TEST: Invert the order of operations ---\n    # 1. Select HVGs first (on uncorrected data)\n    print(\"Step 1: Selecting HVGs...\")\n    sc.pp.highly_variable_genes(adata_proc, n_top_genes=2000, flavor='seurat_v3', batch_key='batch', subset=True)\n    \n    # 2. Run ComBat on the HVG subset\n    print(\"Step 2: Running ComBat on HVG subset...\")\n    X_combat_corrected_hvg = get_robust_combat_corrected_matrix(adata_proc)\n    \n    # --- Embedding Path ---\n    print(\"Step 3: Generating embedding...\")\n    adata_emb = ad.AnnData(X=X_combat_corrected_hvg, obs=adata_proc.obs)\n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=random_state)\n    Z_emb = adata_emb.obsm['X_pca']\n\n    # --- Graph Path (replicates Sophia I's logic, but on HVG-first data) ---\n    print(\"Step 4: Generating graph...\")\n    adata_graph = adata_proc.copy() # This already has HVGs selected\n    Z_graph = _pca_truncated_svd(adata_graph.X, n_comps=n_pcs_graph, random_state=random_state)\n    batches = np.asarray(adata_graph.obs['batch'].astype('category').values)\n    from praxis.brbg_common import _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn_equal\n    B_onehot, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    Z_corr_graph = Z_graph - gamma * Z_hat\n    C, D = _build_balanced_knn_equal(Z_corr_graph, batches, k_total=k_total, metric=metric)\n\n    # --- Final Output ---\n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        output.obsp['connectivities'] = C.tocsr()\n        output.obsp['distances'] = D.tocsr()\n        output.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    return output\n",
+    "submitted_timestamp": 1761440247.6227715,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAblation Study: HVG selection BEFORE ComBat...\nStep 1: Selecting HVGs...\nStep 2: Running ComBat on HVG subset...\nStep 3: Generating embedding...\nStep 4: Generating graph...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpl75de_tp/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpl75de_tp/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpl75de_tp/submission.py\", line 77, in eliminate_batch_effect_fn\n    Z_graph = _pca_truncated_svd(adata_graph.X, n_comps=n_pcs_graph, random_state=random_state)\n              ^^^^^^^^^^^^^^^^^^\nNameError: name '_pca_truncated_svd' is not defined\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761440264.1227112,
+      "evaluation_datetime": "2025-10-26T08:57:44.122714"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_278_1761440264",
+      "started_timestamp": 1761440264.1195323,
+      "completed_timestamp": 1761440851.5204105,
+      "final_report": null,
+      "success": false,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "import sys\nsys.path.append('storage')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\n\n# --- Sophia I's helper functions and robust ComBat (ID 166) ---\ndef get_robust_combat_corrected_matrix(adata_in: ad.AnnData) -> np.ndarray:\n    adata = adata_in.copy()\n    # This function now expects HVG-selected data\n    data = adata.X.toarray().T if sp.issparse(adata.X) else adata.X.copy().T\n    batches = adata.obs['batch'].astype('category').cat.codes.values\n    u_batches, batch_counts = np.unique(batches, return_counts=True)\n    n_batches = len(u_batches)\n    batch_design = np.eye(n_batches)[batches]\n    n_genes, n_samples = data.shape\n    B_hat = np.linalg.solve(batch_design.T @ batch_design, batch_design.T)\n    grand_mean = np.mean(data, axis=1, keepdims=True)\n    batch_means = (B_hat @ data.T).T\n    var_pooled = np.sum((data - batch_means[:, batches])**2, axis=1) / (n_samples - n_batches)\n    stand_mean = grand_mean.dot(np.ones((1, n_samples)))\n    s_data = (data - batch_means[:, batches]) / np.sqrt(var_pooled[:, np.newaxis] + 1e-8)\n    gamma_hat = (B_hat @ s_data.T).T\n    delta_hat = [np.var(s_data[:, batches == i], axis=1, ddof=1) for i in u_batches]\n    gamma_bar, t2 = np.mean(gamma_hat, axis=1), np.var(gamma_hat, axis=1, ddof=1)\n    def _aprior(d): m, s2 = np.mean(d), np.var(d); return (2 * s2 + m**2) / (s2 if s2 > 0 else 1e-8)\n    def _bprior(d): m, s2 = np.mean(d), np.var(d); return (m * s2 + m**3) / (s2 if s2 > 0 else 1e-8)\n    a_prior, b_prior = [_aprior(d) for d in delta_hat], [_bprior(d) for d in delta_hat]\n    gamma_star, delta_star = np.zeros_like(gamma_hat), np.zeros_like(gamma_hat)\n    for i, batch_idx in enumerate(u_batches):\n        n = batch_counts[i]; g_old, d_old = gamma_hat[:, i], delta_hat[i]; change, count = 1, 0\n        while change > 1e-4 and count < 100:\n            g_new = (t2 * n * g_old + d_old * gamma_bar) / (t2 * n + d_old + 1e-8); sum2 = np.sum((s_data[:, batches == batch_idx] - g_new[:, np.newaxis])**2, axis=1)\n            d_new = (0.5 * sum2 + b_prior[i]) / (n / 2.0 + a_prior[i] - 1.0); change = max(np.abs(g_new - g_old).max(), np.abs(d_new - d_old).max()); g_old, d_old = g_new, d_new; count += 1\n        gamma_star[:, i], delta_star[:, i] = g_old, d_old\n    bayesdata = s_data.copy()\n    for i, batch_idx in enumerate(u_batches): bayesdata[:, batches == batch_idx] = (s_data[:, batches == batch_idx] - gamma_star[:, i, np.newaxis]) / np.sqrt(delta_star[:, i, np.newaxis] + 1e-8)\n    X_corrected = bayesdata * np.sqrt(var_pooled[:, np.newaxis]) + stand_mean\n    return np.nan_to_num(X_corrected.T)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Ablation Study: HVG selection BEFORE ComBat...\")\n\n    # Use Praxis I's SOTA graph config, which is part of Sophia's SOTA\n    n_pcs_emb=64\n    n_pcs_graph=50\n    gamma=0.74\n    l2=1e-3\n    k_total=48 # Using Sophia's k, not Praxis's final k=45, to match ID 166\n    metric='cosine'\n    random_state = 0\n\n    adata_proc = adata.copy()\n    if 'counts' in adata_proc.layers:\n        adata_proc.X = adata_proc.layers['counts'].copy()\n    sc.pp.normalize_total(adata_proc, target_sum=1e4)\n    sc.pp.log1p(adata_proc)\n\n    # --- HYPOTHESIS TEST: Invert the order of operations ---\n    # 1. Select HVGs first (on uncorrected data)\n    print(\"Step 1: Selecting HVGs...\")\n    sc.pp.highly_variable_genes(adata_proc, n_top_genes=2000, flavor='seurat_v3', batch_key='batch', subset=True)\n\n    # 2. Run ComBat on the HVG subset\n    print(\"Step 2: Running ComBat on HVG subset...\")\n    X_combat_corrected_hvg = get_robust_combat_corrected_matrix(adata_proc)\n\n    # --- Embedding Path ---\n    print(\"Step 3: Generating embedding...\")\n    adata_emb = ad.AnnData(X=X_combat_corrected_hvg, obs=adata_proc.obs)\n    sc.pp.pca(adata_emb, n_comps=n_pcs_emb, svd_solver='arpack', random_state=random_state)\n    Z_emb = adata_emb.obsm['X_pca']\n\n    # --- Graph Path (replicates Sophia I's logic, but on HVG-first data) ---\n    print(\"Step 4: Generating graph...\")\n    adata_graph = adata_proc.copy() # This already has HVGs selected\n    Z_graph = _pca_truncated_svd(adata_graph.X, n_comps=n_pcs_graph, random_state=random_state)\n    batches = np.asarray(adata_graph.obs['batch'].astype('category').values)\n    from praxis.brbg_common import _one_hot_batches, _ridge_batch_fit_predict, _build_balanced_knn_equal\n    B_onehot, _ = _one_hot_batches(batches)\n    Z_hat, _ = _ridge_batch_fit_predict(B_onehot, Z_graph, l2=l2)\n    Z_corr_graph = Z_graph - gamma * Z_hat\n    C, D = _build_balanced_knn_equal(Z_corr_graph, batches, k_total=k_total, metric=metric)\n\n    # --- Final Output ---\n    output = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    if C is not None and D is not None:\n        output.obsp['connectivities'] = C.tocsr()\n        output.obsp['distances'] = D.tocsr()\n        output.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n    return output\n\ndef _pca_truncated_svd(X, n_comps=50, random_state=0):\n    n_comps = max(2, min(n_comps, X.shape[1]-1 if X.shape[1] > 1 else 2))\n    svd = TruncatedSVD(n_components=n_comps, n_iter=7, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z\n",
+      "created_timestamp": 1761440414.6624823,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.7145170148589838,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAblation Study: HVG selection BEFORE ComBat...\nStep 1: Selecting HVGs...\nStep 2: Running ComBat on HVG subset...\nStep 3: Generating embedding...\nStep 4: Generating graph...\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/13509e7b-f68a-4138-97de-43681f50f2cf/result_human.h5ad\n\nRESULT_UUID: 13509e7b-f68a-4138-97de-43681f50f2cf\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.693  ASW_label: 0.217  ARI: 0.727  NMI: 0.690\n  Graph_conn: 0.965  kBET: 0.639  iLISI: 0.930  cLISI: 0.967\n  PCR: 1.000  Cell_cycle: 0.318\n\nRaw Scores (before normalization):\n  ASW_batch: 0.845559  ASW_label: 0.536834  ARI: 0.727081  NMI: 0.689896\n  Graph_conn: 0.965688  kBET: 0.611439  iLISI: 0.929825  cLISI: 0.990480\n  PCR: 1.000000  Cell_cycle: 0.280022",
+          "ASW_batch": [
+            "0.693",
+            0.6926724787468344
+          ],
+          "ASW_label": [
+            "0.217",
+            0.21684515010516883
+          ],
+          "ARI": [
+            "0.727",
+            0.7271178963229148
+          ],
+          "NMI": [
+            "0.690",
+            0.6898086123247427
+          ],
+          "Graph_conn": [
+            "0.965",
+            0.9650954623540443
+          ],
+          "kBET": [
+            "0.639",
+            0.6385397896414953
+          ],
+          "iLISI": [
+            "0.930",
+            0.9298245614035086
+          ],
+          "cLISI": [
+            "0.967",
+            0.9673212776908798
+          ],
+          "PCR": [
+            "1.000",
+            0.9999998030526395
+          ],
+          "Cell_cycle": [
+            "0.318",
+            0.31794511694760974
+          ]
+        },
+        "evaluation_timestamp": 1761440724.7406027,
+        "evaluation_datetime": "2025-10-26T09:05:24.740605",
+        "sort_key": [
+          0.7145170148589838
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.7145170148589838,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761440851.535975,
+    "version_notified": "original",
+    "message": "Your research submission 'Ablation: Order of Operations in Sophia I's SOTA' (ID: 278) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAblation Study: HVG selection BEFORE ComBat...\nStep 1: Selecting HVGs...\nStep 2: Running ComBat on HVG subset...\nStep 3: Generating embedding...\nStep 4: Generating graph...\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpl75de_tp/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpl75de_tp/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpl75de_tp/submission.py\", line 77, in eliminate_batch_effect_fn\n    Z_graph = _pca_truncated_svd(adata_graph.X, n_comps=n_pcs_graph, random_state=random_state)\n              ^^^^^^^^^^^^^^^^^^\nNameError: name '_pca_truncated_svd' is not defined\n\n```"
+  }
+}

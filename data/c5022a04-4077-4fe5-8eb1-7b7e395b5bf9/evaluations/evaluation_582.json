@@ -1,0 +1,45 @@
+{
+  "id": "582",
+  "author": "Socrates I",
+  "research_task_id": "1",
+  "title": "Two-Stage Optimization v2: Lightweight SLSQP Prospecting",
+  "tags": [
+    "slsqp",
+    "two-stage optimization",
+    "prospecting",
+    "iterative optimization"
+  ],
+  "abstract": "The previous two-stage attempt failed due to a poor heuristic in the prospecting stage. This submission corrects that flaw by replacing the heuristic with a more faithful evaluation method. The hypothesis is that a 'lightweight' SLSQP run is a better proxy for final performance. Stage 1 now prospects by running the SLSQP optimizer on many hybrid seeds for a very limited number of iterations (maxiter=20). Stage 2 then takes the best-performing prospects from this initial screening and runs a full, high-precision SLSQP optimization on them. This refined architecture should be more effective at identifying high-potential candidates.",
+  "submitted_tick": 351,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef objective_function(x):\n    return -np.sum(x[64:])\n\ndef full_constraints(x):\n    n = 32\n    centers = x[:64].reshape((n, 2))\n    radii = x[64:]\n    boundary_constraints = np.concatenate([\n        centers[:, 0] - radii, 1 - centers[:, 0] - radii,\n        centers[:, 1] - radii, 1 - centers[:, 1] - radii\n    ])\n    diff = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]\n    dist_sq = np.sum(diff**2, axis=-1)\n    indices = np.triu_indices(n, k=1)\n    rad_sum_sq = (radii[indices[0]] + radii[indices[1]])**2\n    overlap_constraints = dist_sq[indices] - rad_sum_sq\n    return np.concatenate([boundary_constraints, overlap_constraints])\n\ndef perturbed_grid_seeding(n, seed):\n    rng = np.random.default_rng(seed)\n    centers = []\n    for r in range(6):\n        for c in range(6):\n            if len(centers) < n: centers.append([0.1 + c*0.16, 0.1 + r*0.16])\n    centers = np.array(centers) + rng.uniform(-0.04, 0.04, (n, 2))\n    return centers\n\ndef farthest_point_seeding(n, seed):\n    rng = np.random.default_rng(seed)\n    points = np.zeros((n, 2)); points[0] = rng.random(2)\n    for i in range(1, n):\n        best_c = None; max_min_d = -1\n        for _ in range(100):\n            c = rng.random(2)\n            min_d = np.min(np.linalg.norm(points[:i] - c, axis=1))\n            if min_d > max_min_d: max_min_d = min_d; best_c = c\n        points[i] = best_c\n    return points\n\ndef construct_packing() -> tuple:\n    n = 32\n    num_prospects = 64\n    num_elites = 6\n    \n    start_time = time.time()\n    \n    # --- STAGE 1: LIGHTWEIGHT SLSQP PROSPECTING ---\n    prospects = []\n    for i in range(num_prospects):\n        if time.time() - start_time > 1000: break # Leave time for refining\n        \n        seed = int(time.time() * 1000) + i\n        if i % 2 == 0:\n            initial_centers = perturbed_grid_seeding(n, seed)\n        else:\n            initial_centers = farthest_point_seeding(n, seed)\n        \n        initial_radii = np.full(n, 0.05)\n        x0 = np.concatenate([initial_centers.flatten(), initial_radii])\n        bounds = [(0, 1)] * (2*n) + [(0, 0.5)] * n\n        cons = [{'type': 'ineq', 'fun': full_constraints}]\n        \n        # Run a very short optimization\n        result = minimize(objective_function, x0, method='SLSQP', bounds=bounds, constraints=cons, \n                            options={'maxiter': 20, 'ftol': 1e-4}) # Lightweight run\n        \n        if result.success:\n            prospects.append({'x': result.x, 'score': -result.fun})\n    \n    if not prospects: # Fallback\n        return np.random.rand(n, 2), np.full(n, 0.01)\n        \n    # Select elites\n    prospects.sort(key=lambda p: p['score'], reverse=True)\n    elites = prospects[:num_elites]\n    \n    # --- STAGE 2: FULL REFINING ---\n    best_score = -np.inf\n    best_solution = None\n    for elite in elites:\n        if time.time() - start_time > 1150: break\n        \n        x0 = elite['x'] # Start from the slightly optimized state\n        bounds = [(0, 1)] * (2*n) + [(0, 0.5)] * n\n        cons = [{'type': 'ineq', 'fun': full_constraints}]\n        \n        result = minimize(objective_function, x0, method='SLSQP', bounds=bounds, constraints=cons, \n                            options={'maxiter': 300, 'ftol': 1e-8}) # Full run\n                            \n        if result.success and -result.fun > best_score:\n            best_score = -result.fun\n            best_solution = result.x\n\n    if best_solution is None:\n        best_solution = elites[0]['x'] # Fallback to best prospect\n\n    final_centers = best_solution[:64].reshape((n, 2))\n    final_radii = best_solution[64:]\n    final_radii *= (1 - 1e-9)\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760894714.2590108,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.926839201175305,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.926839",
+      "evaluation_timestamp": 1760894734.915569,
+      "evaluation_datetime": "2025-10-20T01:25:34.915572"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.926839201175305,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760894734.9349234,
+    "version_notified": "original",
+    "message": "Your research submission 'Two-Stage Optimization v2: Lightweight SLSQP Prospecting' (ID: 582) has been evaluated.\n\n**Score:** 2.926839201175305\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.926839\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

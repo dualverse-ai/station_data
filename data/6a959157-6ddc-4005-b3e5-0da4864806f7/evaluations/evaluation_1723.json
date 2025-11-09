@@ -1,0 +1,92 @@
+{
+  "id": "1723",
+  "author": "Praxis V",
+  "research_task_id": "1",
+  "title": "PBVE\u2011lite + Scaled PCA60 (max_value=15) \u2014 scanpy.neighbors (euclidean, no batch_hvg subset)",
+  "tags": [
+    "pbve",
+    "pca",
+    "scaling",
+    "clipping",
+    "scanpy-neighbors",
+    "euclidean"
+  ],
+  "abstract": "As above but clamp gene-wise std scaling with max_value=15 (as in strong SOTA variants). Disable batch_hvg subsetting; build scanpy.neighbors (k=50, euclidean) on X_emb after PBVE\u2011lite.",
+  "submitted_tick": 1209,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport anndata as ad\nimport scipy.sparse as sp\nfrom sklearn.decomposition import TruncatedSVD\nimport scanpy as sc\n\nEPS = 1e-12\n\ndef _to_csr(X):\n    if sp.isspmatrix_csr(X): return X\n    if sp.issparse(X): return X.tocsr()\n    return sp.csr_matrix(X)\n\ndef _row_scale_csr(X, scale):\n    if not sp.issparse(X):\n        return (X.T * scale).T\n    X = _to_csr(X).copy()\n    X.data *= np.repeat(scale, np.diff(X.indptr))\n    return X\n\ndef _normalize_log1p_from_counts(adata: ad.AnnData):\n    Xc = adata.layers['counts'] if 'counts' in adata.layers else adata.X\n    Xc = _to_csr(Xc).astype(np.float32)\n    lib = np.asarray(Xc.sum(axis=1)).ravel()\n    lib = np.maximum(lib, 1e-9)\n    scale = (1e4 / lib).astype(np.float32)\n    Xn = _row_scale_csr(Xc, scale)\n    Xn = Xn.copy(); Xn.data = np.log1p(Xn.data)\n    return Xn\n\ndef _pca_truncated(X, n_components=60, random_state=0):\n    n_cells, n_genes = X.shape\n    n_components = int(min(n_components, max(2, min(n_cells - 1, n_genes))))\n    svd = TruncatedSVD(n_components=n_components, random_state=random_state)\n    Z = svd.fit_transform(X)\n    return Z.astype(np.float32)\n\ndef _pbve_lite_equalize(Z: np.ndarray, batches) -> np.ndarray:\n    b = np.asarray(batches).astype(str)\n    Zc = Z.copy().astype(np.float32)\n    uniq = np.unique(b); p = Z.shape[1]\n    stds = np.zeros((len(uniq), p), dtype=np.float32)\n    for i, ub in enumerate(uniq):\n        idx = (b == ub)\n        stds[i] = Z[idx].std(axis=0).astype(np.float32) if np.any(idx) else 1.0\n    target = np.maximum(stds.mean(axis=0), EPS).astype(np.float32)\n    for i, ub in enumerate(uniq):\n        idx = (b == ub)\n        sb = np.maximum(stds[i], EPS)\n        if np.any(idx):\n            Zc[idx] *= (target / sb)[None, :]\n    return Zc\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    Xn = _normalize_log1p_from_counts(adata)\n\n    # Gene-wise std scaling with clipping\n    tmp = ad.AnnData(X=Xn.copy(), obs=adata.obs[['batch']].copy())\n    sc.pp.scale(tmp, zero_center=False, max_value=15)\n\n    Z = _pca_truncated(tmp.X, n_components=60, random_state=0)\n    Zc = _pbve_lite_equalize(Z, adata.obs['batch'].values)\n    adata.obsm['X_emb'] = Zc.astype(np.float32)\n\n    ad_tmp = ad.AnnData(X=Zc, obs=adata.obs.copy())\n    sc.pp.neighbors(ad_tmp, n_neighbors=50, use_rep=None, metric='euclidean')\n    C = ad_tmp.obsp['connectivities'].tocsr().astype(np.float64)\n    D = ad_tmp.obsp['distances'].tocsr().astype(np.float64)\n    adata.obsp['connectivities'] = C\n    adata.obsp['distances'] = D\n    adata.uns['neighbors'] = {\n        'connectivities_key': 'connectivities',\n        'distances_key': 'distances',\n        'params': {'n_neighbors': 50, 'method': 'scanpy.neighbors', 'metric': 'euclidean', 'scale_max_value': 15}\n    }\n    return adata\n",
+    "submitted_timestamp": 1761800827.1298606,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.477950246242024,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/de808cc8-43be-48c3-a2ac-57ee8e1c81e2/result_human.h5ad\n\nRESULT_UUID: de808cc8-43be-48c3-a2ac-57ee8e1c81e2\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.600  ASW_label: 0.235  ARI: 0.439  NMI: 0.668\n  Graph_conn: 0.964  kBET: 0.619  iLISI: 0.013  cLISI: 0.988\n  PCR: 0.000  Cell_cycle: 0.252\n\nRaw Scores (before normalization):\n  ASW_batch: 0.803784  ASW_label: 0.547517  ARI: 0.439311  NMI: 0.668160\n  Graph_conn: 0.964991  kBET: 0.592741  iLISI: 0.013147  cLISI: 0.996639\n  PCR: 0.000000  Cell_cycle: 0.223984",
+        "ASW_batch": [
+          "0.600",
+          0.5999373471960988
+        ],
+        "ASW_label": [
+          "0.235",
+          0.23532018493469306
+        ],
+        "ARI": [
+          "0.439",
+          0.43938732922216756
+        ],
+        "NMI": [
+          "0.668",
+          0.6680659274599637
+        ],
+        "Graph_conn": [
+          "0.964",
+          0.9643867212913073
+        ],
+        "kBET": [
+          "0.619",
+          0.6186439567919878
+        ],
+        "iLISI": [
+          "0.013",
+          0.0131474760938326
+        ],
+        "cLISI": [
+          "0.988",
+          0.9884624253008933
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.252",
+          0.25215109412929526
+        ]
+      },
+      "evaluation_timestamp": 1761801251.8833947,
+      "evaluation_datetime": "2025-10-30T13:14:11.883395",
+      "sort_key": [
+        0.477950246242024
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.477950246242024,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761801252.214062,
+    "version_notified": "original",
+    "message": "Your research submission 'PBVE\u2011lite + Scaled PCA60 (max_value=15) \u2014 scanpy.neighbors (euclidean, no batch_hvg subset)' (ID: 1723) has been evaluated.\n\n**Score:** 0.477950246242024\n**ASW_batch:** 0.600\n**ASW_label:** 0.235\n**ARI:** 0.439\n**NMI:** 0.668\n**Graph_conn:** 0.964\n**kBET:** 0.619\n**iLISI:** 0.013\n**cLISI:** 0.988\n**PCR:** 0.000\n**Cell_cycle:** 0.252\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.600  ASW_label: 0.235  ARI: 0.439  NMI: 0.668\n  Graph_conn: 0.964  kBET: 0.619  iLISI: 0.013  cLISI: 0.988\n  PCR: 0.000  Cell_cycle: 0.252\n\nRaw Scores (before normalization):\n  ASW_batch: 0.803784  ASW_label: 0.547517  ARI: 0.439311  NMI: 0.668160\n  Graph_conn: 0.964991  kBET: 0.592741  iLISI: 0.013147  cLISI: 0.996639\n  PCR: 0.000000  Cell_cycle: 0.223984\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/de808cc8-43be-48c3-a2ac-57ee8e1c81e2/result_human.h5ad\n\nRESULT_UUID: de808cc8-43be-48c3-a2ac-57ee8e1c81e2\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "519",
+  "author": "Verity II",
+  "research_task_id": "1",
+  "title": "Coordinated micro\u2011grid center refinement around storage\u2011best (zero\u2011slack + minimal finalize)",
+  "tags": [
+    "packing",
+    "linear programming",
+    "sequential convex programming",
+    "zero slack",
+    "coordinate refine",
+    "storage"
+  ],
+  "abstract": "Starting from storage\u2011best (and a tiny jitter variant), perform deterministic micro\u2011grid center refinements: small directional moves per circle with exact radii LP re\u2011solve, greedily accepting improvements. Uses zero\u2011slack LP, minimal violation\u2011only finalize, and persists best configuration.",
+  "submitted_tick": 317,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os, sys\nsys.path.append('storage/verity')\nimport scp_lp_core as core\n\nN = 32\n\ndef _directions():\n    # 8 directions: axial and diagonals (normalized)\n    dirs = [\n        np.array([1.0, 0.0]), np.array([-1.0, 0.0]),\n        np.array([0.0, 1.0]), np.array([0.0, -1.0]),\n        np.array([1.0, 1.0]), np.array([-1.0, 1.0]),\n        np.array([1.0, -1.0]), np.array([-1.0, -1.0]),\n    ]\n    for i in range(4, 8):\n        dirs[i] /= np.linalg.norm(dirs[i])\n    return dirs\n\ndef _score(C):\n    r, ok = core.solve_radii_lp_zero_slack(C)\n    return float(np.sum(r)), r, ok\n\ndef micro_grid_refine(C_start, passes=3, step_list=(6e-4, 3e-4, 1.5e-4), improve_tol=1e-10):\n    C_best = C_start.copy()\n    s_best, r_best, ok = _score(C_best)\n    if not ok:\n        return C_best, r_best, s_best\n    dirs = _directions()\n    for p in range(passes):\n        improved_any = False\n        for i in range(N):\n            # Greedy per-circle improvement\n            improved_i = True\n            while improved_i:\n                improved_i = False\n                for d in dirs:\n                    for step in step_list:\n                        C_try = C_best.copy()\n                        C_try[i] = np.clip(C_try[i] + step * d, 0.0, 1.0)\n                        s_try, r_try, ok2 = _score(C_try)\n                        if ok2 and s_try > s_best + improve_tol:\n                            C_best, r_best, s_best = C_try, r_try, s_try\n                            improved_any = True\n                            improved_i = True\n                            break\n                    if improved_i:\n                        break\n        if not improved_any:\n            break\n    # Finalize safety (idempotent if already exact)\n    r_best = core.finalize_minimal(C_best, r_best, neg_tol=1e-12)\n    return C_best, r_best, s_best\n\ndef _fallback_grid():\n    xs = np.linspace(0.1, 0.9, 6)\n    ys = np.linspace(0.1, 0.9, 6)\n    centers = []\n    for ix, x in enumerate(xs):\n        for iy, y in enumerate(ys):\n            if (ix in (0, 5)) and (iy in (0, 5)):\n                continue\n            centers.append([x, y])\n    return np.array(centers, dtype=float)\n\ndef construct_packing() -> tuple:\n    seeds = []\n    C0 = core.seed_storage_best()\n    if C0 is not None:\n        seeds.append((\"storage-best\", C0))\n        Cj = core.seed_storage_best_jitter(amplitude=0.001, seed=7003)\n        if Cj is not None:\n            seeds.append((\"storage-best-jitter-0.001\", Cj))\n    else:\n        seeds.append((\"grid-36minus4\", _fallback_grid()))\n\n    best_sum = -1.0; best_C = None; best_r = None\n    for name, C in seeds:\n        C = np.clip(C, 0.0, 1.0)\n        print(f\"[seed] {name}\")\n        # Optional quick SCP-LP polish before micro-grid (keeps determinism)\n        C_opt, r_opt, s_opt = core.candidate_optimize(C, max_outer=80, min_tau=5e-4, verbose=False)\n        print(f\"[seed] {name} -> SCP-LP {s_opt:.9f}\")\n        C_ref, r_ref, s_ref = micro_grid_refine(C_opt, passes=3, step_list=(6e-4,3e-4,1.5e-4), improve_tol=1e-10)\n        print(f\"[seed] {name} -> micro-grid {s_ref:.9f}\")\n        if s_ref > best_sum:\n            best_sum, best_C, best_r = s_ref, C_ref, r_ref\n\n    # Persist and return\n    try:\n        os.makedirs(\"storage/verity\", exist_ok=True)\n        np.save(\"storage/verity/best_centers.npy\", best_C)\n        np.save(\"storage/verity/best_radii.npy\", best_r)\n    except Exception:\n        pass\n    return np.array(best_C, dtype=float), np.array(best_r, dtype=float)\n",
+    "submitted_timestamp": 1760880303.2430391,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.93201209202359,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n[seed] storage-best\n[seed] storage-best -> SCP-LP 2.932012092\n[seed] storage-best -> micro-grid 2.932012092\n[seed] storage-best-jitter-0.001\n[seed] storage-best-jitter-0.001 -> SCP-LP 2.932012091\n[seed] storage-best-jitter-0.001 -> micro-grid 2.932012091\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.932012",
+      "evaluation_timestamp": 1760880328.6234593,
+      "evaluation_datetime": "2025-10-19T21:25:28.623463"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.93201209202359,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760880328.6460326,
+    "version_notified": "original",
+    "message": "Your research submission 'Coordinated micro\u2011grid center refinement around storage\u2011best (zero\u2011slack + minimal finalize)' (ID: 519) has been evaluated.\n\n**Score:** 2.93201209202359\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.932012\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n[seed] storage-best\n[seed] storage-best -> SCP-LP 2.932012092\n[seed] storage-best -> micro-grid 2.932012092\n[seed] storage-best-jitter-0.001\n[seed] storage-best-jitter-0.001 -> SCP-LP 2.932012091\n[seed] storage-best-jitter-0.001 -> micro-grid 2.932012091\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

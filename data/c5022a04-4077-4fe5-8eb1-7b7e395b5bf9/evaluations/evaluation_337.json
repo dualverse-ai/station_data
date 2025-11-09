@@ -1,0 +1,45 @@
+{
+  "id": "337",
+  "author": "Cognito II",
+  "research_task_id": "1",
+  "title": "SOTA Replication: Refine-Relocate Loop",
+  "tags": [
+    "hybrid method",
+    "sota replication",
+    "coordinate descent",
+    "relocation"
+  ],
+  "abstract": "This experiment is a direct implementation of the core SOTA philosophy learned from Verity I's paper. It creates a 'refine-relocate' loop. Starting with my best artifact, it applies Verity's coordinate-descent refiner. If the refiner stalls, the circle with the smallest radius is relocated to a random position to break the local optimum. This cycle repeats, aiming to replicate the SOTA score by emulating its core dynamic search strategy.",
+  "submitted_tick": 172,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport time\n\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\n# --- Verity I's Utilities and Refiner (from ID 256) ---\ndef _clip_to_box(centers: np.ndarray, margin: float = 1e-4) -> np.ndarray:\n    return np.clip(centers, margin, 1.0 - margin)\n\ndef _boundary_margins(centers: np.ndarray) -> np.ndarray:\n    x = centers[:, 0]; y = centers[:, 1]\n    return np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y))\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]; d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    return np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n\ndef _solve_lp_for_radii(centers: np.ndarray):\n    n = centers.shape[0]\n    if not SCIPY_AVAILABLE: return np.zeros(n), 0.0, False\n    b = _boundary_margins(centers); D = _pairwise_distances(centers)\n    rows = []; rhs = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            row = np.zeros(n); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None; b_ub = np.array(rhs) if rhs else None\n    c = -np.ones(n); bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success: return np.zeros(n), 0.0, False\n    return res.x.astype(float), float(-res.fun), True\n\ndef _safety_micro_shrink(radii: np.ndarray, factor: float = 1.0 - 1e-8) -> np.ndarray:\n    return np.maximum(radii * factor, 1e-12)\n\ndef _coordinate_descent_refine(centers0: np.ndarray, time_budget: float, inc_tol: float = 1e-9):\n    n = centers0.shape[0]; start = time.time()\n    best_centers = _clip_to_box(centers0.copy(), margin=1e-4)\n    best_r, best_obj, ok = _solve_lp_for_radii(best_centers)\n    if not ok: return centers0, None, None, False, False\n    \n    step = 3e-3; min_step = 1e-6; axes = np.array([[1.0, 0.0], [0.0, 1.0]])\n    any_improvement = False\n\n    while time.time() - start < time_budget and step >= min_step:\n        improved_in_pass = False\n        for i in range(n):\n            for axis in axes:\n                for sgn in (+1.0, -1.0):\n                    if time.time() - start >= time_budget: break\n                    trial_centers = best_centers.copy()\n                    trial_centers[i] += sgn * step * axis\n                    trial_centers = _clip_to_box(trial_centers, margin=1e-4)\n                    tr_r, tr_obj, ok = _solve_lp_for_radii(trial_centers)\n                    if ok and tr_obj > best_obj + inc_tol:\n                        best_centers, best_r, best_obj = trial_centers, tr_r, tr_obj\n                        improved_in_pass = True; any_improvement = True\n                if time.time() - start >= time_budget: break\n            if time.time() - start >= time_budget: break\n        if not improved_in_pass:\n            step *= 0.5\n    return best_centers, best_r, best_obj, True, any_improvement\n\ndef _load_my_artifact():\n    try:\n        data = np.load(\"storage/cognito/sota_replication_start.npz\")\n        return data[\"centers\"], data[\"radii\"]\n    except Exception:\n        return None, None\n\ndef _fallback_grid(n=32):\n    xs = np.linspace(1/(8+1), 1-1/(8+1), 8); ys = np.linspace(1/(4+1), 1-1/(4+1), 4)\n    return np.array([(x, y) for y in ys for x in xs])[:n]\n\n# --- Main entry point ---\ndef construct_packing() -> tuple:\n    n = 32\n    overall_start_time = time.time()\n    TIME_BUDGET = 1180.0\n    \n    centers, _ = _load_my_artifact()\n    if centers is None: centers = _fallback_grid(n)\n    \n    best_centers = centers.copy()\n    best_r, best_obj, ok = _solve_lp_for_radii(best_centers)\n    if not ok: best_obj = 0.0\n    \n    rng = np.random.default_rng(seed=172)\n    \n    print(f\"Starting Refine-Relocate Loop. Initial score: {best_obj:.8f}\")\n\n    for loop_num in range(100): # Max 100 loops\n        elapsed = time.time() - overall_start_time\n        if elapsed > TIME_BUDGET: break\n        \n        remaining_time = TIME_BUDGET - elapsed\n        refiner_budget = min(remaining_time * 0.5, 200.0) # Allocate time for this refiner pass\n        \n        refined_C, refined_r, refined_obj, ok, improved = _coordinate_descent_refine(best_centers, time_budget=refiner_budget)\n        \n        if ok and refined_obj > best_obj:\n            print(f\"Loop {loop_num}: Refinement successful. New best score: {refined_obj:.8f}\")\n            best_centers, best_r, best_obj = refined_C, refined_r, refined_obj\n        \n        if not improved:\n            print(f\"Loop {loop_num}: Refiner stalled. Relocating worst circle.\")\n            # Identify worst circle (smallest radius)\n            worst_circle_idx = np.argmin(best_r)\n            # Relocate it to a random position\n            new_pos = rng.uniform(0.05, 0.95, size=2)\n            best_centers[worst_circle_idx] = new_pos\n            \n            # Re-evaluate score after relocation\n            _, new_obj, _ = _solve_lp_for_radii(best_centers)\n            print(f\"  Worst circle {worst_circle_idx} moved. Score is now ~{new_obj:.8f}\")\n\n    print(f\"\\nLoop finished. Final best score found: {best_obj:.8f}\")\n    return best_centers, _safety_micro_shrink(best_r)\n",
+    "submitted_timestamp": 1760834914.807404,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circles 18 and 25 overlap: dist=0.08835974155518657, r1+r2=0.1427013527768485",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Refine-Relocate Loop. Initial score: 2.91877317\nLoop 0: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.84680271\nLoop 96: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.79150977\nLoop 97: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.84599131\nLoop 98: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.81802859\nLoop 99: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.86443156\n\nLoop finished. Final best score found: 2.91877317\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circles 18 and 25 overlap: dist=0.08835974155518657, r1+r2=0.1427013527768485",
+      "evaluation_timestamp": 1760836097.369255,
+      "evaluation_datetime": "2025-10-19T09:08:17.369258"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760836097.3843927,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Replication: Refine-Relocate Loop' (ID: 337) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circles 18 and 25 overlap: dist=0.08835974155518657, r1+r2=0.1427013527768485\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Refine-Relocate Loop. Initial score: 2.91877317\nLoop 0: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.84680271\nLoop 96: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.79150977\nLoop 97: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.84599131\nLoop 98: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.81802859\nLoop 99: Refiner stalled. Relocating worst circle.\n  Worst circle 18 moved. Score is now ~2.86443156\n\nLoop finished. Final best score found: 2.91877317\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

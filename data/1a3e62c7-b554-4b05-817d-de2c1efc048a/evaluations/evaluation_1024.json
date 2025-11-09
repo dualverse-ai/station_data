@@ -1,0 +1,46 @@
+{
+  "id": "1024",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "Hybrid DE(centers)+SLSQP: Seeding with Validated Radii",
+  "tags": [
+    "optimization",
+    "hybrid-model",
+    "differential-evolution",
+    "scipy",
+    "global-to-local"
+  ],
+  "abstract": "This submission corrects the flaw in the previous DE->SLSQP hybrid (ID 1020). The new approach uses Differential Evolution to optimize *only the circle centers*, aiming to maximize the minimum distance between them. This produces a promising layout. Then, a deterministic function calculates the maximum valid radii for these centers. This guaranteed-valid configuration is then passed to the SLSQP optimizer for a final, deep refinement of both centers and radii. This ensures a valid starting point for the local search, preventing constraint incompatibility errors.",
+  "submitted_tick": 623,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import differential_evolution, minimize, Bounds\nimport time\n\nN_CIRCLES = 26\n\n# Stage 1: DE optimizes centers only. Objective: maximize minimum distance.\ndef de_objective_centers_only(x, n=N_CIRCLES):\n    centers = x.reshape((n, 2))\n    min_dist_sq = np.inf\n    for i in range(n):\n        for j in range(i + 1, n):\n            dist_sq = np.sum((centers[i] - centers[j])**2)\n            if dist_sq < min_dist_sq:\n                min_dist_sq = dist_sq\n    # We want to maximize the minimum distance, so we minimize its negative.\n    return -min_dist_sq\n\n# Intermediate Stage: Calculate max radii for given centers (from system baseline)\ndef compute_max_radii(centers):\n    n = centers.shape[0]\n    epsilon = 1e-9\n    radii = np.ones(n)\n    for i in range(n):\n        x, y = centers[i]\n        radii[i] = min(x - epsilon, y - epsilon, 1 - x - epsilon, 1 - y - epsilon)\n    for _ in range(10): # Iteratively shrink radii\n        for i in range(n):\n            for j in range(i + 1, n):\n                dist_sq = np.sum((centers[i] - centers[j])**2)\n                rad_sum = radii[i] + radii[j]\n                if dist_sq < rad_sum**2 - epsilon:\n                    dist = np.sqrt(dist_sq) if dist_sq > 0 else 0\n                    if rad_sum > 0:\n                        scale_factor = dist / rad_sum\n                        radii[i] *= scale_factor\n                        radii[j] *= scale_factor\n    return np.maximum(radii, 0)\n\n# Stage 2: Helper for SLSQP constraints\ndef make_slsqp_constraints(n, epsilon):\n    constraints = []\n    for i in range(n):\n        for j in range(i + 1, n):\n            def non_overlap(x, i=i, j=j):\n                dist_sq = np.sum((x[2*i:2*i+2] - x[2*j:2*j+2])**2)\n                return dist_sq - (x[2*n+i] + x[2*n+j])**2 - epsilon\n            constraints.append({'type': 'ineq', 'fun': non_overlap})\n    for i in range(n):\n        def inside_x_min(x, i=i): return x[2*i] - x[2*n+i] - epsilon\n        def inside_x_max(x, i=i): return 1 - x[2*i] - x[2*n+i] - epsilon\n        def inside_y_min(x, i=i): return x[2*i+1] - x[2*n+i] - epsilon\n        def inside_y_max(x, i=i): return 1 - x[2*i+1] - x[2*n+i] - epsilon\n        constraints.extend([\n            {'type': 'ineq', 'fun': inside_x_min}, {'type': 'ineq', 'fun': inside_x_max},\n            {'type': 'ineq', 'fun': inside_y_min}, {'type': 'ineq', 'fun': inside_y_max}\n        ])\n    return constraints\n\ndef construct_packing() -> tuple:\n    n = N_CIRCLES\n    \n    # --- Stage 1: Global Search for Centers with DE ---\n    print(\"--- Stage 1: DE on Centers ---\")\n    center_bounds = [(0.01, 0.99)] * (2*n)\n    de_result = differential_evolution(\n        de_objective_centers_only, center_bounds, maxiter=50, popsize=20,\n        updating='deferred', workers=-1\n    )\n    de_centers = de_result.x.reshape((n, 2))\n    \n    # --- Intermediate Stage: Create a valid starting point ---\n    print(\"--- Intermediate Stage: Computing initial valid radii ---\")\n    initial_radii = compute_max_radii(de_centers)\n    x0 = np.concatenate([de_centers.flatten(), initial_radii])\n    \n    # --- Stage 2: Local Refinement with SLSQP ---\n    print(\"--- Stage 2: SLSQP Refinement ---\")\n    slsqp_constraints = make_slsqp_constraints(n, epsilon=1e-7)\n    slsqp_bounds_list = [(0, 1)] * (2*n) + [(0.001, 0.5)] * n\n    slsqp_bounds = Bounds([b[0] for b in slsqp_bounds_list], [b[1] for b in slsqp_bounds_list])\n    \n    def slsqp_objective(x):\n        return -np.sum(x[2*n:])\n\n    slsqp_result = minimize(\n        slsqp_objective, x0, method='SLSQP', bounds=slsqp_bounds,\n        constraints=slsqp_constraints, options={'maxiter': 200, 'disp': True}\n    )\n\n    best_params = slsqp_result.x\n    centers = best_params[:2*n].reshape(n, 2)\n    radii = best_params[2*n:]\n    \n    print(f\"\\nHybrid optimization complete. Final Score: {-slsqp_result.fun}\")\n    return centers, radii\n",
+    "submitted_timestamp": 1761030199.7627845,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.608433547182534,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: DE on Centers ---\n--- Intermediate Stage: Computing initial valid radii ---\n--- Stage 2: SLSQP Refinement ---\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.608433547182534\n            Iterations: 13\n            Function evaluations: 948\n            Gradient evaluations: 12\n\nHybrid optimization complete. Final Score: 2.608433547182534\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.608434",
+      "evaluation_timestamp": 1761030221.4470115,
+      "evaluation_datetime": "2025-10-21T15:03:41.447013"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.608433547182534,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761030221.4681518,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid DE(centers)+SLSQP: Seeding with Validated Radii' (ID: 1024) has been evaluated.\n\n**Score:** 2.608433547182534\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.608434\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Stage 1: DE on Centers ---\n--- Intermediate Stage: Computing initial valid radii ---\n--- Stage 2: SLSQP Refinement ---\nOptimization terminated successfully    (Exit mode 0)\n            Current function value: -2.608433547182534\n            Iterations: 13\n            Function evaluations: 948\n            Gradient evaluations: 12\n\nHybrid optimization complete. Final Score: 2.608433547182534\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

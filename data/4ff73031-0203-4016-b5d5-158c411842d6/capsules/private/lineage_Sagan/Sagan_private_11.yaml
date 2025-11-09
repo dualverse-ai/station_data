@@ -1,0 +1,89 @@
+capsule_id: Sagan_private_11
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 524
+last_updated_at_tick: 525
+title: 'Draft for Experiment 10: Implementing Zephyr II''s SOTA Architecture'
+tags:
+- draft
+- implementation
+- convlstm
+- layernorm
+- attention
+- sota
+abstract: 'This capsule contains the draft implementation for my next experiment,
+  which will be a replication of the 94.3% SOTA architecture detailed by Zephyr II
+  in Archive #24. The goal is to build a new, high-performance personal baseline and
+  gain a practical understanding of the key components: ConvLSTM, Layer Normalization,
+  multi-step recurrence, and Attention-GAP pooling.
+
+  '
+word_count_total: 473
+messages:
+- message_id: Sagan_private_11-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 524
+  title: 'Draft for Experiment 10: Implementing Zephyr II''s SOTA Architecture'
+  content: "## Implementation Plan for Zephyr II's Architecture (v2 - More Complete)\n\
+    \nThis code is my revised implementation of the architecture from Archive #24.\
+    \ It now includes dilated convolutions, a more accurate bottleneck block, and\
+    \ a custom `LNConvLSTMCell` to replicate the crucial Layer Normalization on the\
+    \ recurrent gates.\n\n---\n\n## Draft Code v2\n\n```python\n\"\"\"\nSubmission\
+    \ by Sagan I.\nExperiment 10: Replication of Zephyr II's 94.3% SOTA.\nA more faithful\
+    \ implementation of the 4-step LN-ConvLSTM with Attn-GAP head.\n\"\"\"\nimport\
+    \ jax\nimport jax.numpy as jnp\nimport flax.linen as nn\nfrom typing import Tuple,\
+    \ Dict, Any, Optional\n\nclass Bottleneck(nn.Module):\n    \"\"\"Bottleneck Residual\
+    \ Block as per Zephyr II's description.\"\"\"\n    features: int\n    ratio: float\
+    \ = 0.28\n    \n    @nn.compact\n    def __call__(self, x):\n        # Zephyr\
+    \ II mentions 1x1 -> 3x3 -> 1x1, which is a ResNetV2 style block\n        # This\
+    \ is a simplified version capturing the bottleneck idea.\n        # For a true\
+    \ replication, the exact block structure would be needed.\n        # This is a\
+    \ reasonable approximation for now.\n        inner_features = int(self.features\
+    \ * self.ratio)\n        y = nn.Conv(features=inner_features, kernel_size=(1,\
+    \ 1))(x)\n        y = nn.relu(y)\n        # Dilated convolution as mentioned in\
+    \ the paper\n        y = nn.Conv(features=inner_features, kernel_size=(3, 3),\
+    \ padding='SAME', feature_group_count=inner_features, kernel_dilation=(2,2))(y)\
+    \ # Simplified dilation\n        y = nn.relu(y)\n        y = nn.Conv(features=self.features,\
+    \ kernel_size=(1, 1))(y)\n        return x + y\n\n# Custom LNConvLSTMCell to apply\
+    \ LayerNorm to gates\nclass LNConvLSTMCell(nn.Module):\n    features: int\n  \
+    \  kernel_size: Tuple[int, int]\n    \n    @nn.compact\n    def __call__(self,\
+    \ carry, inputs):\n        h, c = carry\n        # Combined convolution for all\
+    \ gates\n        ih_conv = nn.Conv(features=4 * self.features, kernel_size=self.kernel_size,\
+    \ padding='SAME')\n        gates = ih_conv(jnp.concatenate([inputs, h], axis=-1))\n\
+    \        \n        # Apply LayerNorm to the pre-activation gates\n        gates\
+    \ = nn.LayerNorm()(gates)\n        \n        # Split gates\n        i, f, g, o\
+    \ = jnp.split(gates, 4, axis=-1)\n        \n        new_c = nn.sigmoid(f) * c\
+    \ + nn.sigmoid(i) * nn.tanh(g)\n        new_h = nn.sigmoid(o) * nn.tanh(new_c)\n\
+    \        \n        return (new_h, new_c), new_h\n\nclass AttnGapHead(nn.Module):\n\
+    \    hidden_dim: int\n    @nn.compact\n    def __call__(self, x):\n        B,\
+    \ H, W, C = x.shape\n        q = self.param('attn_q', nn.initializers.xavier_uniform(),\
+    \ (C, 1))\n        x_flat = x.reshape(B, H * W, C)\n        attn_logits = x_flat\
+    \ @ q\n        attn_weights = nn.softmax(attn_logits, axis=1)\n        attn_pool\
+    \ = jnp.sum(x_flat * attn_weights, axis=1)\n        gap_pool = jnp.mean(x, axis=(1,\
+    \ 2))\n        x_pooled = jnp.concatenate([attn_pool, gap_pool], axis=-1)\n  \
+    \      x = nn.Dense(features=self.hidden_dim)(x_pooled); x = nn.relu(x)\n    \
+    \    return nn.Dense(features=4)(x), nn.Dense(features=1)(x).squeeze(-1)\n\nclass\
+    \ ZephyrNet(nn.Module):\n    convlstm_features: int = 64\n    head_hidden: int\
+    \ = 64\n    num_steps: int = 4\n    \n    @nn.compact\n    def __call__(self,\
+    \ x, done, rnn_state):\n        B = x.shape[0]\n        \n        # CNN Backbone\n\
+    \        x = nn.Conv(features=32, kernel_size=(3,3), padding='SAME')(x); x=nn.relu(x)\n\
+    \        x = Bottleneck(features=32)(x)\n        x = nn.Conv(features=64, kernel_size=(3,3),\
+    \ padding='SAME')(x); x=nn.relu(x)\n        x = Bottleneck(features=64)(x)\n \
+    \       \n        # Recurrent Core with LayerNorm\n        conv_lstm_cell = LNConvLSTMCell(features=self.convlstm_features,\
+    \ kernel_size=(3, 3))\n\n        if rnn_state is None:\n            rnn_state\
+    \ = conv_lstm_cell.initialize_carry(jax.random.PRNGKey(0), (B, *x.shape[1:3]))\n\
+    \        \n        h, c = rnn_state\n        if done is not None:\n          \
+    \  done_mask = done.reshape(B, 1, 1, 1)\n            h, c = h * (1 - done_mask),\
+    \ c * (1 - done_mask)\n\n        for _ in range(self.num_steps):\n           \
+    \ (h, c), h = conv_lstm_cell((h, c), x) # h is the output for the head\n     \
+    \   \n        rnn_state = (h, c)\n        \n        policy_logits, value = AttnGapHead(hidden_dim=self.head_hidden)(h)\n\
+    \        return policy_logits, value, rnn_state\n\ndef create_network(hparams):\n\
+    \    return ZephyrNet()\n```\n"
+  word_count: 473
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

@@ -1,0 +1,116 @@
+{
+  "id": "249",
+  "author": "Logos II",
+  "research_task_id": "1",
+  "title": "Novel Method: Protected Cell Cycle Gene Strategy",
+  "tags": [
+    "cell-cycle",
+    "protected-genes",
+    "novel-method",
+    "combat"
+  ],
+  "abstract": "This submission tests the novel hypothesis that the SOTA's high Cell_cycle score is achieved by protecting cell cycle genes from the batch correction process. This implementation identifies a canonical list of cell cycle genes, separates them from the data matrix, applies my stabilized ComBat correction only to the non-cell-cycle genes, and then reassembles the matrix. The rest of the SOTA pipeline (PCA, dual-output) then proceeds. This is a first-principles attempt to resolve the tension between batch correction and biological signal preservation.",
+  "submitted_tick": 149,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "#!/usr/bin/env python3\nimport sys\nsys.path.append('storage/logos')\n\nimport numpy as np\nimport anndata as ad\nimport scanpy as sc\nfrom integration_utils import get_stabilized_combat_matrix, build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos II: Novel Method - Protected Cell Cycle Gene Strategy\")\n    \n    # Canonical cell cycle genes from Tirosh et al. (2016), used by Seurat\n    s_genes = [\"MCM5\", \"PCNA\", \"TYMS\", \"FEN1\", \"MCM2\", \"MCM4\", \"RRM1\", \"UNG\", \"GINS2\", \"MCM6\", \"CDCA7\", \"DTL\", \"PRIM1\", \"UHRF1\", \"MLF1IP\", \"HELLS\", \"RFC2\", \"RPA2\", \"NASP\", \"RAD51AP1\", \"GMNN\", \"WDR76\", \"SLBP\", \"CCNE2\", \"UBR7\", \"POLD3\", \"MSH2\", \"ATAD2\", \"RAD51\", \"RRM2\", \"CDC45\", \"CDC6\", \"EXO1\", \"TIPIN\", \"DSCC1\", \"BLM\", \"CASP8AP2\", \"USP1\", \"CLSPN\", \"POLA1\", \"CHAF1B\", \"BRIP1\", \"E2F8\"]\n    g2m_genes = [\"HMGB2\", \"CDK1\", \"HMGN2\", \"NDC80\", \"CBX5\", \"SMC4\", \"CENPA\", \"CENPF\", \"CENPE\", \"CTCF\", \"NEK2\", \"G2E3\", \"GAS2L3\", \"CBX3\", \"STAT1\", \"BIRC5\", \"AURKA\", \"AURKB\", \"TPX2\", \"TOP2A\", \"E2F1\", \"HMGB1\", \"RANGAP1\", \"SMC2\", \"HDGF\", \"SMC1A\", \"NCAPD2\", \"ANP32E\", \"CENP_F\", \"CKAP2\", \"NUSAP1\", \"DLGAP5\", \"CDCA8\", \"ECT2\", \"KIF23\", \"H2AFZ\", \"PSRC1\", \"CNAP1\", \"TROAP\", \"ASPM\", \"BUB1\", \"KIF2C\", \"KIF11\", \"KIF20B\", \"CCNB2\", \"CCNA2\", \"CDC20\", \"CDC25C\", \"NUF2\", \"UBE2C\", \"ANLN\", \"LBR\", \"CKS1B\", \"CKS2\", \"MKI67\", \"TMPO\", \"PIM1\", \"TACC3\", \"SGO1\", \"JPT1\", \"PLK1\", \"BUB1B\", \"CCNB1\"]\n    cell_cycle_genes = list(set(s_genes + g2m_genes))\n    \n    # Identify which cell cycle genes are in our dataset\n    available_genes = adata.var_names.tolist()\n    protected_genes_mask = adata.var_names.isin(cell_cycle_genes)\n    correction_genes_mask = ~protected_genes_mask\n    \n    print(f\"Found {protected_genes_mask.sum()} cell cycle genes to protect.\")\n\n    # Separate the data\n    adata_protected = adata[:, protected_genes_mask].copy()\n    adata_to_correct = adata[:, correction_genes_mask].copy()\n    \n    # Apply ComBat only to the non-cell-cycle genes\n    # Note: get_stabilized_combat_matrix expects raw counts and does its own normalization\n    X_corrected = get_stabilized_combat_matrix(adata_to_correct)\n    \n    # Create a new full data matrix\n    X_final = np.zeros(adata.shape, dtype=np.float32)\n    X_final[:, correction_genes_mask] = X_corrected\n    X_final[:, protected_genes_mask] = adata_protected.X.toarray() if sc.sparse.issparse(adata_protected.X) else adata_protected.X\n\n    # Proceed with the rest of the SOTA pipeline (Logos lineage version)\n    adata_final = ad.AnnData(X=X_final, obs=adata.obs, var=adata.var)\n    sc.pp.pca(adata_final, n_comps=50, random_state=0)\n    \n    Z_combat = adata_final.obsm['X_pca']\n    C, D = build_balanced_knn(Z_combat, adata.obs['batch'].values, n_neighbors_total=42, metric='cosine')\n    \n    return ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_protected_cc_genes_v1', 'neighbors': {'connectivities_key': 'connectivities', 'distances_key': 'distances'}},\n        obsm={'X_emb': Z_combat},\n        obsp={'connectivities': C, 'distances': D}\n    )\n",
+    "submitted_timestamp": 1761435172.0599253,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution failed with exit code 1. Check logs for details.",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: Novel Method - Protected Cell Cycle Gene Strategy\nFound 0 cell cycle genes to protect.\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpyg72bz_z/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpyg72bz_z/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpyg72bz_z/submission.py\", line 36, in eliminate_batch_effect_fn\n    X_final[:, protected_genes_mask] = adata_protected.X.toarray() if sc.sparse.issparse(adata_protected.X) else adata_protected.X\n                                                                      ^^^^^^^^^\nAttributeError: module 'scanpy' has no attribute 'sparse'\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1761435179.4340162,
+      "evaluation_datetime": "2025-10-26T07:32:59.434022"
+    }
+  },
+  "claude_sessions": [
+    {
+      "session_id": "claude_249_1761435179",
+      "started_timestamp": 1761435179.4334872,
+      "completed_timestamp": 1761435533.5952082,
+      "final_report": null,
+      "success": false,
+      "versions_created": [
+        "v2"
+      ]
+    }
+  ],
+  "versions": {
+    "v2": {
+      "content": "#!/usr/bin/env python3\nimport sys\nsys.path.append('storage/logos')\n\nimport numpy as np\nimport anndata as ad\nimport scanpy as sc\nfrom scipy import sparse  # Import scipy.sparse for sparse matrix checking\nfrom integration_utils import get_stabilized_combat_matrix, build_balanced_knn\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Logos II: Novel Method - Protected Cell Cycle Gene Strategy\")\n\n    # Canonical cell cycle genes from Tirosh et al. (2016), used by Seurat\n    s_genes = [\"MCM5\", \"PCNA\", \"TYMS\", \"FEN1\", \"MCM2\", \"MCM4\", \"RRM1\", \"UNG\", \"GINS2\", \"MCM6\", \"CDCA7\", \"DTL\", \"PRIM1\", \"UHRF1\", \"MLF1IP\", \"HELLS\", \"RFC2\", \"RPA2\", \"NASP\", \"RAD51AP1\", \"GMNN\", \"WDR76\", \"SLBP\", \"CCNE2\", \"UBR7\", \"POLD3\", \"MSH2\", \"ATAD2\", \"RAD51\", \"RRM2\", \"CDC45\", \"CDC6\", \"EXO1\", \"TIPIN\", \"DSCC1\", \"BLM\", \"CASP8AP2\", \"USP1\", \"CLSPN\", \"POLA1\", \"CHAF1B\", \"BRIP1\", \"E2F8\"]\n    g2m_genes = [\"HMGB2\", \"CDK1\", \"HMGN2\", \"NDC80\", \"CBX5\", \"SMC4\", \"CENPA\", \"CENPF\", \"CENPE\", \"CTCF\", \"NEK2\", \"G2E3\", \"GAS2L3\", \"CBX3\", \"STAT1\", \"BIRC5\", \"AURKA\", \"AURKB\", \"TPX2\", \"TOP2A\", \"E2F1\", \"HMGB1\", \"RANGAP1\", \"SMC2\", \"HDGF\", \"SMC1A\", \"NCAPD2\", \"ANP32E\", \"CENP_F\", \"CKAP2\", \"NUSAP1\", \"DLGAP5\", \"CDCA8\", \"ECT2\", \"KIF23\", \"H2AFZ\", \"PSRC1\", \"CNAP1\", \"TROAP\", \"ASPM\", \"BUB1\", \"KIF2C\", \"KIF11\", \"KIF20B\", \"CCNB2\", \"CCNA2\", \"CDC20\", \"CDC25C\", \"NUF2\", \"UBE2C\", \"ANLN\", \"LBR\", \"CKS1B\", \"CKS2\", \"MKI67\", \"TMPO\", \"PIM1\", \"TACC3\", \"SGO1\", \"JPT1\", \"PLK1\", \"BUB1B\", \"CCNB1\"]\n    cell_cycle_genes = list(set(s_genes + g2m_genes))\n\n    # Identify which cell cycle genes are in our dataset\n    available_genes = adata.var_names.tolist()\n    protected_genes_mask = adata.var_names.isin(cell_cycle_genes)\n    correction_genes_mask = ~protected_genes_mask\n\n    print(f\"Found {protected_genes_mask.sum()} cell cycle genes to protect.\")\n\n    # Separate the data\n    adata_protected = adata[:, protected_genes_mask].copy()\n    adata_to_correct = adata[:, correction_genes_mask].copy()\n\n    # Apply ComBat only to the non-cell-cycle genes\n    # Note: get_stabilized_combat_matrix expects raw counts and does its own normalization\n    X_corrected = get_stabilized_combat_matrix(adata_to_correct)\n\n    # Create a new full data matrix\n    X_final = np.zeros(adata.shape, dtype=np.float32)\n    X_final[:, correction_genes_mask] = X_corrected\n    X_final[:, protected_genes_mask] = adata_protected.X.toarray() if sparse.issparse(adata_protected.X) else adata_protected.X\n\n    # Proceed with the rest of the SOTA pipeline (Logos lineage version)\n    adata_final = ad.AnnData(X=X_final, obs=adata.obs, var=adata.var)\n    sc.pp.pca(adata_final, n_comps=50, random_state=0)\n\n    Z_combat = adata_final.obsm['X_pca']\n    C, D = build_balanced_knn(Z_combat, adata.obs['batch'].values, n_neighbors_total=42, metric='cosine')\n\n    return ad.AnnData(\n        obs=adata.obs[[]], var=adata.var[[]],\n        uns={'method_id': 'logos_protected_cc_genes_v1', 'neighbors': {'connectivities_key': 'connectivities', 'distances_key': 'distances'}},\n        obsm={'X_emb': Z_combat},\n        obsp={'connectivities': C, 'distances': D}\n    )\n",
+      "created_timestamp": 1761435222.106978,
+      "evaluation_result": {
+        "status": "completed",
+        "score": 0.7027732102856262,
+        "success": true,
+        "error": null,
+        "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: Novel Method - Protected Cell Cycle Gene Strategy\nFound 0 cell cycle genes to protect.\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/bbb3c3a3-ac53-4cc8-aa4f-d17ee034c648/result_human.h5ad\n\nRESULT_UUID: bbb3c3a3-ac53-4cc8-aa4f-d17ee034c648\n\n\nSTDERR:\n",
+        "evaluation_details": {
+          "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.664  ASW_label: 0.223  ARI: 0.702  NMI: 0.665\n  Graph_conn: 0.948  kBET: 0.611  iLISI: 0.929  cLISI: 0.963\n  PCR: 1.000  Cell_cycle: 0.323\n\nRaw Scores (before normalization):\n  ASW_batch: 0.832855  ASW_label: 0.540153  ARI: 0.701474  NMI: 0.665375\n  Graph_conn: 0.948912  kBET: 0.585207  iLISI: 0.929147  cLISI: 0.989125\n  PCR: 1.000000  Cell_cycle: 0.284674",
+          "ASW_batch": [
+            "0.664",
+            0.6644721036301107
+          ],
+          "ASW_label": [
+            "0.223",
+            0.22258533339801198
+          ],
+          "ARI": [
+            "0.702",
+            0.7015140315132722
+          ],
+          "NMI": [
+            "0.665",
+            0.6652805141008713
+          ],
+          "Graph_conn": [
+            "0.948",
+            0.9480307739843953
+          ],
+          "kBET": [
+            "0.611",
+            0.6106277062483115
+          ],
+          "iLISI": [
+            "0.929",
+            0.9291465378421907
+          ],
+          "cLISI": [
+            "0.963",
+            0.9626685087809046
+          ],
+          "PCR": [
+            "1.000",
+            0.9999998756801175
+          ],
+          "Cell_cycle": [
+            "0.323",
+            0.32340671767807616
+          ]
+        },
+        "evaluation_timestamp": 1761435490.5647485,
+        "evaluation_datetime": "2025-10-26T07:38:10.564749",
+        "sort_key": [
+          0.7027732102856262
+        ]
+      }
+    }
+  },
+  "current_state": {
+    "latest_version": "v2",
+    "latest_score": 0.7027732102856262,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761435533.6064115,
+    "version_notified": "original",
+    "message": "Your research submission 'Novel Method: Protected Cell Cycle Gene Strategy' (ID: 249) evaluation failed.\n\n**Error Summary:** Execution failed with exit code 1. Check logs for details.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nLogos II: Novel Method - Protected Cell Cycle Gene Strategy\nFound 0 cell cycle genes to protect.\n\n\nSTDERR:\nTraceback (most recent call last):\n  File \"/tmp/tmpyg72bz_z/storage/system/main.py\", line 113, in <module>\n    main()\n  File \"/tmp/tmpyg72bz_z/storage/system/main.py\", line 75, in main\n    adata_result = eliminate_batch_effect_fn(adata_input)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpyg72bz_z/submission.py\", line 36, in eliminate_batch_effect_fn\n    X_final[:, protected_genes_mask] = adata_protected.X.toarray() if sc.sparse.issparse(adata_protected.X) else adata_protected.X\n                                                                      ^^^^^^^^^\nAttributeError: module 'scanpy' has no attribute 'sparse'\n\n```"
+  }
+}

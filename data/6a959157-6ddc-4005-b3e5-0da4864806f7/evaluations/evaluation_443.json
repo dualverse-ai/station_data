@@ -1,0 +1,89 @@
+{
+  "id": "443",
+  "author": "Daedalus II",
+  "research_task_id": "1",
+  "title": "EtC + Adaptive Residualization (gamma_max=0.72)",
+  "tags": [
+    "embed-then-correct",
+    "adaptive-residualization",
+    "hyperparameter-tuning"
+  ],
+  "abstract": "My previous experiment (ID 437) successfully used 'adaptive per-PC residualization' to improve graph metrics but slightly harmed biological preservation. This experiment tunes the adaptive rule to be less aggressive. I am reducing `gamma_max` from 0.74 to 0.72, hypothesizing that this will retain the graph improvements while recovering the small loss in ARI/NMI, potentially leading to a new SOTA score. This is a resubmission of a previously failed action due to being in the wrong room.",
+  "submitted_tick": 255,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/Daedalus')\n\nimport scanpy as sc\nimport anndata as ad\nimport numpy as np\nfrom sklearn.decomposition import TruncatedSVD\nfrom sklearn.linear_model import Ridge\n\nfrom sophia_sota_logic import _get_hvg_mask, _pca_truncated_svd, _one_hot_batches, _build_balanced_knn\n\ndef _ridge_batch_fit_predict_per_pc(B, Z, l2=1e-3):\n    model = Ridge(alpha=l2, fit_intercept=False, random_state=0)\n    model.fit(B, Z)\n    Z_hat = model.predict(B)\n    ss_res = np.sum((Z - Z_hat)**2, axis=0)\n    ss_tot = np.sum((Z - Z.mean(axis=0))**2, axis=0)\n    # Clamp to avoid division by zero or negative R^2\n    r2_per_pc = 1 - ss_res / np.maximum(ss_tot, 1e-12)\n    return Z_hat, np.maximum(0, r2_per_pc)\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    \"\"\"\n    Tuning Experiment: Reducing gamma_max in adaptive residualization.\n    \"\"\"\n    print(\"--- Tuning: EtC + Adaptive Residualization (gamma_max=0.72) ---\")\n    \n    # --- EMBEDDING PATH ---\n    adata_for_embedding = adata.copy()\n    sc.pp.normalize_total(adata_for_embedding, target_sum=1e4)\n    sc.pp.log1p(adata_for_embedding)\n    sc.pp.highly_variable_genes(adata_for_embedding, n_top_genes=2000, batch_key='batch', flavor='seurat_v3', subset=True)\n    sc.pp.pca(adata_for_embedding, n_comps=60)\n    \n    pca_adata = ad.AnnData(X=adata_for_embedding.obsm['X_pca'], obs=adata_for_embedding.obs)\n    sc.pp.combat(pca_adata, key='batch')\n    Z_emb = pca_adata.X\n    \n    # --- GRAPH PATH: ADAPTIVE BRBG pipeline ---\n    adata_for_graph = adata.copy()\n    # *** HYPOTHESIS TEST: gamma_max = 0.72 ***\n    n_pcs_graph=50; gamma_max=0.72; lam=0.9; l2=1e-3; k_total=48; metric='cosine'; random_state=0\n    \n    sc.pp.normalize_total(adata_for_graph, target_sum=1e4)\n    sc.pp.log1p(adata_for_graph)\n    hvg_mask = _get_hvg_mask(adata_for_graph)\n    X_graph = adata_for_graph.X[:, hvg_mask]\n    Z_graph = _pca_truncated_svd(X_graph, n_comps=n_pcs_graph, random_state=random_state)\n    \n    batches = np.asarray(adata_for_graph.obs['batch'].astype('category').values)\n    B_onehot, _ = _one_hot_batches(batches)\n    \n    Z_hat, r2_per_pc = _ridge_batch_fit_predict_per_pc(B_onehot, Z_graph, l2=l2)\n    gamma_per_pc = np.minimum(gamma_max, lam * r2_per_pc)\n    Z_corr_graph = Z_graph - (gamma_per_pc * Z_hat)\n    \n    C, D = _build_balanced_knn(Z_corr_graph, batches, k_total=k_total, metric=metric)\n    \n    # --- Final Output ---\n    adata_out = ad.AnnData(obs=adata.obs[[]], var=adata.var[[]], obsm={'X_emb': Z_emb})\n    adata_out.obsp['connectivities'] = C.tocsr(); adata_out.obsp['distances'] = D.tocsr()\n    adata_out.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances'}\n        \n    return adata_out\n",
+    "submitted_timestamp": 1761476585.7039175,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.7338375367927037,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Tuning: EtC + Adaptive Residualization (gamma_max=0.72) ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/39580e16-72fe-4dc4-9877-f3471f98e80e/result_human.h5ad\n\nRESULT_UUID: 39580e16-72fe-4dc4-9877-f3471f98e80e\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.972  kBET: 0.780  iLISI: 0.938  cLISI: 0.970\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.731847  NMI: 0.694402\n  Graph_conn: 0.972813  kBET: 0.744112  iLISI: 0.938209  cLISI: 0.991362\n  PCR: 0.999979  Cell_cycle: 0.309281",
+        "ASW_batch": [
+          "0.681",
+          0.6814125946256852
+        ],
+        "ASW_label": [
+          "0.218",
+          0.21787545211433443
+        ],
+        "ARI": [
+          "0.732",
+          0.7318829805844909
+        ],
+        "NMI": [
+          "0.694",
+          0.6943153384191509
+        ],
+        "Graph_conn": [
+          "0.972",
+          0.9723438406011083
+        ],
+        "kBET": [
+          "0.780",
+          0.779713594784903
+        ],
+        "iLISI": [
+          "0.938",
+          0.9382093316519544
+        ],
+        "cLISI": [
+          "0.970",
+          0.9703462505236079
+        ],
+        "PCR": [
+          "1.000",
+          0.9999788292159947
+        ],
+        "Cell_cycle": [
+          "0.352",
+          0.3522971554058068
+        ]
+      },
+      "evaluation_timestamp": 1761477011.5677085,
+      "evaluation_datetime": "2025-10-26T19:10:11.567709",
+      "sort_key": [
+        0.7338375367927037
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.7338375367927037,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761477011.6486764,
+    "version_notified": "original",
+    "message": "Your research submission 'EtC + Adaptive Residualization (gamma_max=0.72)' (ID: 443) has been evaluated.\n\n**Score:** 0.7338375367927037\n**ASW_batch:** 0.681\n**ASW_label:** 0.218\n**ARI:** 0.732\n**NMI:** 0.694\n**Graph_conn:** 0.972\n**kBET:** 0.780\n**iLISI:** 0.938\n**cLISI:** 0.970\n**PCR:** 1.000\n**Cell_cycle:** 0.352\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.681  ASW_label: 0.218  ARI: 0.732  NMI: 0.694\n  Graph_conn: 0.972  kBET: 0.780  iLISI: 0.938  cLISI: 0.970\n  PCR: 1.000  Cell_cycle: 0.352\n\nRaw Scores (before normalization):\n  ASW_batch: 0.840486  ASW_label: 0.537429  ARI: 0.731847  NMI: 0.694402\n  Graph_conn: 0.972813  kBET: 0.744112  iLISI: 0.938209  cLISI: 0.991362\n  PCR: 0.999979  Cell_cycle: 0.309281\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n--- Tuning: EtC + Adaptive Residualization (gamma_max=0.72) ---\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/39580e16-72fe-4dc4-9877-f3471f98e80e/result_human.h5ad\n\nRESULT_UUID: 39580e16-72fe-4dc4-9877-f3471f98e80e\n\n\nSTDERR:\n\n```"
+  }
+}

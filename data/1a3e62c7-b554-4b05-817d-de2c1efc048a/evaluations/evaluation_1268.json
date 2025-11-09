@@ -1,0 +1,47 @@
+{
+  "id": "1268",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "Utility: Synthesize KKT and Slack Data for Ranked Analysis",
+  "tags": [
+    "utility",
+    "analysis",
+    "kkt",
+    "slack-values",
+    "heuristic",
+    "praxis-lineage"
+  ],
+  "abstract": "This utility synthesizes the previously generated KKT multiplier and slack value data. It loads all analytical artifacts from lineage storage, maps each KKT value to its corresponding slack, and calculates a new heuristic score (KKT / (slack + epsilon)) for each constraint. The output is a single, ranked list of all constraints, sorted by this score, which prioritizes those under high pressure and with low geometric slack. This provides a more intelligent basis for future perturbation experiments.",
+  "submitted_tick": 746,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\nimport pandas as pd\n\ndef construct_packing() -> tuple:\n    n = 26\n    storage_path = 'storage/praxis'\n    \n    # --- Step 1: Load all analytical artifacts ---\n    print(\"Step 1: Loading all analytical artifacts from lineage storage...\")\n    try:\n        centers = np.load(os.path.join(storage_path, 'sota_packing_centers.npy'))\n        radii = np.load(os.path.join(storage_path, 'sota_packing_radii.npy'))\n        kkt_multipliers = np.load(os.path.join(storage_path, 'sota_kkt_multipliers.npy'))\n        pair_slacks_df = pd.read_csv(os.path.join(storage_path, 'sota_pair_slacks.csv'))\n        boundary_slacks_df = pd.read_csv(os.path.join(storage_path, 'sota_boundary_slacks.csv'))\n        print(\"All artifacts loaded successfully.\")\n    except FileNotFoundError as e:\n        print(f\"Error: Missing artifact - {e}. Aborting.\")\n        return np.array([[0.1]*2]*n), np.array([0.01]*n)\n\n    # --- Step 2: Synthesize the data ---\n    print(\"Step 2: Synthesizing KKT and slack data into a ranked list...\")\n    \n    num_non_overlap = n * (n - 1) // 2\n    \n    # The order of KKT multipliers is fixed by the constraint function in previous scripts:\n    # 1. Non-overlap pairs (i=0..n-1, j=i+1..n)\n    # 2. Boundary x_min for i=0..n-1\n    # 3. Boundary x_max for i=0..n-1\n    # 4. Boundary y_min for i=0..n-1\n    # 5. Boundary y_max for i=0..n-1\n    \n    constraint_data = []\n    \n    # Process non-overlap constraints\n    pair_slacks = pair_slacks_df['slack'].values\n    pair_labels = pair_slacks_df['pair'].values\n    for k in range(num_non_overlap):\n        constraint_data.append({\n            'label': pair_labels[k],\n            'type': 'pair',\n            'kkt': kkt_multipliers[k],\n            'slack': pair_slacks[k]\n        })\n        \n    # Process boundary constraints\n    boundary_slacks = boundary_slacks_df['slack'].values\n    boundary_labels = boundary_slacks_df['boundary'].values\n    \n    # The order in the CSV is (0-xmin, 0-xmax, 0-ymin, 0-ymax, 1-xmin, ...),\n    # but KKT order is (all xmin, all xmax, ...). We need to remap.\n    kkt_boundary_offset = num_non_overlap\n    for i in range(n): # x_min\n        constraint_data.append({'label': f\"{i}-xmin\", 'type': 'boundary', 'kkt': kkt_multipliers[kkt_boundary_offset + i], 'slack': boundary_slacks[i*4 + 0]})\n    kkt_boundary_offset += n\n    for i in range(n): # x_max\n        constraint_data.append({'label': f\"{i}-xmax\", 'type': 'boundary', 'kkt': kkt_multipliers[kkt_boundary_offset + i], 'slack': boundary_slacks[i*4 + 1]})\n    kkt_boundary_offset += n\n    for i in range(n): # y_min\n        constraint_data.append({'label': f\"{i}-ymin\", 'type': 'boundary', 'kkt': kkt_multipliers[kkt_boundary_offset + i], 'slack': boundary_slacks[i*4 + 2]})\n    kkt_boundary_offset += n\n    for i in range(n): # y_max\n        constraint_data.append({'label': f\"{i}-ymax\", 'type': 'boundary', 'kkt': kkt_multipliers[kkt_boundary_offset + i], 'slack': boundary_slacks[i*4 + 3]})\n\n    # Create a DataFrame for easy manipulation\n    df = pd.DataFrame(constraint_data)\n    \n    # --- Step 3: Calculate heuristic score and rank ---\n    epsilon = 1e-12 # Small value to avoid division by zero for perfectly tight constraints\n    df['heuristic_score'] = df['kkt'] / (df['slack'] + epsilon)\n    \n    # Sort by the new score\n    df_sorted = df.sort_values(by='heuristic_score', ascending=False)\n    \n    print(\"Top 5 nudge candidates based on heuristic score:\")\n    print(df_sorted.head(5))\n    \n    # --- Step 4: Save the ranked list ---\n    output_path = os.path.join(storage_path, 'sota_ranked_constraints.csv')\n    df_sorted.to_csv(output_path, index=False)\n    print(f\"Ranked list saved to {output_path}\")\n\n    # --- Step 5: Return the original packing ---\n    return centers, radii\n",
+    "submitted_timestamp": 1761105715.2323122,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.62612543888107,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading all analytical artifacts from lineage storage...\nAll artifacts loaded successfully.\nStep 2: Synthesizing KKT and slack data into a ranked list...\nTop 5 nudge candidates based on heuristic score:\n     label  type       kkt     slack  heuristic_score\n194   9-15  pair  0.039474  0.604112         0.065342\n200   9-21  pair  0.039299  0.635462         0.061843\n17    0-18  pair  0.031931  0.595872         0.053587\n208  10-14  pair  0.033295  0.639478         0.052066\n105   4-16  pair  0.029814  0.578900         0.051500\nRanked list saved to storage/praxis/sota_ranked_constraints.csv\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.626125",
+      "evaluation_timestamp": 1761105717.8467937,
+      "evaluation_datetime": "2025-10-22T12:01:57.846796"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.62612543888107,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761105717.871104,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility: Synthesize KKT and Slack Data for Ranked Analysis' (ID: 1268) has been evaluated.\n\n**Score:** 2.62612543888107\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.626125\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStep 1: Loading all analytical artifacts from lineage storage...\nAll artifacts loaded successfully.\nStep 2: Synthesizing KKT and slack data into a ranked list...\nTop 5 nudge candidates based on heuristic score:\n     label  type       kkt     slack  heuristic_score\n194   9-15  pair  0.039474  0.604112         0.065342\n200   9-21  pair  0.039299  0.635462         0.061843\n17    0-18  pair  0.031931  0.595872         0.053587\n208  10-14  pair  0.033295  0.639478         0.052066\n105   4-16  pair  0.029814  0.578900         0.051500\nRanked list saved to storage/praxis/sota_ranked_constraints.csv\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

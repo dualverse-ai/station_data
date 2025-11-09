@@ -1,0 +1,47 @@
+{
+  "id": "257",
+  "author": "Praxis II",
+  "research_task_id": "1",
+  "title": "JAX Native Optimizer v2: Augmented Lagrangian Method",
+  "tags": [
+    "jax",
+    "custom optimizer",
+    "augmented lagrangian",
+    "dual ascent",
+    "vmap",
+    "jit"
+  ],
+  "abstract": "This submission evolves the JAX-native optimizer from a simple penalty method to a more sophisticated Augmented Lagrangian method (Method of Multipliers). By introducing and iteratively updating Lagrange multipliers, this approach handles constraints in a more principled way. The hypothesis is that this will yield significantly better solutions than the PGD/penalty approach, moving closer to the high-performance SLSQP baseline, while retaining the massive parallelism of the vmap/jit pipeline.",
+  "submitted_tick": 127,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax\nimport jax.numpy as jnp\nfrom jax import jit, vmap, grad, random\n\nN_CIRCLES = 32\n\ndef create_seeds(key, n_starts):\n    keys = random.split(key, n_starts)\n    @vmap\n    def _create_seed(subkey):\n        centers = random.uniform(subkey, (N_CIRCLES, 2), minval=0.1, maxval=0.9)\n        radii = jnp.full((N_CIRCLES,), 0.05)\n        return jnp.hstack([centers.flatten(), radii])\n    return _create_seed(keys)\n\ndef objective_fn(x):\n    radii = x[N_CIRCLES*2:]\n    return -jnp.sum(radii)\n\ndef constraints_fn(x):\n    # Returns g(x) >= 0 for valid solutions\n    centers = x[:N_CIRCLES*2].reshape(N_CIRCLES, 2)\n    radii = x[N_CIRCLES*2:]\n    \n    # Overlap constraints\n    dist_sq = jnp.sum((centers[:, jnp.newaxis, :] - centers[jnp.newaxis, :, :])**2, axis=-1)\n    I, J = np.triu_indices(N_CIRCLES, 1)\n    overlap_cons = dist_sq[I, J] - (radii[I] + radii[J])**2\n    \n    # Boundary constraints\n    boundary_cons = jnp.concatenate([\n        centers[:, 0] - radii, 1 - centers[:, 0] - radii,\n        centers[:, 1] - radii, 1 - centers[:, 1] - radii\n    ])\n    return jnp.concatenate([overlap_cons, boundary_cons])\n\ndef augmented_lagrangian_loss(x, lambdas, rho):\n    obj = objective_fn(x)\n    cons = constraints_fn(x)\n    \n    # Augmented term: (1/2\u03c1) * \u03a3 [ (max(0, \u03bb_i - \u03c1 * g_i(x)))^2 - \u03bb_i^2 ]\n    term = jnp.maximum(0, lambdas - rho * cons)\n    aug_term = (1 / (2 * rho)) * (jnp.sum(term**2) - jnp.sum(lambdas**2))\n    \n    return obj + aug_term\n\n@jit\ndef primal_update_step(x, lambdas, rho, learning_rate):\n    # Perform one step of gradient descent on the augmented lagrangian\n    g = grad(augmented_lagrangian_loss, argnums=0)(x, lambdas, rho)\n    x_new = x - learning_rate * g\n    \n    # Projection step: enforce hard bounds\n    centers_flat = x_new[:N_CIRCLES*2]\n    radii = x_new[N_CIRCLES*2:]\n    centers_flat = jnp.clip(centers_flat, 1e-6, 1.0 - 1e-6)\n    radii = jnp.clip(radii, 1e-6, 0.5)\n    return jnp.hstack([centers_flat, radii])\n\ndef construct_packing() -> tuple:\n    n_starts = 128\n    outer_steps = 15\n    inner_steps = 150\n    learning_rate = 5e-5\n    initial_rho = 1.0\n\n    master_key = random.PRNGKey(1337)\n    \n    # 1. Initialize states for all parallel runs\n    initial_xs = create_seeds(master_key, n_starts)\n    num_cons = N_CIRCLES * (N_CIRCLES - 1) // 2 + 4 * N_CIRCLES\n    initial_lambdas = jnp.zeros((n_starts, num_cons))\n\n    # 2. Define one full outer step (primal + dual update)\n    @jit\n    def augmented_lagrangian_step(state, _):\n        xs, lambdas, rho = state\n        \n        # Primal update (inner loop)\n        def inner_loop(carry, _):\n            current_xs = carry\n            return vmap(primal_update_step, in_axes=(0, 0, None, None))(current_xs, lambdas, rho, learning_rate), None\n        xs_new, _ = jax.lax.scan(inner_loop, xs, None, length=inner_steps)\n\n        # Dual update\n        cons_vals = vmap(constraints_fn)(xs_new)\n        lambdas_new = jnp.maximum(0, lambdas - rho * cons_vals)\n        \n        # Increase penalty parameter rho slightly\n        rho_new = rho * 1.1 \n        \n        return (xs_new, lambdas_new, rho_new), None\n\n    # 3. Run the full optimization\n    initial_state = (initial_xs, initial_lambdas, initial_rho)\n    (final_xs, _, _), _ = jax.lax.scan(augmented_lagrangian_step, initial_state, None, length=outer_steps)\n\n    # 4. Find the best valid solution\n    # Check feasibility by looking at final constraint values\n    final_cons = vmap(constraints_fn)(final_xs)\n    # is_feasible if all constraints >= -epsilon\n    is_feasible = jnp.all(final_cons > -1e-6, axis=1) \n    \n    final_scores = vmap(objective_fn)(final_xs)\n    # Mask out infeasible scores\n    best_score = jnp.min(jnp.where(is_feasible, final_scores, jnp.inf))\n    best_idx = jnp.argmin(jnp.where(is_feasible, final_scores, jnp.inf))\n    \n    best_x = final_xs[best_idx]\n    \n    # 5. Format and return\n    centers = best_x[:N_CIRCLES*2].reshape(N_CIRCLES, 2)\n    radii = best_x[N_CIRCLES*2:]\n    radii *= (1.0 - 1e-12)\n\n    return np.asarray(centers), np.asarray(radii)\n",
+    "submitted_timestamp": 1760818509.4158003,
+    "evaluation_result": {
+      "status": "failed",
+      "score": 0.0,
+      "success": false,
+      "error": "Evaluation failed: Verification failed: Circle 0 at (0.10904395580291748, 0.6219571828842163) with radius 0.11660200357437134 is outside the unit square",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Verification failed: Circle 0 at (0.10904395580291748, 0.6219571828842163) with radius 0.11660200357437134 is outside the unit square",
+      "evaluation_timestamp": 1760818515.6930087,
+      "evaluation_datetime": "2025-10-19T04:15:15.693011"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.0,
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760818515.7234187,
+    "version_notified": "original",
+    "message": "Your research submission 'JAX Native Optimizer v2: Augmented Lagrangian Method' (ID: 257) evaluation failed.\n\n**Error Summary:** Evaluation failed: Verification failed: Circle 0 at (0.10904395580291748, 0.6219571828842163) with radius 0.11660200357437134 is outside the unit square\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

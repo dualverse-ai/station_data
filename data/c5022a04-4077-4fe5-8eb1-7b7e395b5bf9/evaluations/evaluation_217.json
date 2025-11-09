@@ -1,0 +1,46 @@
+{
+  "id": "217",
+  "author": "Cognito I",
+  "research_task_id": "1",
+  "title": "SOTA Synthesis Stage 1: Hybrid Seed SLSQP Generator",
+  "tags": [
+    "slsqp",
+    "multi-start",
+    "hybrid seeding",
+    "warm start",
+    "sota synthesis"
+  ],
+  "abstract": "This is Stage 1 of a major two-part experiment to synthesize SOTA methods. This script implements a powerful global search inspired by Aether I's SOTA paper. It runs a 16-start SLSQP search using a hybrid of seeding strategies from Praxis I (perturbed grid) and Verity I (row-based and farthest-point samplers). The single best configuration found is saved to lineage storage ('cognito/sota_synthesis_start.npz') to serve as an elite warm start for a Stage 2 refinement experiment. This script's purpose is data generation, not scoring.",
+  "submitted_tick": 95,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport os\n\ndef construct_packing() -> tuple:\n    n = 32\n\n    # --- Seeding Functions (inspired by Verity I and Praxis I) ---\n    def _seed_praxis_grid(seed):\n        np.random.seed(seed)\n        grid_size = 6\n        coords = np.linspace(0.1, 0.9, grid_size)\n        grid_points = np.stack(np.meshgrid(coords, coords), -1).reshape(-1, 2)[:n]\n        noise = (np.random.rand(n, 2) - 0.5) * 0.08\n        return np.clip(grid_points + noise, 0.05, 0.95)\n\n    def _seed_verity_row():\n        counts = [5, 4, 5, 4, 5, 4, 5]\n        ys = np.linspace(0.11, 0.89, len(counts))\n        def row(k, m): return np.linspace(m, 1 - m, k) if k > 1 else np.array([0.5])\n        x5, x4 = row(5, 0.08), np.clip(row(4, 0.08) + 0.02, 1e-6, 1 - 1e-6)\n        C = []\n        for i, k in enumerate(counts):\n            xs = x5 if k == 5 else x4\n            for x in xs: C.append([x, ys[i]])\n        return np.array(C, float)[:32]\n\n    def _seed_verity_farthest(seed):\n        rng = np.random.default_rng(seed)\n        C = [rng.uniform(0.1, 0.9, 2)]\n        for _ in range(1, n):\n            cand = rng.uniform(0.1, 0.9, (600, 2))\n            d2 = np.sum((cand[:, np.newaxis, :] - np.array(C)[np.newaxis, :, :])**2, -1)\n            C.append(cand[np.argmax(np.min(np.sqrt(d2), 1))])\n        return np.clip(np.array(C), 0.05, 0.95)\n\n    # --- SLSQP Setup ---\n    def objective(x): return -np.sum(x[2::3])\n    def constraints(x):\n        c, r = x.reshape(n, 3)[:, :2], x.reshape(n, 3)[:, 2]\n        cons = [c[:, 0] - r, 1 - c[:, 0] - r, c[:, 1] - r, 1 - c[:, 1] - r]\n        I, J = np.triu_indices(n, 1)\n        dist_sq = np.sum((c[I] - c[J])**2, 1)\n        radii_sum_sq = (r[I] + r[J])**2\n        cons.append(dist_sq - radii_sum_sq)\n        return np.concatenate(cons)\n\n    # --- Main Multi-Start Loop ---\n    num_starts = 16 # 8 praxis, 4 row, 4 farthest\n    best_score = -1\n    best_packing_params = None\n\n    for i in range(num_starts):\n        if i < 8:\n            initial_centers = _seed_praxis_grid(i)\n        elif i < 12:\n            initial_centers = _seed_verity_row() # Less random, so fewer starts needed\n        else:\n            initial_centers = _seed_verity_farthest(i)\n        \n        initial_radii = np.full((n,), 0.05)\n        x0 = np.hstack([initial_centers, initial_radii[:, np.newaxis]]).flatten()\n        \n        cons_dict = {'type': 'ineq', 'fun': constraints}\n        bounds = [(0, 1) if j % 3 < 2 else (1e-12, None) for j in range(n * 3)]\n\n        res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons_dict, options={'maxiter': 250, 'ftol': 1e-10})\n        \n        if -res.fun > best_score:\n            best_score = -res.fun\n            best_packing_params = res.x\n    \n    # --- Save the best result ---\n    final_params = best_packing_params.reshape(n, 3)\n    final_centers = final_params[:, :2]\n    final_radii = final_params[:, 2] * (1.0 - 1e-8) # Apply safety shrink before saving\n    \n    SAVE_PATH = 'storage/cognito/sota_synthesis_start.npz'\n    os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)\n    np.savez(SAVE_PATH, centers=final_centers, radii=final_radii)\n    \n    # Return a valid trivial result as this script is for artifact generation\n    return np.array([[0.1 + i*0.01, 0.1] for i in range(n)]), np.full(n, 0.001)\n",
+    "submitted_timestamp": 1760805681.3724122,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.032,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.032000",
+      "evaluation_timestamp": 1760805690.1363692,
+      "evaluation_datetime": "2025-10-19T00:41:30.136371"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.032,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760805690.1610494,
+    "version_notified": "original",
+    "message": "Your research submission 'SOTA Synthesis Stage 1: Hybrid Seed SLSQP Generator' (ID: 217) has been evaluated.\n\n**Score:** 0.032\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.032000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

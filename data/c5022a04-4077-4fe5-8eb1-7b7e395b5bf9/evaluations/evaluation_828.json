@@ -1,0 +1,45 @@
+{
+  "id": "828",
+  "author": "Praxis VI",
+  "research_task_id": "1",
+  "title": "GHE Tuning #2: 'Largest Void' Feature Engineering",
+  "tags": [
+    "heuristic-search",
+    "feature-engineering",
+    "generative-model",
+    "ghe"
+  ],
+  "abstract": "Previous GHE tuning showed that adding foresight is beneficial but the current feature set is too weak. This experiment tests the hypothesis that a more powerful, explicit feature is needed to improve the greedy agent's decisions. I introduce a new feature, 'f5', which estimates the radius of the largest potential circle that could be placed in the remaining empty space. This provides the agent with a direct measure of the future consequences of its actions, aiming for a significant improvement in packing quality over previous GHE attempts.",
+  "submitted_tick": 526,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nfrom scipy.stats import qmc\nfrom multiprocessing import Pool, cpu_count\nimport random\nimport time\n\nN_CIRCLES = 32\n\n# --- Canonical LP Solver ---\ndef solve_radii_lp_with_duals(centers):\n    if centers is None: return {\"radii\": None, \"score\": -1.0}\n    n = centers.shape[0]; c = -np.ones(n)\n    num_b = 4*n; A_b = np.zeros((num_b, n)); b_b = np.zeros(num_b); eps = 1e-7\n    for i in range(n):\n        A_b[4*i,i]=1; b_b[4*i]=centers[i,0] - eps; A_b[4*i+1,i]=1; b_b[4*i+1]=1-centers[i,0] - eps\n        A_b[4*i+2,i]=1; b_b[4*i+2]=centers[i,1] - eps; A_b[4*i+3,i]=1; b_b[4*i+3]=1-centers[i,1] - eps\n    I, J = np.triu_indices(n, k=1); num_p = len(I); A_p = np.zeros((num_p, n))\n    A_p[np.arange(num_p), I]=1; A_p[np.arange(num_p), J]=1\n    b_p = np.linalg.norm(centers[I] - centers[J], axis=1) - eps\n    res = linprog(c, A_ub=np.vstack([A_b, A_p]), b_ub=np.concatenate([b_b, b_p]), bounds=(0,None), method='highs')\n    return {\"radii\": res.x, \"score\": np.sum(res.x)} if res.success else {\"radii\": None, \"score\": -1.0}\n\n# --- GHE Core Logic ---\ndef get_max_r(point, all_centers_np):\n    px, py = point\n    dist_to_wall = min(px, 1-px, py, 1-py)\n    if all_centers_np.shape[0] == 0:\n        return dist_to_wall\n    dists_to_centers = np.linalg.norm(all_centers_np - point, axis=1)\n    return min(dist_to_wall, np.min(dists_to_centers))\n\ndef get_features(point, placed_centers_np):\n    # f1: Max radius at this point\n    f1 = get_max_r(point, placed_centers_np)\n    # f2: Min dist to wall\n    f2 = min(point[0], 1-point[0], point[1], 1-point[1])\n    \n    if placed_centers_np.shape[0] == 0:\n        f3, f4, f5 = 1.0, 1.0, f2 # f5 is just dist to wall initially\n    else:\n        dists = np.linalg.norm(placed_centers_np - point, axis=1)\n        # f3: Min dist to another center\n        f3 = np.min(dists)\n        # f4: Avg dist to 2 nearest neighbors\n        dists.sort()\n        f4 = np.mean(dists[:2]) if len(dists) >= 2 else f3\n        # f5: Estimate of largest remaining void\n        sampler = qmc.Sobol(d=2, scramble=True, seed=random.randint(0,100000))\n        void_samples = sampler.random(n=256)\n        temp_placed_centers = np.vstack([placed_centers_np, point])\n        void_radii = [get_max_r(p, temp_placed_centers) for p in void_samples]\n        f5 = np.max(void_radii)\n        \n    return [f1, f2, f3, f4, f5]\n\ndef greedy_placement(weights, num_candidates=2048):\n    placed_centers = []\n    sampler = qmc.Sobol(d=2, scramble=True, seed=random.randint(0, 100000))\n    for _ in range(N_CIRCLES):\n        candidate_points = sampler.random(n=num_candidates)\n        best_score, best_point = -np.inf, None\n        placed_centers_np = np.array(placed_centers) if placed_centers else np.empty((0,2))\n        \n        for p in candidate_points:\n            features = get_features(p, placed_centers_np)\n            score = np.dot(weights, features)\n            if score > best_score:\n                best_score, best_point = score, p\n        placed_centers.append(best_point)\n    return np.array(placed_centers)\n\ndef evaluate_genotype(weights):\n    centers = greedy_placement(weights)\n    score = solve_radii_lp_with_duals(centers)['score']\n    return score, weights\n\ndef construct_packing() -> tuple:\n    start_time = time.time()\n    POP_SIZE, NUM_FEATURES, MUTATION_STRENGTH, N_PARENTS = 64, 5, 0.1, 20\n    \n    rng = np.random.default_rng()\n    population = [(0.0, rng.uniform(-1, 1, NUM_FEATURES)) for _ in range(POP_SIZE)]\n\n    pool = Pool(cpu_count())\n    try:\n        while time.time() - start_time < 1180:\n            gen_weights = [w for s, w in population]\n            population = pool.map(evaluate_genotype, gen_weights)\n            population.sort(key=lambda x: x[0], reverse=True)\n            \n            parents = population[:N_PARENTS]\n            offspring_weights = []\n            for _ in range(POP_SIZE - N_PARENTS):\n                p1_w, p2_w = random.choice(parents)[1], random.choice(parents)[1]\n                child_w = (p1_w + p2_w) / 2 # Simple average crossover\n                child_w += rng.normal(0, MUTATION_STRENGTH, NUM_FEATURES)\n                offspring_weights.append(child_w)\n            \n            population = parents + [(0.0, w) for w in offspring_weights]\n    finally:\n        pool.close()\n        pool.join()\n\n    best_score, best_weights = population[0]\n    final_centers = greedy_placement(best_weights)\n    final_radii = solve_radii_lp_with_duals(final_centers)['radii']\n    return final_centers, final_radii\n",
+    "submitted_timestamp": 1760973245.9796395,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels",
+      "logs": "PYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n",
+      "evaluation_details": "",
+      "evaluation_timestamp": 1760974508.0349202,
+      "evaluation_datetime": "2025-10-20T23:35:08.034922"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760974508.0455754,
+    "version_notified": "original",
+    "message": "Your research submission 'GHE Tuning #2: 'Largest Void' Feature Engineering' (ID: 828) evaluation failed.\n\n**Error Summary:** Execution timed out after 1260 seconds\n\n**Optimization Tips:**\n1. Use GPU-accelerated code when possible (JAX, CuPy, etc.)\n2. Vectorize operations instead of loops\n3. Consider breaking complex algorithms into multiple smaller submissions\n4. Profile your code to identify bottlenecks\n5. Use JIT compilation (@jit decorators) for computational kernels\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX TIMEOUT:\nSTDOUT:\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "165",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "SLSQP Optimization with Soft-Penalized Infeasible LP Solutions",
+  "tags": [
+    "optimization",
+    "slsqp",
+    "linear-programming",
+    "robustness",
+    "soft-penalty"
+  ],
+  "abstract": "This submission refines the SLSQP optimization by implementing a 'soft penalty' for infeasible Linear Programming solutions for `compute_max_radii`. Instead of returning an extremely high objective value, a small negative sum of radii is returned when `linprog` fails. This guides SLSQP away from problematic center configurations more smoothly. Radii bounds in LP are explicitly set to `min_positive_radius`. A 4x8 grid initialization and LP-exact radii finalization (`lp_safety_margin = 1e-9`) are retained. This aims to improve robustness and achieve higher scores by allowing SLSQP to navigate the search space more effectively.",
+  "submitted_tick": 72,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog, minimize\n\n# Original heuristic, kept as fallback for extreme cases (not directly used by objective anymore)\ndef compute_max_radii_heuristic(centers: np.ndarray) -> np.ndarray:\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7 \n  overlap_safety_margin = 1e-8 \n  min_positive_radius = 1e-9 \n\n  x_coords = centers[:, 0]\n  y_coords = centers[:, 1]\n  \n  radii = np.minimum.reduce([\n      x_coords - boundary_epsilon,\n      y_coords - boundary_epsilon,\n      1 - x_coords - boundary_epsilon,\n      1 - y_coords - boundary_epsilon\n  ])\n  radii = np.maximum(radii, min_positive_radius) \n\n  distances_sq = np.sum((centers[:, np.newaxis, :] - centers[np.newaxis, :, :])**2, axis=2)\n  np.fill_diagonal(distances_sq, np.inf)\n\n  for _ in range(40):\n    for i in range(n):\n      for j in range(i + 1, n):\n        dist_sq = distances_sq[i, j]\n        dist = np.sqrt(dist_sq) \n\n        rad_sum = radii[i] + radii[j]\n        \n        if dist < rad_sum + overlap_safety_margin: \n          if rad_sum > 0: \n            scale_factor = (dist - overlap_safety_margin) / rad_sum\n            if scale_factor > (min_positive_radius * 2 / rad_sum): \n              radii[i] *= scale_factor\n              radii[j] *= scale_factor\n            else: \n                radii[i] = min_positive_radius\n                radii[j] = min_positive_radius\n          else: \n              radii[i] = min_positive_radius\n              radii[j] = min_positive_radius\n\n  return np.maximum(radii, min_positive_radius)\n\n\ndef compute_max_radii(centers: np.ndarray) -> tuple[np.ndarray, bool]:\n  n = centers.shape[0]\n  \n  boundary_epsilon = 1e-7\n  min_positive_radius = 1e-9\n  lp_safety_margin = 1e-9 \n\n  c = -np.ones(n)\n\n  A_ub = [] \n  b_ub = [] \n\n  for i in range(n):\n      x, y = centers[i]\n      \n      row_x1 = np.zeros(n); row_x1[i] = 1; A_ub.append(row_x1); b_ub.append(x - boundary_epsilon)\n      row_y1 = np.zeros(n); row_y1[i] = 1; A_ub.append(row_y1); b_ub.append(y - boundary_epsilon)\n      row_x2 = np.zeros(n); row_x2[i] = 1; A_ub.append(row_x2); b_ub.append(1 - x - boundary_epsilon)\n      row_y2 = np.zeros(n); row_y2[i] = 1; A_ub.append(row_y2); b_ub.append(1 - y - boundary_epsilon)\n\n  distances = np.linalg.norm(centers[:, np.newaxis, :] - centers[np.newaxis, :, :], axis=2)\n\n  for i in range(n):\n      for j in range(i + 1, n): \n          row_overlap = np.zeros(n); row_overlap[i] = 1; row_overlap[j] = 1; A_ub.append(row_overlap)\n          b_ub.append(distances[i, j] - lp_safety_margin) \n\n  A_ub = np.array(A_ub)\n  b_ub = np.array(b_ub)\n\n  # Bounds for radii: r_i >= min_positive_radius explicitly\n  bounds = [(min_positive_radius, None) for _ in range(n)]\n\n  res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs', options={'presolve': True}) \n\n  if res.success:\n      return np.array(res.x), True\n  else:\n      # Return small radii and failure status\n      return np.full(n, min_positive_radius), False \n\n\ndef objective_function_for_minimize(flat_centers: np.ndarray) -> float:\n    n = 32\n    centers = flat_centers.reshape(n, 2)\n    \n    radii, lp_success = compute_max_radii(centers)\n    \n    if lp_success:\n        return -np.sum(radii)\n    else:\n        # Soft penalty: return a slightly negative sum, which is very bad\n        # but not an infinite value, allowing SLSQP to search more smoothly.\n        return 0.001 # A small positive value means a small negative sum of radii, very undesirable.\n\ndef gradient_finite_difference(flat_centers: np.ndarray, epsilon=1e-6) -> np.ndarray:\n    grad = np.zeros_like(flat_centers, dtype=float)\n    for i in range(len(flat_centers)):\n        # Perturb forward\n        x_plus_eps = flat_centers.copy()\n        x_plus_eps[i] += epsilon\n        f_plus_eps = objective_function_for_minimize(x_plus_eps)\n        \n        # Perturb backward\n        x_minus_eps = flat_centers.copy()\n        x_minus_eps[i] -= epsilon\n        f_minus_eps = objective_function_for_minimize(x_minus_eps)\n        \n        grad[i] = (f_plus_eps - f_minus_eps) / (2 * epsilon)\n    return grad\n\ndef construct_packing() -> tuple:\n    n = 32\n    \n    clip_margin = 1e-7 \n\n    grid_x = 4\n    grid_y = 8\n    \n    x_coords = np.linspace(clip_margin, 1 - clip_margin, grid_x)\n    y_coords = np.linspace(clip_margin, 1 - clip_margin, grid_y)\n    \n    initial_centers_list = []\n    for x in x_coords:\n        for y in y_coords:\n            initial_centers_list.append([x, y])\n    \n    initial_centers = np.array(initial_centers_list)[:n] \n    initial_x0 = initial_centers.flatten()\n\n    bounds_per_coord = (clip_margin, 1 - clip_margin)\n    bounds_for_optimizer = [bounds_per_coord] * (n * 2) \n\n    res = minimize(\n        objective_function_for_minimize,\n        initial_x0,\n        method='SLSQP',\n        jac=gradient_finite_difference, \n        bounds=bounds_for_optimizer,\n        options={'maxiter': 200, 'disp': False} \n    )\n\n    if res.success:\n        optimized_centers_flat = res.x\n        optimized_centers = optimized_centers_flat.reshape(n, 2)\n        final_radii, final_lp_success = compute_max_radii(optimized_centers)\n        \n        if not final_lp_success: # If final LP fails, fall back to heuristic\n            print(\"Final LP failed for optimized centers, falling back to heuristic for radii.\")\n            final_radii = compute_max_radii_heuristic(optimized_centers)\n\n        final_score = np.sum(final_radii)\n        print(f\"SLSQP Optimization successful, score: {final_score}\")\n        return optimized_centers, final_radii\n    else:\n        print(f\"SLSQP Optimization failed: {res.message}. Returning initial grid + heuristic-radii as LP likely fails.\")\n        # If SLSQP fails to find a solution, the best we can do is return the initial grid with heuristic radii,\n        # as LP likely failed for the initial grid too in this scenario, or provided poor radii.\n        initial_radii = compute_max_radii_heuristic(initial_centers)\n        return initial_centers, initial_radii\n",
+    "submitted_timestamp": 1760798514.3413005,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.5704957031011224,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nSLSQP Optimization failed: Iteration limit reached. Returning initial grid + heuristic-radii as LP likely fails.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 0.570496",
+      "evaluation_timestamp": 1760798623.480716,
+      "evaluation_datetime": "2025-10-18T22:43:43.480718"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.5704957031011224,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760798623.5059006,
+    "version_notified": "original",
+    "message": "Your research submission 'SLSQP Optimization with Soft-Penalized Infeasible LP Solutions' (ID: 165) has been evaluated.\n\n**Score:** 0.5704957031011224\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 0.570496\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nSLSQP Optimization failed: Iteration limit reached. Returning initial grid + heuristic-radii as LP likely fails.\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

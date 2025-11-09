@@ -1,0 +1,47 @@
+{
+  "id": "295",
+  "author": "Inquire I",
+  "research_task_id": "1",
+  "title": "Utility Run: nmap v0.1 Data Export for N=26 SOTA Packing (Eval ID 207)",
+  "tags": [
+    "utility",
+    "nmap",
+    "exports",
+    "sota",
+    "collaboration",
+    "data"
+  ],
+  "abstract": "This utility submission precisely replicates Inquire I's SOTA packing from Evaluation ID 207 (score 2.6297596). It then extracts the final `centers` and `radii` data and exports them to `storage/Inquire/nmap/n26/centers.txt` and `storage/Inquire/nmap/n26/radii.txt` respectively. The export adheres to the `nmap` v0.1 standardized schema, specifically formatting the data as space-separated values (for centers) and single-column (for radii), without headers. This fulfills @Scientia I's request (Mail #11) to facilitate their research on distinct structural classes and enables accurate cross-lineage comparison of packing configurations.",
+  "submitted_tick": 187,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport sys\nimport os # For creating directories (handled by STORAGE_WRITE_CMD)\n\n# --- Core SLSQP optimization functions (from Eval ID 93 and 207) ---\ndef pack_to_z(c, r):\n    z = np.zeros(c.shape[0] * 3); z[0::3], z[1::3], z[2::3] = c[:,0], c[:,1], r; return z\ndef z_to_pack(z):\n    n = z.shape[0] // 3; c = np.vstack((z[0::3], z[1::3])).T; r = z[2::3]; return c, r\ndef objective(z): return -np.sum(z[2::3])\ndef constraint_boundary(z):\n    c, r = z_to_pack(z); n = c.shape[0]\n    return np.concatenate((c[:,0]-r, 1-c[:,0]-r, c[:,1]-r, 1-c[:,1]-r))\ndef constraint_nonoverlap(z):\n    c, r = z_to_pack(z); n = c.shape[0]\n    pdist_sq = np.sum((c[:,np.newaxis,:] - c[np.newaxis,:,:])**2, axis=-1)\n    r_sum = r[:,np.newaxis] + r[np.newaxis,:]\n    iu = np.triu_indices(n, k=1)\n    return np.sqrt(pdist_sq[iu]) - r_sum[iu]\n\ndef generate_systematic_grid_hole_seed(N_circles=26, hole_cell=(0,1)):\n    grid_coords = np.array([0.1, 0.3, 0.5, 0.7, 0.9])\n    r0 = 0.1 - 1e-8 \n    centers = np.array([[x, y] for x in grid_coords for y in grid_coords])\n    radii = np.full(25, r0) \n    i, j = hole_cell\n    cx = (grid_coords[i] + grid_coords[i+1]) / 2.0; cy = (grid_coords[j] + grid_coords[j+1]) / 2.0\n    hole_center = np.array([cx, cy])\n    corner = np.array([grid_coords[i], grid_coords[j]])\n    dist = np.linalg.norm(hole_center - corner)\n    r_hole = dist - r0 \n    return np.vstack([centers, hole_center]), np.append(radii, r_hole)\n\ndef perturb_centers(centers, magnitude, N_circles):\n    perturbed_centers = centers.copy()\n    delta = np.random.uniform(-magnitude, magnitude, size=(N_circles, 2))\n    perturbed_centers += delta\n    return np.clip(perturbed_centers, 1e-6, 1 - 1e-6)\n\n# SOTA-level Parameters for SLSQP (from Eval ID 93)\nSLSQP_OPTIONS = {'maxiter': 500, 'ftol': 1e-9, 'disp': False}\nBOUNDS = [(0,1) if i%3!=2 else (1e-6,0.5) for i in range(26*3)]\nCONSTRAINTS = [\n    {'type': 'ineq', 'fun': constraint_boundary},\n    {'type': 'ineq', 'fun': constraint_nonoverlap}\n]\nSAFETY_FACTOR = 1.0 - 1e-9 \n\ndef run_slsqp_optimization(initial_centers, N_circles=26):\n    initial_radii = np.full(N_circles, 0.05) \n    z0 = pack_to_z(initial_centers, initial_radii)\n    res = minimize(objective, z0, method='SLSQP', bounds=BOUNDS, constraints=CONSTRAINTS, options=SLSQP_OPTIONS)\n    final_centers, final_radii = z_to_pack(res.x)\n    final_radii *= SAFETY_FACTOR\n    return np.sum(final_radii), final_centers, final_radii, res.x \n\ndef construct_packing() -> tuple:\n    N = 26\n    \n    # --- REPLICATE EVAL ID 207 SOTA TO GET EXACT PACKING ---\n    # This ensures the `final_c`/`final_r` precisely correspond to the 2.6297596 score.\n    np.random.seed(42) # Exact random seed from Eval ID 150/195/207\n    perturbation_magnitudes = [0.0, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.2]\n    num_trials_per_magnitude = 3\n    \n    target_mag_val = 0.04 \n    target_trial_idx = 2 \n\n    sota_base_centers, _ = generate_systematic_grid_hole_seed(N_circles=N)\n    \n    final_c, final_r = None, None\n\n    for mag_idx, mag in enumerate(perturbation_magnitudes):\n        for trial_idx in range(num_trials_per_magnitude):\n            perturbed_centers = sota_base_centers.copy()\n            if mag != 0.0:\n                perturbed_centers = perturb_centers(sota_base_centers, mag, N) \n            \n            if mag == target_mag_val and trial_idx == target_trial_idx:\n                _, final_c, final_r, _ = run_slsqp_optimization(perturbed_centers, N_circles=N)\n                break \n        if final_c is not None:\n            break\n          \n    if final_c is None:\n        print(\"Error: SOTA replication from Eval ID 207 failed.\", file=sys.stderr)\n        return np.zeros((N,2)), np.zeros(N)\n\n    print(f\"--- Replicated SOTA (Eval ID 207) Score: {np.sum(final_r):.7f} ---\", file=sys.stdout)\n\n    # --- Export Centers and Radii to nmap format ---\n    centers_txt_content = \"\"\n    for row in final_c:\n        centers_txt_content += f\"{row[0]:.8f} {row[1]:.8f}\\n\" # Format with fixed precision\n\n    radii_txt_content = \"\"\n    for r_val in final_r:\n        radii_txt_content += f\"{r_val:.8f}\\n\" # Format with fixed precision\n\n    # --- Print STORAGE_WRITE_CMD to STDOUT for lineage storage ---\n    print(f\"STORAGE_WRITE_CMD: storage/Inquire/nmap/n{N}/centers.txt\\n{centers_txt_content.strip()}\", file=sys.stdout)\n    print(f\"STORAGE_WRITE_CMD: storage/Inquire/nmap/n{N}/radii.txt\\n{radii_txt_content.strip()}\", file=sys.stdout)\n    \n    return final_c, final_r\n",
+    "submitted_timestamp": 1760898353.1698763,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6297595642370415,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Replicated SOTA (Eval ID 207) Score: 2.6297596 ---\nSTORAGE_WRITE_CMD: storage/Inquire/nmap/n26/centers.txt\n0.10976233 0.10976233\n0.09885062 0.31808972\n0.11781437 0.53392320\n0.06810260 0.71307078\n0.11214509 0.88785491\n0.28402520 0.06916659\n0.27341565 0.23323565\n0.33408439 0.54497239\n0.23520270 0.71624275\n0.32764519 0.89647275\n0.47372504 0.13007014\n0.41588874 0.36508569\n0.54116680 0.53075992\n0.43990736 0.71990171\n0.52842653 0.90265089\n0.71573150 0.11256836\n0.62645795 0.32285749\n0.75508318 0.50450397\n0.67643236 0.72878493\n0.69412080 0.92949450\n0.91330638 0.08669362\n0.87056830 0.29855114\n0.93050975 0.48822709\n0.89797941 0.65662466\n0.87891460 0.87891460\n0.24901272 0.39787249\nSTORAGE_WRITE_CMD: storage/Inquire/nmap/n26/radii.txt\n0.10976233\n0.09885062\n0.11781437\n0.06810260\n0.11214509\n0.06916659\n0.09524514\n0.09873772\n0.09902760\n0.10352725\n0.13007014\n0.09887599\n0.10883184\n0.10570975\n0.09734911\n0.11256836\n0.11588576\n0.10668983\n0.13098200\n0.07050550\n0.08669362\n0.12943170\n0.06949025\n0.10202059\n0.12108540\n0.07119041\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.629760",
+      "evaluation_timestamp": 1760898355.2282624,
+      "evaluation_datetime": "2025-10-20T02:25:55.228265"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6297595642370415,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760898355.2536447,
+    "version_notified": "original",
+    "message": "Your research submission 'Utility Run: nmap v0.1 Data Export for N=26 SOTA Packing (Eval ID 207)' (ID: 295) has been evaluated.\n\n**Score:** 2.6297595642370415\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.629760\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Replicated SOTA (Eval ID 207) Score: 2.6297596 ---\nSTORAGE_WRITE_CMD: storage/Inquire/nmap/n26/centers.txt\n0.10976233 0.10976233\n0.09885062 0.31808972\n0.11781437 0.53392320\n0.06810260 0.71307078\n0.11214509 0.88785491\n0.28402520 0.06916659\n0.27341565 0.23323565\n0.33408439 0.54497239\n0.23520270 0.71624275\n0.32764519 0.89647275\n0.47372504 0.13007014\n0.41588874 0.36508569\n0.54116680 0.53075992\n0.43990736 0.71990171\n0.52842653 0.90265089\n0.71573150 0.11256836\n0.62645795 0.32285749\n0.75508318 0.50450397\n0.67643236 0.72878493\n0.69412080 0.92949450\n0.91330638 0.08669362\n0.87056830 0.29855114\n0.93050975 0.48822709\n0.89797941 0.65662466\n0.87891460 0.87891460\n0.24901272 0.39787249\nSTORAGE_WRITE_CMD: storage/Inquire/nmap/n26/radii.txt\n0.10976233\n0.09885062\n0.11781437\n0.06810260\n0.11214509\n0.06916659\n0.09524514\n0.09873772\n0.09902760\n0.10352725\n0.13007014\n0.09887599\n0.10883184\n0.10570975\n0.09734911\n0.11256836\n0.11588576\n0.10668983\n0.13098200\n0.07050550\n0.08669362\n0.12943170\n0.06949025\n0.10202059\n0.12108540\n0.07119041\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

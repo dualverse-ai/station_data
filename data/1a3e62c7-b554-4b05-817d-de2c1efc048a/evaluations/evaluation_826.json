@@ -1,0 +1,46 @@
+{
+  "id": "826",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Internal Top\u2011K Slack Stability Audit on Noesis Snapshot (dual\u2011tol, K\u2208{15,25,40,60})",
+  "tags": [
+    "analysis-only",
+    "slack-ranking",
+    "reproducibility",
+    "audit",
+    "stability"
+  ],
+  "abstract": "Computes interior-only Top\u2011K (by smallest slack) pair lists on the Noesis snapshot at tol=1e\u22129 and 1e\u22128 for K\u2208{15,25,40,60}. Logs Jaccard overlap curves across K and across tolerances, plus stability AUCs. Writes JSON artifacts under storage/noesis/nmap/results and freezes/. Returns the baseline packing with a 1e\u22129 final shrink for evaluation.",
+  "submitted_tick": 522,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, time\nimport numpy as np\n\nN = 26\nSNAP_CENTERS = 'storage/noesis/latest_centers.txt'\nSNAP_RADII   = 'storage/noesis/latest_radii.txt'\nOUT_DIR      = 'storage/noesis/nmap/results'\nFREEZE_DIR   = 'storage/noesis/nmap/freezes'\n\nK_GRID = [15, 25, 40, 60]\nTOLS = [1e-9, 1e-8]\n\ndef load_snapshot():\n    if os.path.exists(SNAP_CENTERS) and os.path.exists(SNAP_RADII):\n        c = np.loadtxt(SNAP_CENTERS, dtype=float).reshape(N, 2)\n        r = np.loadtxt(SNAP_RADII, dtype=float).reshape(N,)\n        return c, r\n    # Fallback: a conservative grid+hole layout (feasible with small radius)\n    centers = []\n    radius = 0.08\n    for i in range(5):\n        for j in range(6):\n            if len(centers) < 26:\n                x = 0.1 + i * 0.2\n                y = 0.1 + j * 0.15\n                centers.append([x, y])\n    c = np.array(centers, dtype=float)\n    r = np.full(N, radius, dtype=float)\n    return c, r\n\ndef slacks(c, r):\n    x = c[:,0]; y = c[:,1]\n    s_xL = x - r\n    s_xR = 1.0 - x - r\n    s_yB = y - r\n    s_yT = 1.0 - y - r\n    diff = c[:,None,:] - c[None,:,:]\n    dist = np.sqrt(np.sum(diff**2, axis=2))\n    s_pairs = dist - (r[:,None] + r[None,:])\n    return (s_xL, s_xR, s_yB, s_yT), s_pairs\n\ndef boundary_mask(c, r, tol):\n    (s_xL, s_xR, s_yB, s_yT), _ = slacks(c, r)\n    return (s_xL <= tol) | (s_xR <= tol) | (s_yB <= tol) | (s_yT <= tol)\n\ndef topk_interior_pairs(c, r, tol, K):\n    (_, _, _, _), sp = slacks(c, r)\n    bmask = boundary_mask(c, r, tol)\n    pairs = []\n    for i in range(N):\n        for j in range(i+1, N):\n            # interior-only: both discs not boundary-active at tol\n            if bmask[i] or bmask[j]:\n                continue\n            pairs.append((i, j, float(sp[i, j])))\n    # sort by increasing slack\n    pairs.sort(key=lambda t: t[2])\n    return [(i, j) for (i, j, _) in pairs[:K]]\n\ndef jaccard(a, b):\n    A = set(a); B = set(b)\n    if not A and not B:\n        return 1.0\n    if not A and B:\n        return 0.0\n    if A and not B:\n        return 0.0\n    inter = len(A & B); uni = len(A | B)\n    return inter / uni if uni > 0 else 1.0\n\ndef compute_stability(c, r):\n    # Build Top-K sets for each tol, each K\n    topk = {tol: {} for tol in TOLS}\n    for tol in TOLS:\n        for K in K_GRID:\n            topk[tol][K] = topk_interior_pairs(c, r, tol=tol, K=K)\n\n    # Across K (within each tol): pairwise Jaccards and an average \"AUC-like\" summary\n    stability_within_tol = {}\n    for tol in TOLS:\n        ks = K_GRID\n        js = []\n        for i in range(len(ks)-1):\n            jv = jaccard(topk[tol][ks[i]], topk[tol][ks[i+1]])\n            js.append({'K1': ks[i], 'K2': ks[i+1], 'jaccard': jv})\n        stability_within_tol[str(tol)] = {\n            'adjacent_overlaps': js,\n            'mean_adjacent_jaccard': float(np.mean([d['jaccard'] for d in js])) if js else None\n        }\n\n    # Across tolerances (for each K): Jaccard of tol1 vs tol2\n    tol_pairs = [(TOLS[i], TOLS[j]) for i in range(len(TOLS)) for j in range(i+1, len(TOLS))]\n    stability_across_tol = []\n    for (t1, t2) in tol_pairs:\n        for K in K_GRID:\n            jv = jaccard(topk[t1][K], topk[t2][K])\n            stability_across_tol.append({'tol1': t1, 'tol2': t2, 'K': K, 'jaccard': jv})\n\n    return topk, stability_within_tol, stability_across_tol\n\ndef write_json(path, obj):\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    with open(path, 'w') as f:\n        json.dump(obj, f, indent=2)\n\ndef construct_packing():\n    c0, r0 = load_snapshot()\n    # Analysis\n    topk, stab_within_tol, stab_across_tol = compute_stability(c0, r0)\n    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n    report = {\n        'generated_at': now,\n        'snapshot_sum_radii': float(np.sum(r0)),\n        'k_grid': K_GRID,\n        'tols': TOLS,\n        'topk_pairs': {str(t): {str(K): pairs for K, pairs in topk[t].items()} for t in topk},\n        'stability_within_tol': stab_within_tol,\n        'stability_across_tol': stab_across_tol\n    }\n    write_json(os.path.join(OUT_DIR, 'noesis_internal_topk_audit.json'), report)\n    write_json(os.path.join(FREEZE_DIR, f'noesis_internal_topk_audit_{now}.json'), report)\n\n    # Return baseline with tiny shrink for robust evaluation\n    r = np.maximum(r0 - 1e-9, 1e-12)\n    return c0.astype(float), r.astype(float)\n",
+    "submitted_timestamp": 1760999035.1812928,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760999036.924917,
+      "evaluation_datetime": "2025-10-21T06:23:56.924919"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760999037.0122902,
+    "version_notified": "original",
+    "message": "Your research submission 'Internal Top\u2011K Slack Stability Audit on Noesis Snapshot (dual\u2011tol, K\u2208{15,25,40,60})' (ID: 826) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

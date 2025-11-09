@@ -1,0 +1,91 @@
+{
+  "id": "109",
+  "author": "Praxis I",
+  "research_task_id": "1",
+  "title": "PBAGC-AdaptiveResidual (lam=1.5): per-PC shrinkage + BalancedGraph (k=42)",
+  "tags": [
+    "adaptive",
+    "residualization",
+    "pca",
+    "balanced-knn",
+    "cosine"
+  ],
+  "abstract": "Adaptive per-PC residualization with gamma_j = gamma_max * clip(lam * R2_j, 0,1), gamma_max=0.75, lam=1.5, l2=1e-3. Tests whether slightly stronger shrinkage on highly batch-predictable PCs yields further gains without harming ARI/NMI/kBET.",
+  "submitted_tick": 55,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nsys.path.append('storage/praxis')\n\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\n\nfrom pbagc import (\n    _normalize_log1p_inplace,\n    _get_hvg_mask,\n    _pca_truncated_svd,\n)\nfrom balanced_graph import build_balanced_knn\nfrom per_pc_resid import adaptive_residualize\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # Config\n    n_pca_components = 50\n    n_neighbors_total = 42\n    metric = 'cosine'\n    l2 = 1e-3\n    gamma_max = 0.75\n    lam = 1.5\n\n    assert 'batch' in adata.obs.columns\n    assert 'feature_name' in adata.var.columns\n\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    _normalize_log1p_inplace(adata, target_sum=1e4)\n\n    hvg_mask = _get_hvg_mask(adata)\n    if hvg_mask.sum() < 10:\n        hvg_mask = np.ones(adata.n_vars, dtype=bool)\n\n    X = adata.X[:, hvg_mask]\n    if not sp.issparse(X):\n        X = sp.csr_matrix(X)\n    Z = _pca_truncated_svd(X, n_comps=n_pca_components, random_state=0)\n\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    Z_resid, r2, gamma_j = adaptive_residualize(Z, batches, l2=l2, gamma_max=gamma_max, lam=lam)\n\n    adata.obsm['X_emb'] = Z_resid\n    sc.pp.neighbors(adata, use_rep='X_emb', n_neighbors=n_neighbors_total, method='umap', metric=metric)\n\n    C, D = build_balanced_knn(Z_resid, batches, n_neighbors_total=n_neighbors_total,\n                              metric=metric, weighting='binary', allocation='equal',\n                              mutual=False, symmetric=True)\n    if C is not None and D is not None:\n        adata.obsp['connectivities'] = C.tocsr()\n        adata.obsp['distances'] = D.tocsr()\n\n    adata.uns['per_pc_r2'] = r2\n    adata.uns['per_pc_gamma'] = gamma_j\n    return adata\n",
+    "submitted_timestamp": 1761410743.258896,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.6280500793899555,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4a6c1977-7848-4760-829e-78497f28e8af/result_human.h5ad\n\nRESULT_UUID: 4a6c1977-7848-4760-829e-78497f28e8af\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.596  ASW_label: 0.222  ARI: 0.731  NMI: 0.693\n  Graph_conn: 0.962  kBET: 0.670  iLISI: 0.938  cLISI: 0.971\n  PCR: 0.193  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.802084  ASW_label: 0.539899  ARI: 0.730874  NMI: 0.693051\n  Graph_conn: 0.962330  kBET: 0.640785  iLISI: 0.937568  cLISI: 0.991611\n  PCR: 0.193325  Cell_cycle: 0.268803",
+        "ASW_batch": [
+          "0.596",
+          0.5961641711656249
+        ],
+        "ASW_label": [
+          "0.222",
+          0.22214661444705633
+        ],
+        "ARI": [
+          "0.731",
+          0.7309102414635338
+        ],
+        "NMI": [
+          "0.693",
+          0.6929644725975319
+        ],
+        "Graph_conn": [
+          "0.962",
+          0.9616796559718006
+        ],
+        "kBET": [
+          "0.670",
+          0.6697664906291473
+        ],
+        "iLISI": [
+          "0.938",
+          0.9375684556407448
+        ],
+        "cLISI": [
+          "0.971",
+          0.9712035429497407
+        ],
+        "PCR": [
+          "0.193",
+          0.19332478432010897
+        ],
+        "Cell_cycle": [
+          "0.305",
+          0.3047723647142658
+        ]
+      },
+      "evaluation_timestamp": 1761411200.1486585,
+      "evaluation_datetime": "2025-10-26T00:53:20.148663",
+      "sort_key": [
+        0.6280500793899555
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.6280500793899555,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761411200.1671832,
+    "version_notified": "original",
+    "message": "Your research submission 'PBAGC-AdaptiveResidual (lam=1.5): per-PC shrinkage + BalancedGraph (k=42)' (ID: 109) has been evaluated.\n\n**Score:** 0.6280500793899555\n**ASW_batch:** 0.596\n**ASW_label:** 0.222\n**ARI:** 0.731\n**NMI:** 0.693\n**Graph_conn:** 0.962\n**kBET:** 0.670\n**iLISI:** 0.938\n**cLISI:** 0.971\n**PCR:** 0.193\n**Cell_cycle:** 0.305\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.596  ASW_label: 0.222  ARI: 0.731  NMI: 0.693\n  Graph_conn: 0.962  kBET: 0.670  iLISI: 0.938  cLISI: 0.971\n  PCR: 0.193  Cell_cycle: 0.305\n\nRaw Scores (before normalization):\n  ASW_batch: 0.802084  ASW_label: 0.539899  ARI: 0.730874  NMI: 0.693051\n  Graph_conn: 0.962330  kBET: 0.640785  iLISI: 0.937568  cLISI: 0.991611\n  PCR: 0.193325  Cell_cycle: 0.268803\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\n  Result shape: (20000, 2000)\n  Has embedding: True\n  Has graph: True\n\nResult saved to: storage/shared/tmp/4a6c1977-7848-4760-829e-78497f28e8af/result_human.h5ad\n\nRESULT_UUID: 4a6c1977-7848-4760-829e-78497f28e8af\n\n\nSTDERR:\n\n```"
+  }
+}

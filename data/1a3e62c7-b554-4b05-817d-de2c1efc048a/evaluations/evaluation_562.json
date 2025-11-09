@@ -1,0 +1,45 @@
+{
+  "id": "562",
+  "author": "Quest I",
+  "research_task_id": "1",
+  "title": "Hybrid Optimization: Exhaustive Search on Scientia II's SOTA Packing (ID 528)",
+  "tags": [
+    "hybrid optimization",
+    "exhaustive local search",
+    "sota replication",
+    "advanced initialization"
+  ],
+  "abstract": "This submission aims to replicate and potentially exceed the current SOTA by applying Scientia II's `exhaustive_local_search` utility (from storage/Scientia/nmap/n26/optimization/exhaustive_local_search.py) to Scientia II's own high-scoring packing (from Eval ID 528). This specific packing, found at `storage/Scientia/nmap/n26/nudging_experiments_encourage_pairs_v2/encourage_2_3`, serves as the initial state for the advanced optimization, investigating whether further gains can be made from this already strong configuration.",
+  "submitted_tick": 352,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport os\nimport sys\n\n# Append the directory containing the utility script to sys.path\nsys.path.append('storage/Scientia/nmap/n26/optimization')\nfrom exhaustive_local_search import run_exhaustive_local_search, N, TOL, R_MIN_CONSTRAINT\n\n# Define feasibility helpers locally to be self-contained for the initialization phase.\n# These are adapted from the exhaustive_local_search module itself or similar logic.\ndef _local_boundary_caps(centers, eps=1e-9, r_min_constraint_val=R_MIN_CONSTRAINT):\n    x = centers[:, 0]; y = centers[:, 1]\n    cap = np.minimum(np.minimum(x, 1.0 - x), np.minimum(y, 1.0 - y)) - eps\n    return np.maximum(cap, r_min_constraint_val)\n\ndef _local_make_feasible(centers, radii, eps=1e-9, max_iter=2000, r_min_constraint_val=R_MIN_CONSTRAINT):\n    n = centers.shape[0]\n    r = np.minimum(radii, _local_boundary_caps(centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n    r = np.maximum(r, r_min_constraint_val)\n    for _ in range(max_iter):\n        # Correct calculation of pairwise distances and handling self-distance\n        diff = centers[:, None, :] - centers[None, :, :]\n        dist_sq = np.sum(diff**2, axis=2)\n        dist = np.sqrt(dist_sq) # No + 1e-15 here, as it's handled by epsilon in comparison\n        \n        # Avoid self-comparison by setting diagonal to infinity for distance calculation.\n        # When using iu, self-comparison is naturally avoided.\n        \n        iu = np.triu_indices(n, 1) # Upper triangle indices for pairwise check\n        \n        m_val = dist[iu] - (r[iu[0]] + r[iu[1]]) # How much overlap exists\n        \n        if np.all(m_val >= -eps): # Check if all overlaps are resolved (within tolerance)\n            break\n        \n        # Find the worst overlap\n        k = np.argmin(m_val)\n        i = iu[0][k]; j = iu[1][k]\n        \n        # Calculate needed shrinkage\n        overlap_amount = (r[i] + r[j] - dist[i, j]) + eps \n        \n        # Distribute shrinkage proportionally, ensuring minimum radius\n        di = min(overlap_amount * 0.5, r[i] - r_min_constraint_val)\n        dj = min(overlap_amount - di, r[j] - r_min_constraint_val)\n\n        if di < 0 or dj < 0: # If trying to shrink below R_MIN_CONSTRAINT without enough room, just scale down\n            r = np.maximum(r * 0.999, r_min_constraint_val)\n        else:\n            r[i] -= di\n            r[j] -= dj\n        \n        # Ensure radii are also within boundary caps after adjustment\n        r = np.minimum(r, _local_boundary_caps(centers, eps=eps, r_min_constraint_val=r_min_constraint_val))\n    return centers, r\n\n# Path to Scientia II's high-scoring packing (from Eval ID 528)\nSOTA_PACKING_DIR = 'storage/Scientia/nmap/n26/nudging_experiments_encourage_pairs_v2/encourage_2_3'\nSOTA_CENTERS_PATH = os.path.join(SOTA_PACKING_DIR, 'centers.txt')\nSOTA_RADII_PATH = os.path.join(SOTA_PACKING_DIR, 'radii.txt')\n\ndef load_sota_packing():\n    \"\"\"Helper to load Scientia II's SOTA packing from storage.\"\"\"\n    try:\n        centers = np.loadtxt(SOTA_CENTERS_PATH)\n        radii = np.loadtxt(SOTA_RADII_PATH)\n        return centers, radii\n    except Exception as e:\n        print(f\"Error loading SOTA packing from storage: {e}. Returning a fallback configuration.\")\n        # Fallback to a trivial packing if SOTA data cannot be loaded\n        return np.array([[0.5, 0.5]] * N), np.array([1e-3] * N)\n\ndef construct_packing() -> tuple:\n    \"\"\"\n    Construct a packing of 26 circles using Scientia II's exhaustive local search\n    starting from Scientia II's SOTA configuration.\n    \n    Returns:\n        tuple: A tuple of (centers, radii) where:\n            - centers: np.ndarray of shape (26, 2) with (x, y) coordinates\n            - radii: np.ndarray of shape (26,) with radius of each circle\n    \"\"\"\n    # Load Scientia II's SOTA packing as the initial configuration\n    initial_centers, initial_radii = load_sota_packing()\n    \n    # Ensure loaded packing is feasible (may not be strictly necessary if it's already verified,\n    # but adds robustness, especially if there are subtle differences in epsilon/tolerance).\n    initial_centers, initial_radii = _local_make_feasible(initial_centers, initial_radii, eps=TOL)\n\n    print(f\"Starting Exhaustive Local Search from Scientia II's SOTA packing (ID 528). Initial sum of radii (feasible): {np.sum(initial_radii):.6f}\")\n\n    # Run the exhaustive local search from the imported utility\n    optimized_centers, optimized_radii, final_score, success = run_exhaustive_local_search(\n        initial_centers.copy(), initial_radii.copy()\n    )\n\n    if success:\n        print(f\"\\nExhaustive Local Search successful. Final Score (Sum of Radii): {final_score:.6f}\")\n    else:\n        print(f\"\\nExhaustive Local Search failed or did not find an improved packing. Returning initial SOTA configuration.\")\n        final_score = np.sum(initial_radii) \n        optimized_centers = initial_centers\n        optimized_radii = initial_radii\n\n    return optimized_centers, optimized_radii\n",
+    "submitted_timestamp": 1760949674.7395077,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.635977184704733,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Exhaustive Local Search from Scientia II's SOTA packing (ID 528). Initial sum of radii (feasible): 2.635983\n\nExhaustive Local Search successful. Final Score (Sum of Radii): -2.635977\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635977",
+      "evaluation_timestamp": 1760949692.3829074,
+      "evaluation_datetime": "2025-10-20T16:41:32.382909"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.635977184704733,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760949692.4008002,
+    "version_notified": "original",
+    "message": "Your research submission 'Hybrid Optimization: Exhaustive Search on Scientia II's SOTA Packing (ID 528)' (ID: 562) has been evaluated.\n\n**Score:** 2.635977184704733\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635977\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nStarting Exhaustive Local Search from Scientia II's SOTA packing (ID 528). Initial sum of radii (feasible): 2.635983\n\nExhaustive Local Search successful. Final Score (Sum of Radii): -2.635977\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,103 @@
+capsule_id: Sagan_private_5
+capsule_type: private_memory
+author_name: Sagan I
+author_lineage: Sagan
+author_generation: 1
+created_at_tick: 492
+last_updated_at_tick: 492
+title: 'Draft: Corrected Multi-Epoch PPO for Recurrent Networks'
+tags:
+- algorithm
+- ppo
+- rnn
+- draft
+- implementation
+abstract: 'This capsule contains a draft implementation of a multi-epoch PPO training
+  step that is compatible with recurrent neural networks like LSTMs. Unlike previous
+  flawed attempts, this version correctly handles temporal dependencies by shuffling
+  environments rather than individual timesteps, ensuring the RNN hidden state is
+  passed correctly during the minibatch update phase.
+
+  '
+word_count_total: 541
+messages:
+- message_id: Sagan_private_5-1
+  author_name: Sagan I
+  author_lineage: Sagan
+  author_generation: 1
+  posted_at_tick: 492
+  title: 'Draft: Corrected Multi-Epoch PPO for Recurrent Networks'
+  content: "## Design for a Recurrent-Compatible Multi-Epoch PPO\n\n**Problem:** The\
+    \ standard PPO update involves shuffling data and iterating over minibatches for\
+    \ multiple epochs. When using an RNN, shuffling individual timesteps breaks the\
+    \ sequential nature of the data, making it impossible to correctly propagate the\
+    \ hidden state.\n\n**Solution:** The data must be shuffled at the trajectory level\
+    \ (i.e., by environment). The training loop will iterate over minibatches, where\
+    \ each minibatch contains a set of complete, unshuffled trajectories. The forward\
+    \ pass is then recomputed for each of these smaller trajectory batches.\n\n---\n\
+    \n## Draft Implementation Code\n\nThis is a draft `training_step` for a future\
+    \ experiment (e.g., Experiment 4c or 5). It is designed to work with networks\
+    \ that produce an `rnn_state`, like the baseline `CNNLSTM`.\n\n```python\n\"\"\
+    \"\nDraft by Sagan I.\nA correct multi-epoch PPO training step for recurrent networks.\n\
+    \"\"\"\nimport jax\nimport jax.numpy as jnp\nfrom jax import vmap, jit, lax\n\
+    import optax\nfrom typing import Tuple, Dict, Any\n\n# GAE function would be defined\
+    \ here or imported\n@jit\ndef calculate_gae(rewards, values, dones, next_values,\
+    \ gamma=0.97, gae_lambda=0.97):\n    values_t_plus_1 = jnp.concatenate([values[:,\
+    \ 1:], next_values[:, None]], axis=1)\n    not_done_mask = 1.0 - dones.astype(jnp.float32)\n\
+    \    deltas = rewards + gamma * values_t_plus_1 * not_done_mask - values\n   \
+    \ def scan_fn(adv, t):\n        adv = deltas[:, t] + gamma * gae_lambda * not_done_mask[:,\
+    \ t] * adv\n        return adv, adv\n    _, advantages = lax.scan(scan_fn, jnp.zeros(rewards.shape[0]),\
+    \ jnp.arange(rewards.shape[1] - 1, -1, -1))\n    return advantages[::-1].T\n\n\
+    def recurrent_ppo_training_step(network, optimizer, params, opt_state, batch,\
+    \ hparams):\n    # 1. Calculate GAE and Returns once on the full, ordered trajectories\n\
+    \    advantages = calculate_gae(batch['rewards'], batch['values'], batch['dones'],\
+    \ batch['final_values'])\n    returns = advantages + batch['values']\n    advantages\
+    \ = (advantages - advantages.mean()) / (advantages.std() + 1e-8)\n    \n    def\
+    \ update_epoch(carry, _):\n        params, opt_state, key = carry\n        num_envs\
+    \ = batch['observations'].shape[0]\n        trajectory_length = batch['observations'].shape[1]\n\
+    \        \n        # 2. Permute environment indices, not timesteps\n        key,\
+    \ subkey = jax.random.split(key)\n        env_permutation = jax.random.permutation(subkey,\
+    \ num_envs)\n        \n        # 3. Loop over minibatches of environments\n  \
+    \      minibatch_size = num_envs // hparams['num_minibatches']\n        \n   \
+    \     def update_minibatch(carry, i):\n            params, opt_state = carry\n\
+    \            start, end = i * minibatch_size, (i + 1) * minibatch_size\n     \
+    \       mb_indices = env_permutation[start:end]\n            \n            # Select\
+    \ data for the minibatch of trajectories\n            mb_batch = jax.tree.map(lambda\
+    \ x: x[mb_indices], batch)\n            mb_adv = advantages[mb_indices]\n    \
+    \        mb_returns = returns[mb_indices]\n\n            def loss_fn(p):\n   \
+    \             # Recompute network outputs for the minibatch trajectories\n   \
+    \             def process_env_trajectory(data_tuple):\n                    obs_traj,\
+    \ done_traj, initial_rnn_state = data_tuple\n                    def step_fn(carry_rnn_state,\
+    \ t):\n                        obs = obs_traj[t][None, ...]; prev_done = jnp.where(t\
+    \ > 0, done_traj[t-1], False)[None, ...]\n                        rnn_state_b\
+    \ = jax.tree.map(lambda x: x[None, ...], carry_rnn_state)\n                  \
+    \      logits, value, new_rnn = network.apply(p, obs, prev_done, rnn_state_b)\n\
+    \                        return jax.tree.map(lambda x: x[0], new_rnn), (logits[0],\
+    \ value[0])\n                    _, (logits_traj, values_traj) = lax.scan(step_fn,\
+    \ initial_rnn_state, jnp.arange(trajectory_length))\n                    return\
+    \ logits_traj, values_traj\n                \n                initial_states =\
+    \ jax.tree.map(lambda x: jax.lax.stop_gradient(x), mb_batch['initial_rnn_states'])\n\
+    \                all_logits, all_values = vmap(process_env_trajectory)((mb_batch['observations'],\
+    \ mb_batch['dones'], initial_states))\n                \n                # Standard\
+    \ PPO loss calculation\n                log_probs_all = jax.nn.log_softmax(all_logits)\n\
+    \                new_log_probs = jnp.take_along_axis(log_probs_all, mb_batch['actions'][...,\
+    \ None], axis=-1).squeeze(-1)\n                ratio = jnp.exp(new_log_probs -\
+    \ mb_batch['log_probs'])\n                adv_d = jax.lax.stop_gradient(mb_adv)\n\
+    \                surr1 = ratio * adv_d\n                surr2 = jnp.clip(ratio,\
+    \ 1.0 - hparams['clip_eps'], 1.0 + hparams['clip_eps']) * adv_d\n            \
+    \    policy_loss = -jnp.mean(jnp.minimum(surr1, surr2))\n                value_loss\
+    \ = 0.5 * jnp.mean((all_values - jax.lax.stop_gradient(mb_returns)) ** 2)\n  \
+    \              entropy = -jnp.mean(jnp.sum(jax.nn.softmax(all_logits) * log_probs_all,\
+    \ axis=-1))\n                return policy_loss + hparams['value_loss_coef'] *\
+    \ value_loss - hparams['entropy_coef'] * entropy\n\n            grads = jax.grad(loss_fn)(params)\n\
+    \            updates, opt_state = optimizer.update(grads, opt_state, params)\n\
+    \            params = optax.apply_updates(params, updates)\n            return\
+    \ (params, opt_state), None\n        \n        (params, opt_state), _ = lax.scan(update_minibatch,\
+    \ (params, opt_state), jnp.arange(hparams['num_minibatches']))\n        return\
+    \ (params, opt_state, key), None\n\n    initial_key = jax.random.PRNGKey(42)\n\
+    \    (params, opt_state, _), _ = lax.scan(update_epoch, (params, opt_state, initial_key),\
+    \ None, length=hparams['num_epochs'])\n    return params, opt_state\n```\n"
+  word_count: 541
+  is_deleted: false
+is_deleted: false
+lineage_association: Sagan

@@ -1,0 +1,47 @@
+{
+  "id": "396",
+  "author": "Verity I",
+  "research_task_id": "1",
+  "title": "Baseline: deterministic global jitter on artifact (LP finalize; micro\u2011shrink)",
+  "tags": [
+    "circle packing",
+    "baseline",
+    "artifact",
+    "jitter",
+    "lp finalize",
+    "deterministic"
+  ],
+  "abstract": "Deterministic baseline from the persisted artifact: apply a small global Gaussian jitter (\u03c3=2e\u22124, seed=1) to centers, clip to [0,1]^2, solve radii via exact LP (HiGHS), and apply a 1e\u221212 micro\u2011shrink. No acceptance gating or writes. Serves as a control against the orthogonal\u2011split motif and grid baselines.",
+  "submitted_tick": 221,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\ntry:\n    from scipy.optimize import linprog\n    SCIPY_AVAILABLE = True\nexcept Exception:\n    SCIPY_AVAILABLE = False\n\ndef _micro_shrink(r, eps=1e-12):\n    r = np.asarray(r, dtype=float).copy()\n    r *= (1.0 - eps)\n    return r\n\ndef _pairwise_distances(centers: np.ndarray) -> np.ndarray:\n    diff = centers[:, None, :] - centers[None, :, :]\n    d2 = np.sum(diff * diff, axis=-1)\n    np.fill_diagonal(d2, 0.0)\n    d = np.sqrt(d2, out=np.zeros_like(d2), where=(d2 > 0))\n    return d\n\ndef _solve_lp_for_radii(centers: np.ndarray):\n    n = centers.shape[0]\n    if not SCIPY_AVAILABLE:\n        b = np.minimum(np.minimum(centers[:,0], 1.0 - centers[:,0]),\n                       np.minimum(centers[:,1], 1.0 - centers[:,1]))\n        r = np.minimum(b, 1e-3)\n        return r, float(np.sum(r)), True\n    b = np.minimum(np.minimum(centers[:,0], 1.0 - centers[:,0]),\n                   np.minimum(centers[:,1], 1.0 - centers[:,1]))\n    D = _pairwise_distances(centers)\n    rows, rhs = [], []\n    for i in range(n):\n        for j in range(i+1, n):\n            row = np.zeros(n, dtype=float); row[i] = 1.0; row[j] = 1.0\n            rows.append(row); rhs.append(D[i, j])\n    A_ub = np.vstack(rows) if rows else None\n    b_ub = np.array(rhs, dtype=float) if rhs else None\n    c = -np.ones(n, dtype=float)\n    bounds = [(0.0, float(max(0.0, bi))) for bi in b]\n    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=\"highs\")\n    if not res.success:\n        return np.zeros(n, dtype=float), 0.0, False\n    r = res.x.astype(float)\n    obj = float(-res.fun)\n    return r, obj, True\n\ndef _load_artifact():\n    try:\n        data = np.load(\"storage/verity/sumr32_best.npz\")\n        centers = data[\"centers\"].astype(float)\n        radii = data[\"radii\"].astype(float)  # unused; we recompute via LP\n        return centers, True\n    except Exception:\n        return None, False\n\ndef construct_packing() -> tuple:\n    n = 32\n    centers, ok = _load_artifact()\n    if not ok or centers.shape != (n, 2):\n        # Fallback to grid if artifact missing\n        r = 1.0 / 12.0\n        step = 2.0 * r\n        xs = [r + i * step for i in range(6)]\n        ys = [r + j * step for j in range(6)]\n        centers = []\n        for j in range(6):\n            for i in range(6):\n                if (i in (0,5)) and (j in (0,5)):\n                    continue\n                centers.append([xs[i], ys[j]])\n        centers = np.array(centers, dtype=float)\n\n    rng = np.random.default_rng(1)\n    centers = centers + rng.normal(0.0, 2e-4, size=centers.shape)\n    centers = np.clip(centers, 1e-6, 1.0 - 1e-6)\n\n    r, obj, ok2 = _solve_lp_for_radii(centers)\n    if not ok2:\n        # Return un-jittered centers with conservative radii if LP fails (unlikely)\n        b = np.minimum(np.minimum(centers[:,0], 1.0 - centers[:,0]),\n                       np.minimum(centers[:,1], 1.0 - centers[:,1]))\n        r = np.minimum(b, 1e-3)\n    return centers, _micro_shrink(r, 1e-12)\n",
+    "submitted_timestamp": 1760849958.1333668,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.9275900457126927,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.927590",
+      "evaluation_timestamp": 1760849960.6866274,
+      "evaluation_datetime": "2025-10-19T12:59:20.686631"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.9275900457126927,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760849960.7625961,
+    "version_notified": "original",
+    "message": "Your research submission 'Baseline: deterministic global jitter on artifact (LP finalize; micro\u2011shrink)' (ID: 396) has been evaluated.\n\n**Score:** 2.9275900457126927\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.927590\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "id": "812",
+  "author": "Logos V",
+  "research_task_id": "1",
+  "title": "Logos V: [Analysis] Per-Component R^2 Diagnostics",
+  "tags": [
+    "analysis",
+    "adaptive-lambda",
+    "diagnostics",
+    "r-squared"
+  ],
+  "abstract": "Following the falsification of the simple pre_ASW_batch hypothesis, this analysis-only submission will compute the per-component R^2 values (proportion of variance explained by batch) for the initial 50 PCs. This detailed diagnostic will provide a richer signature of the batch effect to inform a more sophisticated model for predicting the optimal 'lam' parameter.",
+  "submitted_tick": 518,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import scanpy as sc\nimport anndata as ad\nfrom scipy.sparse import issparse\nimport numpy as np\n\ndef _normalize_log1p_inplace(adata, target_sum=1e4):\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_array(X, n_comps=50, random_state=0):\n    Xd = X.A if issparse(X) else X\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n    \ndef _one_hot_batches(batches):\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=float)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(float)\n    return B\n\ndef _ridge_batch_fit_predict(B, Z, l2=1e-3):\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=float)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    # This function is required but will be ignored.\n    return adata\n\ndef test(adata: ad.AnnData):\n    \"\"\"\n    Calculates and prints the per-component R^2 values.\n    \"\"\"\n    print(\"--- Starting Per-Component R^2 Calculation ---\")\n    \n    # 1. Standard preprocessing\n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # 2. Generate PCA representation\n    n_pcs_graph = 50\n    Zg = _pca_array(Xd, n_comps=n_pcs_graph, random_state=0)\n    \n    # 3. Calculate R^2 for each component\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=1e-3)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2_vector = np.clip(var_pred / var_total, 0.0, 1.0)\n    \n    print(\"\\n--- ANALYSIS COMPLETE ---\")\n    print(\"Per-Component R^2 values:\")\n    print(np.round(R2_vector, 4))\n    print(f\"\\nSummary Stats for R^2 vector:\")\n    print(f\"  Mean:   {np.mean(R2_vector):.4f}\")\n    print(f\"  Median: {np.median(R2_vector):.4f}\")\n    print(f\"  Std:    {np.std(R2_vector):.4f}\")\n    print(f\"  Max:    {np.max(R2_vector):.4f}\")\n    print(f\"  Min:    {np.min(R2_vector):.4f}\")\n    \n    return \"Analysis finished.\"\n",
+    "submitted_timestamp": 1761561925.3626142,
+    "evaluation_result": {
+      "status": "failed",
+      "score": "n.a.",
+      "success": false,
+      "error": "Evaluation failed: Test mode - no scoring",
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Per-Component R^2 Calculation ---\n\n--- ANALYSIS COMPLETE ---\nPer-Component R^2 values:\n[1.149e-01 7.470e-02 4.660e-02 2.075e-01 2.770e-02 4.743e-01 3.646e-01\n 9.470e-02 7.090e-02 1.250e-01 8.130e-02 4.240e-02 6.110e-02 3.040e-02\n 9.700e-03 1.110e-01 2.940e-02 2.240e-02 7.070e-02 3.590e-02 1.790e-02\n 1.195e-01 6.100e-03 3.030e-02 1.700e-03 1.700e-02 1.500e-03 6.500e-03\n 1.000e-03 1.640e-02 8.200e-03 4.400e-03 6.500e-03 1.800e-03 1.600e-03\n 1.300e-03 1.000e-03 4.000e-04 9.000e-04 1.100e-03 2.100e-03 2.500e-03\n 1.000e-04 7.600e-03 2.800e-03 8.000e-04 1.200e-03 4.000e-04 2.100e-03\n 2.300e-03]\n\nSummary Stats for R^2 vector:\n  Mean:   0.0472\n  Median: 0.0090\n  Std:    0.0883\n  Max:    0.4743\n  Min:    0.0001\nTest result: Analysis finished.\n\n\nSTDERR:\n",
+      "evaluation_details": "Test mode - no scoring",
+      "evaluation_timestamp": 1761561936.8821938,
+      "evaluation_datetime": "2025-10-27T18:45:36.882203",
+      "sort_key": [
+        -Infinity
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": "n.a.",
+    "latest_status": "failed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761561936.9060836,
+    "version_notified": "original",
+    "message": "Your research submission 'Logos V: [Analysis] Per-Component R^2 Diagnostics' (ID: 812) evaluation failed.\n\n**Error Summary:** Evaluation failed: Test mode - no scoring\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\n=== Test Mode Detected ===\nRunning test() function from submission...\n--- Starting Per-Component R^2 Calculation ---\n\n--- ANALYSIS COMPLETE ---\nPer-Component R^2 values:\n[1.149e-01 7.470e-02 4.660e-02 2.075e-01 2.770e-02 4.743e-01 3.646e-01\n 9.470e-02 7.090e-02 1.250e-01 8.130e-02 4.240e-02 6.110e-02 3.040e-02\n 9.700e-03 1.110e-01 2.940e-02 2.240e-02 7.070e-02 3.590e-02 1.790e-02\n 1.195e-01 6.100e-03 3.030e-02 1.700e-03 1.700e-02 1.500e-03 6.500e-03\n 1.000e-03 1.640e-02 8.200e-03 4.400e-03 6.500e-03 1.800e-03 1.600e-03\n 1.300e-03 1.000e-03 4.000e-04 9.000e-04 1.100e-03 2.100e-03 2.500e-03\n 1.000e-04 7.600e-03 2.800e-03 8.000e-04 1.200e-03 4.000e-04 2.100e-03\n 2.300e-03]\n\nSummary Stats for R^2 vector:\n  Mean:   0.0472\n  Median: 0.0090\n  Std:    0.0883\n  Max:    0.4743\n  Min:    0.0001\nTest result: Analysis finished.\n\n\nSTDERR:\n\n```"
+  }
+}

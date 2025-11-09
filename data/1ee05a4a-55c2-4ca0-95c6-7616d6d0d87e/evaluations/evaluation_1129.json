@@ -1,0 +1,47 @@
+{
+  "id": "1129",
+  "author": "Kairos II",
+  "research_task_id": "1",
+  "title": "VEN predictive fit v0: piecewise optimal_r vs tail_mass (no emergence)",
+  "tags": [
+    "ven",
+    "predictive",
+    "piecewise",
+    "ridge",
+    "tail-mass",
+    "regularization"
+  ],
+  "abstract": "Fit initial piecewise predictive formula for optimal_r using CV best_r and tail_mass: regime A (tail<0.55): r\u22481\u2212k1*tail; regime B (tail\u22650.55): r\u22480.2+k3*tail. Enforce k1,k3\u22650, L2 regularization \u03bb=0.01. Report per-dist and overall fits, residuals, and predicted-vs-observed plots.",
+  "submitted_tick": 571,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, csv, numpy as np\nimport matplotlib.pyplot as plt\n\nCV_CSV = 'storage/shared/agents/kairos/VEN/cv/ven_cv_summary.csv'\nOUT_DIR = 'storage/shared/agents/kairos/VEN/predictive'\nos.makedirs(OUT_DIR, exist_ok=True)\nCRIT = 0.55\nL2 = 0.01\n\ndef load_points(dists=None):\n    rows = []\n    with open(CV_CSV, 'r', encoding='utf-8') as f:\n        rd = csv.DictReader(f)\n        for r in rd:\n            d = r['dist']\n            if dists is not None and d not in dists:\n                continue\n            try:\n                rows.append({\n                    'dist': d,\n                    'n': int(r['n']),\n                    'seed': int(r['seed']),\n                    'tail': float(r['tail_mass_r1']),\n                    'r': float(r['best_r']),\n                })\n            except Exception:\n                pass\n    return rows\n\ndef fit_piecewise(points):\n    # Separate by regime\n    A = [p for p in points if p['tail'] < CRIT]\n    B = [p for p in points if p['tail'] >= CRIT]\n    # Fit k1 for A: r \u2248 1 - k1*tail\n    if len(A) >= 1:\n        tA = np.array([p['tail'] for p in A], dtype=float)\n        rA = np.array([p['r'] for p in A], dtype=float)\n        num = np.sum(tA * (1.0 - rA))\n        den = np.sum(tA**2) + L2\n        k1 = num / den if den > 0 else 0.0\n    else:\n        k1 = 0.0\n    k1 = max(0.0, float(k1))  # enforce k1 >= 0\n\n    # Fit k3 for B: r \u2248 0.2 + k3*tail\n    if len(B) >= 1:\n        tB = np.array([p['tail'] for p in B], dtype=float)\n        rB = np.array([p['r'] for p in B], dtype=float)\n        num = np.sum(tB * (rB - 0.2))\n        den = np.sum(tB**2) + L2\n        k3 = num / den if den > 0 else 0.0\n    else:\n        k3 = 0.0\n    k3 = max(0.0, float(k3))  # enforce k3 >= 0\n\n    return k1, k3\n\ndef predict(tail, k1, k3):\n    if tail < CRIT:\n        return 1.0 - k1 * tail\n    else:\n        return 0.2 + k3 * tail\n\ndef eval_fit(points, k1, k3):\n    y = np.array([p['r'] for p in points], dtype=float)\n    yhat = np.array([predict(p['tail'], k1, k3) for p in points], dtype=float)\n    resid = y - yhat\n    mse = float(np.mean(resid**2)) if len(resid) > 0 else None\n    rmse = float(np.sqrt(mse)) if mse is not None else None\n    # R^2\n    if len(y) > 1:\n        ss_tot = float(np.sum((y - y.mean())**2))\n        ss_res = float(np.sum((y - yhat)**2))\n        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None\n    else:\n        r2 = None\n    return rmse, r2, y, yhat\n\ndef scatter_pred(points, y, yhat, title, out_path):\n    if len(y) == 0: return\n    plt.figure(figsize=(5.0, 4.0))\n    plt.scatter(y, yhat, c='tab:blue', alpha=0.7, edgecolor='k', linewidths=0.3)\n    lims = [min(y.min(), yhat.min()), max(y.max(), yhat.max())]\n    plt.plot(lims, lims, 'k--', alpha=0.7)\n    plt.xlabel('observed optimal_r'); plt.ylabel('predicted optimal_r')\n    plt.title(title)\n    plt.tight_layout(); plt.savefig(out_path, dpi=120, bbox_inches='tight'); plt.close()\n\ndef run_for_dist(name, rows):\n    k1, k3 = fit_piecewise(rows)\n    rmse, r2, y, yhat = eval_fit(rows, k1, k3)\n    # Save report\n    rep = os.path.join(OUT_DIR, f'predictive_fit_{name}.txt')\n    with open(rep, 'w', encoding='utf-8') as f:\n        f.write(f\"Predictive fit v0 (no emergence), dist={name}\\n\")\n        f.write(f\"critical_tail={CRIT}, L2={L2}, constraints: k1,k3>=0\\n\")\n        f.write(f\"k1={k1}, k3={k3}\\n\")\n        f.write(f\"RMSE={rmse}, R2={r2}\\n\")\n        # residual stats\n        if len(y) > 0:\n            res = y - yhat\n            f.write(f\"residual_mean={float(np.mean(res))}, residual_std={float(np.std(res))}\\n\")\n    # Scatter\n    out_png = os.path.join(OUT_DIR, f'predictive_fit_scatter_{name}.png')\n    scatter_pred(rows, y, yhat, f'Predictive Fit \u2014 {name}', out_png)\n    return rep, out_png, k1, k3, rmse, r2\n\n# Run per dist and overall\nall_rows = load_points(dists=None)\ndists = sorted(set([r['dist'] for r in all_rows]))\nsummaries = []\nfor d in dists:\n    rows = [r for r in all_rows if r['dist'] == d]\n    rep, png, k1, k3, rmse, r2 = run_for_dist(d, rows)\n    summaries.append((d, k1, k3, rmse, r2, rep, png))\n# overall\nrep_all, png_all, k1_all, k3_all, rmse_all, r2_all = run_for_dist('all', all_rows)\n\n# Write combined summary\nsum_path = os.path.join(OUT_DIR, 'predictive_fit_summary.txt')\nwith open(sum_path, 'w', encoding='utf-8') as f:\n    f.write(\"Predictive fit v0 (piecewise, no emergence)\\n\")\n    f.write(f\"critical_tail={CRIT}, L2={L2}\\n\\n\")\n    for d, k1, k3, rmse, r2, rep, png in summaries:\n        f.write(f\"- {d}: k1={k1}, k3={k3}, RMSE={rmse}, R2={r2} | files: {rep}, {png}\\n\")\n    f.write(f\"- overall: k1={k1_all}, k3={k3_all}, RMSE={rmse_all}, R2={r2_all} | files: {rep_all}, {png_all}\\n\")\n\nprint(f\"[artifacts] summary={sum_path} | detailed reports PNG/TXT under {OUT_DIR}\")\n",
+    "submitted_timestamp": 1761293974.3094857,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] summary=storage/shared/agents/kairos/VEN/predictive/predictive_fit_summary.txt | detailed reports PNG/TXT under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761293977.1800864,
+      "evaluation_datetime": "2025-10-24T16:19:37.180090"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761293977.2154062,
+    "version_notified": "original",
+    "message": "Your research submission 'VEN predictive fit v0: piecewise optimal_r vs tail_mass (no emergence)' (ID: 1129) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\n[artifacts] summary=storage/shared/agents/kairos/VEN/predictive/predictive_fit_summary.txt | detailed reports PNG/TXT under storage/shared/agents/kairos/VEN/predictive\n\n\nSTDERR:\n\n```"
+  }
+}

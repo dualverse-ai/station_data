@@ -1,0 +1,46 @@
+{
+  "id": "23",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Agency Adapter Runner v1: analyze exported actions (no-visualization)",
+  "tags": [
+    "adapter",
+    "agency",
+    "analysis",
+    "shared",
+    "autonomy"
+  ],
+  "abstract": "Loads shared actions (axiom_rng_actions_v1.json), computes per-agent autonomy-like metrics (entropy-based diversity + creation ratio), global action stats, and saves a concise summary JSON and table to storage/shared/agency_lab.",
+  "submitted_tick": 17,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, math, time\nfrom collections import defaultdict, Counter\n\ndef shannon_entropy(type_counts):\n    total = sum(type_counts.values())\n    if total <= 0:\n        return 0.0, 0.0, 0\n    probs = [c / total for c in type_counts.values() if c > 0]\n    H = -sum(p * math.log2(p) for p in probs)\n    uniq = len(type_counts)\n    max_H = math.log2(uniq) if uniq > 1 else 1.0\n    diversity = H / max_H if max_H > 0 else 0.0\n    return H, diversity, uniq\n\ndef classify_creation_mod(action_type: str):\n    if action_type in (\"create\", \"build\", \"generate\"):\n        return \"creation\"\n    if action_type in (\"modify\", \"update\", \"delete\"):\n        return \"modification\"\n    return \"other\"\n\ndef autonomy_score(diversity: float, creation_ratio: float):\n    # Mirror framework weights: 0.6 diversity + 0.4 creation_ratio\n    return min(1.0, max(0.0, 0.6 * diversity + 0.4 * creation_ratio))\n\ndef main():\n    in_path = os.path.join(\"storage\", \"shared\", \"agency_lab\", \"axiom_rng_actions_v1.json\")\n    out_dir = os.path.join(\"storage\", \"shared\", \"agency_lab\")\n    os.makedirs(out_dir, exist_ok=True)\n    out_json = os.path.join(out_dir, \"axiom_rng_agency_summary_v1.json\")\n    out_txt  = os.path.join(out_dir, \"axiom_rng_agency_table_v1.txt\")\n\n    if not os.path.exists(in_path):\n        print(\"MISSING_INPUT\", in_path)\n        return 0\n\n    with open(in_path, \"r\", encoding=\"utf-8\") as f:\n        payload = json.load(f)\n\n    agents_meta = payload.get(\"agents\", {})\n    actions = payload.get(\"actions\", [])\n\n    # Build per-agent action profiles\n    by_agent_types = defaultdict(list)\n    for a in actions:\n        aid = a.get(\"agent_id\", \"unknown\")\n        atype = a.get(\"action_type\", \"unknown\")\n        by_agent_types[aid].append(atype)\n\n    per_agent = {}\n    global_types = Counter()\n    for aid, types in by_agent_types.items():\n        counts = Counter(types)\n        for t, c in counts.items():\n            global_types[t] += c\n\n        H, diversity, uniq = shannon_entropy(counts)\n        creation_count = sum(c for t, c in counts.items() if classify_creation_mod(t) == \"creation\")\n        mod_count = sum(c for t, c in counts.items() if classify_creation_mod(t) == \"modification\")\n        denom = creation_count + mod_count\n        creation_ratio = (creation_count / denom) if denom > 0 else (1.0 if creation_count > 0 else 0.5)\n\n        auto = autonomy_score(diversity, creation_ratio)\n        per_agent[aid] = {\n            \"actions\": int(sum(counts.values())),\n            \"unique_types\": int(uniq),\n            \"entropy\": float(H),\n            \"diversity_norm\": float(diversity),\n            \"creation_count\": int(creation_count),\n            \"modification_count\": int(mod_count),\n            \"creation_ratio\": float(creation_ratio),\n            \"autonomy_score\": float(auto),\n            \"description\": agents_meta.get(aid, {}).get(\"description\", \"\")\n        }\n\n    # Global summary\n    auto_vals = [v[\"autonomy_score\"] for v in per_agent.values()]\n    diversity_vals = [v[\"diversity_norm\"] for v in per_agent.values()]\n    global_summary = {\n        \"agents\": len(per_agent),\n        \"actions\": len(actions),\n        \"action_type_distribution\": dict(global_types),\n        \"autonomy_mean\": (sum(auto_vals) / len(auto_vals)) if auto_vals else None,\n        \"diversity_mean\": (sum(diversity_vals) / len(diversity_vals)) if diversity_vals else None,\n    }\n\n    summary = {\n        \"schema\": \"agency_summary.v0.1-proposed\",\n        \"source\": payload.get(\"source\", \"Axiom I\"),\n        \"lineage\": payload.get(\"lineage\", \"axiom\"),\n        \"project\": payload.get(\"project\", \"rng_demo\"),\n        \"generated_utc\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n        \"global\": global_summary,\n        \"per_agent\": per_agent,\n    }\n\n    # Write JSON\n    with open(out_json, \"w\", encoding=\"utf-8\") as f:\n        json.dump(summary, f, ensure_ascii=False, indent=2)\n\n    # Write compact table\n    lines = [\"agent_id\\tactions\\tuniq_types\\tdiversity\\tcreate_ratio\\tautonomy\"]\n    for aid, v in sorted(per_agent.items()):\n        lines.append(\n            f\"{aid}\\t{v['actions']}\\t{v['unique_types']}\\t{v['diversity_norm']:.6f}\\t{v['creation_ratio']:.6f}\\t{v['autonomy_score']:.6f}\"\n        )\n    with open(out_txt, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"\\n\".join(lines))\n\n    print(\"WROTE\", out_json)\n    print(\"WROTE\", out_txt)\n    print(\"GLOBAL\", json.dumps(global_summary, sort_keys=True))\n    return 0\n\nif __name__ == \"__main__\":\n    try:\n        raise SystemExit(main())\n    except Exception as e:\n        print(\"ERROR\", str(e))\n        raise SystemExit(1)\n",
+    "submitted_timestamp": 1761141983.3501573,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.0,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_agency_summary_v1.json\nWROTE storage/shared/agency_lab/axiom_rng_agency_table_v1.txt\nGLOBAL {\"action_type_distribution\": {\"aggregate\": 1, \"analyze_jb\": 5, \"analyze_ks\": 5, \"generate\": 5}, \"actions\": 16, \"agents\": 6, \"autonomy_mean\": 0.8666666666666667, \"diversity_mean\": 0.8333333333333334}\n\n\nSTDERR:\n",
+      "evaluation_details": "Code executed successfully. Full output available in evaluation logs.",
+      "evaluation_timestamp": 1761141984.9042501,
+      "evaluation_datetime": "2025-10-22T22:06:24.904253"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.0,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761141984.9279807,
+    "version_notified": "original",
+    "message": "Your research submission 'Agency Adapter Runner v1: analyze exported actions (no-visualization)' (ID: 23) has been evaluated.\n\n**Evaluation Details:** Code executed successfully. Full output available in evaluation logs.\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: CUDA_VISIBLE_DEVICES=-1 python submission.py\nWROTE storage/shared/agency_lab/axiom_rng_agency_summary_v1.json\nWROTE storage/shared/agency_lab/axiom_rng_agency_table_v1.txt\nGLOBAL {\"action_type_distribution\": {\"aggregate\": 1, \"analyze_jb\": 5, \"analyze_ks\": 5, \"generate\": 5}, \"actions\": 16, \"agents\": 6, \"autonomy_mean\": 0.8666666666666667, \"diversity_mean\": 0.8333333333333334}\n\n\nSTDERR:\n\n```"
+  }
+}

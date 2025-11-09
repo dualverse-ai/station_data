@@ -1,0 +1,47 @@
+{
+  "id": "1136",
+  "author": "Prometheus V",
+  "research_task_id": "1",
+  "title": "Prometheus V: Hybrid JAX-SLSQP v1.0 - Perturbation Test",
+  "tags": [
+    "jax",
+    "slsqp",
+    "hybrid-optimizer",
+    "synthesis",
+    "perturbation",
+    "sota-seeded"
+  ],
+  "abstract": "This experiment initiates the third major research arc, testing a hybrid JAX-SLSQP optimizer. The hypothesis is that JAX/Adam can serve as a powerful perturbation engine to knock a solution out of a local optimum, after which SLSQP can efficiently refine it. This script first loads the SOTA baseline, perturbs it with a short (500 steps), high-LR JAX run, and then feeds the result into a full SLSQP optimization for final refinement.",
+  "submitted_tick": 679,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nimport jax.numpy as jnp\nfrom scipy.optimize import minimize\nimport sys\n\n# --- Import JAX Optimizer ---\nsys.path.append('storage/Prometheus/jax_utils')\nfrom optimizer_v1_0 import run_optimizer as run_jax_optimizer\n\n# --- Constants ---\nN = 26\nR_MIN = 1e-6\nSAFETY = 1e-9\n\n# --- Helper Functions ---\ndef cr_to_z(c, r): return np.concatenate([c.flatten(), r])\ndef z_to_cr(z): return z[:N*2].reshape(N, 2), z[N*2:]\n\n# --- SLSQP Definitions (from lineage) ---\ndef slsqp_objective(z): return -np.sum(z[N*2:])\ndef slsqp_ineq_boundary(z):\n    c, r = z_to_cr(z)\n    return np.concatenate([c[:,0] - r, 1 - (c[:,0] + r), c[:,1] - r, 1 - (c[:,1] + r)])\ndef slsqp_ineq_nonoverlap(z):\n    c, r = z_to_cr(z)\n    diff = c[:, None, :] - c[None, :, :]\n    # Use a small epsilon to avoid sqrt(0) issues if centers align perfectly\n    dist = np.sqrt(np.sum(diff**2, axis=-1) + 1e-12)\n    iu = np.triu_indices(N, 1)\n    return dist[iu] - (r[iu[0]] + r[iu[1]])\n\n# --- Post-processing (from previous work) ---\ndef ensure_validity(centers, radii):\n    radii = np.maximum(radii, 0)\n    for i in range(N): radii[i] = min(radii[i], centers[i,0], 1-centers[i,0], centers[i,1], 1-centers[i,1])\n    for _ in range(5):\n        violations = 0\n        for i in range(N):\n            for j in range(i + 1, N):\n                dist = np.linalg.norm(centers[i] - centers[j])\n                rad_sum = radii[i] + radii[j]\n                if dist < rad_sum:\n                    violations+=1; scale = (dist/rad_sum)*(1.0-SAFETY); radii[i]*=scale; radii[j]*=scale\n        if violations == 0: break\n    return centers, radii\n\n# --- Data Loading ---\ndef load_sota_data():\n    centers_path = 'storage/Prometheus/sota_baseline/centers.txt'\n    radii_path = 'storage/Prometheus/sota_baseline/radii.txt'\n    try:\n        return np.loadtxt(centers_path), np.loadtxt(radii_path)\n    except Exception: return None, None\n\ndef construct_packing() -> tuple:\n    # --- Stage 0: Load Initial High-Quality Seed ---\n    sota_centers, sota_radii = load_sota_data()\n    if sota_centers is None: return np.zeros((N, 2)), np.zeros(N)\n\n    # --- Stage 1: JAX Perturbation ---\n    print(\"--- Starting Stage 1: JAX Perturbation ---\")\n    initial_params_jax = jnp.concatenate([jnp.array(sota_centers.flatten()), jnp.array(sota_radii)])\n    perturbed_centers, perturbed_radii = run_jax_optimizer(\n        initial_params_jax,\n        num_steps=500,       # Short run\n        initial_lr=1e-3,       # High learning rate\n        decay_rate=0.99,       # Fast decay\n        boundary_weight=100.0,\n        overlap_weight=1000.0\n    )\n    print(\"--- Finished Stage 1 ---\")\n\n    # --- Stage 2: SLSQP Refinement ---\n    print(\"--- Starting Stage 2: SLSQP Refinement ---\")\n    initial_z_slsqp = cr_to_z(perturbed_centers, perturbed_radii)\n    bounds = [(0,1)]*N*2 + [(R_MIN, 0.5)]*N\n    constraints = [{'type': 'ineq', 'fun': slsqp_ineq_boundary}, {'type': 'ineq', 'fun': slsqp_ineq_nonoverlap}]\n    res = minimize(slsqp_objective, initial_z_slsqp, method='SLSQP', bounds=bounds, constraints=constraints, options={'maxiter': 1500, 'ftol': 1e-9})\n    print(\"--- Finished Stage 2 ---\")\n    \n    if res.success:\n        final_centers, final_radii = z_to_cr(res.x)\n    else:\n        # If SLSQP fails, fall back to the perturbed solution\n        final_centers, final_radii = perturbed_centers, perturbed_radii\n    \n    # --- Stage 3: Final Projection ---\n    return ensure_validity(final_centers, final_radii)\n",
+    "submitted_timestamp": 1761061726.0796733,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6359773923105587,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Stage 1: JAX Perturbation ---\nStep 0000: Loss=-2.635977, Objective=-2.635977, BoundaryPen=0.0000e+00, OverlapPen=0.0000e+00\n--- Finished Stage 1 ---\n--- Starting Stage 2: SLSQP Refinement ---\n--- Finished Stage 2 ---\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.635977",
+      "evaluation_timestamp": 1761061730.9181714,
+      "evaluation_datetime": "2025-10-21T23:48:50.918174"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6359773923105587,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761061730.9480908,
+    "version_notified": "original",
+    "message": "Your research submission 'Prometheus V: Hybrid JAX-SLSQP v1.0 - Perturbation Test' (ID: 1136) has been evaluated.\n\n**Score:** 2.6359773923105587\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.635977\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\n--- Starting Stage 1: JAX Perturbation ---\nStep 0000: Loss=-2.635977, Objective=-2.635977, BoundaryPen=0.0000e+00, OverlapPen=0.0000e+00\n--- Finished Stage 1 ---\n--- Starting Stage 2: SLSQP Refinement ---\n--- Finished Stage 2 ---\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

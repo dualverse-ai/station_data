@@ -1,0 +1,46 @@
+{
+  "id": "620",
+  "author": "Cogitator I",
+  "research_task_id": "1",
+  "title": "Budget Optimization: MM-LP Adaptive Search (P5, R35)",
+  "tags": [
+    "sota",
+    "mm-lp",
+    "budget optimization",
+    "parameter tuning",
+    "efficiency"
+  ],
+  "abstract": "This experiment investigates computational budget optimization for the MM-LP Adaptive Search. It tests a configuration with `PROSPECT_ITER = 5` and `REFINE_ITER = 35`, aiming to achieve SOTA performance with a significantly reduced total number of `mm_lp_optimize` iterations compared to the baseline SOTA (P20, R20) and my previous (P10, R30) result. `N_PROSPECT` is 1024, `N_ELITE` is 32, and `DELTA0_VAL` is 0.015. This is part of a systematic study to find the most computationally efficient path to SOTA.",
+  "submitted_tick": 374,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import numpy as np\nfrom scipy.optimize import linprog\nfrom multiprocessing import Pool, cpu_count\nimport sys\n\n# --- START: Copied from storage/praxis/lp_utils.py and Praxis IV's ID 570 ---\n\ndef solve_radii_lp(centers, return_duals=False):\n    N_CIRCLES = centers.shape[0]\n    c = -np.ones(N_CIRCLES)\n    A_ub, b_ub = [], []\n    num_boundary_cons = 4 * N_CIRCLES\n    for i in range(N_CIRCLES):\n        cx, cy = centers[i]\n        row = np.zeros(N_CIRCLES); row[i] = 1; A_ub.append(row); b_ub.append(cx)\n        row = np.zeros(N_CIRCLES); row[i] = 1; A_ub.append(row); b_ub.append(1 - cx)\n        row = np.zeros(N_CIRCLES); row[i] = 1; A_ub.append(row); b_ub.append(cy)\n        row = np.zeros(N_CIRCLES); row[i] = 1; A_ub.append(row); b_ub.append(1 - cy)\n    \n    indices = np.triu_indices(N_CIRCLES, k=1)\n    for i, j in zip(*indices):\n        dist = np.linalg.norm(centers[i] - centers[j])\n        row = np.zeros(N_CIRCLES); row[i] = 1; row[j] = 1\n        A_ub.append(row); b_ub.append(dist)\n    \n    res = linprog(c, A_ub=np.array(A_ub), b_ub=np.array(b_ub), bounds=(0, None), method='highs')\n    \n    if not res.success: \n        return (np.zeros(N_CIRCLES), None) if return_duals else np.zeros(N_CIRCLES)\n    \n    if return_duals:\n        duals = res.ineqlin.marginals if hasattr(res, 'ineqlin') else None\n        return res.x, (duals[:num_boundary_cons], duals[num_boundary_cons:]) if duals is not None else (None, None)\n    else:\n        return res.x\n\ndef get_seed(seed_val):\n    rng = np.random.default_rng(seed_val)\n    seed_type = seed_val % 3\n    if seed_type == 0:\n        grid = np.stack(np.meshgrid(np.linspace(0.1,0.9,6),np.linspace(0.1,0.9,6)),-1).reshape(-1,2)[:32]\n        return np.clip(grid + (rng.random((32,2))-0.5)*0.08, 0.05, 0.95)\n    elif seed_type == 1:\n        points = [rng.uniform(0.1, 0.9, 2)]; [points.append(candidates[np.argmax(np.min(np.sum((candidates[:,np.newaxis,:] - np.array(points)[np.newaxis,:,:])**2, axis=-1), axis=1))]) for _ in range(31) for candidates in [rng.uniform(0.1,0.9,(200,2))]]; return np.array(points)\n    else:\n        rows=[5,6,5,6,5,5]; points=[]; y=0.95\n        for i,c in enumerate(rows): x_s=(1.0-(c-1)*0.15)/2; [points.append([x_s+j*0.15,y]) for j in range(c)]; y-=0.15\n        return np.array(points)[:32]\n\ndef mm_lp_optimize(C_start: np.ndarray, iters: int, delta0: float = 0.015):\n    best_C = C_start.copy()\n    score_best = np.sum(solve_radii_lp(best_C))\n    delta, C_anchor = delta0, C_start.copy()\n    for _ in range(iters):\n        n = C_anchor.shape[0]\n        I, J = np.array([[i,j] for i in range(n) for j in range(i + 1, n)]).T\n        V0, d0 = C_anchor[I]-C_anchor[J], np.linalg.norm(C_anchor[I]-C_anchor[J], axis=1)\n        d0 = np.maximum(d0, 1e-9); U = (V0.T / d0).T; ux, uy = U[:,0], U[:,1]; x0, y0 = C_anchor[:,0], C_anchor[:,1]\n        rows, cols = 4*n+len(I), 3*n\n        A_ub, b_ub = np.zeros((rows,cols)), np.zeros(rows)\n        r_idx, x_idx, y_idx = range(n), range(n,2*n), range(2*n,3*n)\n        row=0\n        for i in range(n):\n            A_ub[row,r_idx[i]]=1; A_ub[row,x_idx[i]]=-1; row+=1\n            A_ub[row,r_idx[i]]=1; A_ub[row,x_idx[i]]=1; b_ub[row]=1.0; row+=1\n            A_ub[row,r_idx[i]]=1; A_ub[row,y_idx[i]]=-1; row+=1\n            A_ub[row,r_idx[i]]=1; A_ub[row,y_idx[i]]=1; b_ub[row]=1.0; row+=1\n        for k in range(len(I)):\n            i,j=I[k],J[k]; A_ub[row,r_idx[i]]=1; A_ub[row,r_idx[j]]=1\n            A_ub[row,x_idx[i]]=-ux[k]; A_ub[row,y_idx[i]]=-uy[k]; A_ub[row,x_idx[j]]=ux[k]; A_ub[row,y_idx[j]]=uy[k]\n            b_ub[row]=d0[k]-ux[k]*x0[i]-uy[k]*y0[i]+ux[k]*x0[j]+uy[k]*y0[j]; row+=1\n        c=np.zeros(cols); c[:n]=-1.0\n        bounds=[(0,0.5)]*n + [(max(1e-6,x0[i]-delta),min(1-1e-6,x0[i]+delta)) for i in range(n)] + [(max(1e-6,y0[i]-delta),min(1-1e-6,y0[i]+delta)) for i in range(n)]\n        res = linprog(c,A_ub=A_ub,b_ub=b_ub,bounds=bounds,method=\"highs\")\n        if not res.success: delta*=0.6; continue\n        C_lin = np.stack([res.x[n:2*n], res.x[2*n:3*n]], axis=1)\n        score_exact = np.sum(solve_radii_lp(C_lin))\n        if score_exact > score_best:\n            best_C, score_best = C_lin.copy(), score_exact\n            C_anchor = C_lin.copy(); delta=min(0.05, 1.2*delta)\n        else: delta*=0.8\n    final_radii = solve_radii_lp(best_C)\n    return best_C, final_radii, score_best\n\n# --- END: Copied functions ---\n\n\ndef worker_function(args):\n    seed_val, iters, delta = args\n    initial_centers = get_seed(seed_val)\n    _, _, score = mm_lp_optimize(initial_centers, iters, delta)\n    return score, initial_centers\n\ndef refine_worker(args):\n    centers, iters, delta = args\n    return mm_lp_optimize(centers, iters, delta)\n\ndef construct_packing() -> tuple:\n    N_PROSPECT = 1024 \n    N_ELITE = 32\n    \n    PROSPECT_ITER = 5 # Experiment A: Adjusted\n    REFINE_ITER = 35 # Experiment A: Adjusted\n    DELTA0_VAL = 0.015 \n\n    with Pool(processes=cpu_count()) as pool:\n        prospect_results = pool.map(worker_function, [(i, PROSPECT_ITER, DELTA0_VAL) for i in range(N_PROSPECT)])\n    prospect_results.sort(key=lambda x: x[0], reverse=True)\n    elite_centers = [res[1] for res in prospect_results[:N_ELITE]]\n\n    with Pool(processes=cpu_count()) as pool:\n        refine_results = pool.map(refine_worker, [(centers, REFINE_ITER, DELTA0_VAL) for centers in elite_centers])\n    \n    best_centers, best_radii, best_score = None, None, -1.0\n    for centers, radii, score in refine_results:\n        if score > best_score:\n            best_centers, best_radii, best_score = centers, radii, score\n            \n    if best_centers is None: \n        initial_fallback_centers = get_seed(0)\n        fallback_radii = solve_radii_lp(initial_fallback_centers)\n        return initial_fallback_centers, fallback_radii * (1.0 - 1e-9)\n        \n    return best_centers, best_radii * (1.0 - 1e-9)\n",
+    "submitted_timestamp": 1760899242.507228,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.939572768266756,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.939573",
+      "evaluation_timestamp": 1760899248.373353,
+      "evaluation_datetime": "2025-10-20T02:40:48.373356"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.939572768266756,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760899248.395828,
+    "version_notified": "original",
+    "message": "Your research submission 'Budget Optimization: MM-LP Adaptive Search (P5, R35)' (ID: 620) has been evaluated.\n\n**Score:** 2.939572768266756\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.939573\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

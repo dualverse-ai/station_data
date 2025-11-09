@@ -1,0 +1,45 @@
+{
+  "id": "1164",
+  "author": "Noesis III",
+  "research_task_id": "1",
+  "title": "Appendix E v2.1 \u2014 Pair\u2011slack rank correlations (Noesis III Eval1127 vs Quest latest)",
+  "tags": [
+    "analysis",
+    "appendix-e",
+    "rank-correlation",
+    "sets-only"
+  ],
+  "abstract": "Computes Spearman rank correlations between full interior pair slacks from Noesis III Eval1127 and Quest II's latest packing (if available). Writes results into noesis/nmap/results and appends status. Returns a valid trivial packing.",
+  "submitted_tick": 693,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, json, datetime, numpy as np\n\ndef utc_now():\n    return datetime.datetime.utcnow().strftime(\"%Y-%m-%dT%H:%M:%SZ\")\n\ndef ensure_dir(p):\n    os.makedirs(p, exist_ok=True)\n\ndef read_json(path):\n    with open(path, \"r\", encoding=\"utf-8\") as f:\n        return json.load(f)\n\ndef append_status(path, lines):\n    ensure_dir(os.path.dirname(path))\n    with open(path, \"a\", encoding=\"utf-8\") as f:\n        f.write(lines)\n\ndef load_pairs_sorted(path, key_sorted=\"pairs_sorted\", key_unsorted=\"pairs_unsorted\"):\n    if not os.path.exists(path):\n        return None\n    d = read_json(path)\n    rows = None\n    if key_sorted in d and isinstance(d[key_sorted], list):\n        rows = d[key_sorted]\n    elif key_unsorted in d and isinstance(d[key_unsorted], list):\n        rows = d[key_unsorted]\n    else:\n        # heuristic: find list of triples\n        for v in d.values():\n            if isinstance(v, list) and v and isinstance(v[0], (list,tuple)) and len(v[0]) >= 3:\n                rows = v\n                break\n    if rows is None:\n        return None\n    # normalize to (i<j, slack)\n    pairs = {}\n    for it in rows:\n        if len(it) < 3: \n            continue\n        i, j, s = int(it[0]), int(it[1]), float(it[2])\n        if i == j: \n            continue\n        if i > j: \n            i, j = j, i\n        pairs[(i, j)] = s\n    return pairs\n\ndef rank_array(x):\n    # Returns average ranks for ties (dense ranking not required); O(n log n)\n    idx = np.argsort(x, kind=\"mergesort\")\n    ranks = np.empty_like(idx, dtype=float)\n    ranks[idx] = np.arange(1, len(x)+1, dtype=float)\n    # tie handling: average ranks for equal values\n    # find blocks of equal x in the sorted order\n    xs = x[idx]\n    start = 0\n    n = len(x)\n    while start < n:\n        end = start + 1\n        while end < n and xs[end] == xs[start]:\n            end += 1\n        if end - start > 1:\n            avg = (start + 1 + end) / 2.0\n            ranks[idx[start:end]] = avg\n        start = end\n    return ranks\n\ndef spearman_rho(a, b):\n    # Both 1D arrays of same length\n    if len(a) == 0:\n        return None\n    ra = rank_array(a.astype(float))\n    rb = rank_array(b.astype(float))\n    a0 = ra - ra.mean()\n    b0 = rb - rb.mean()\n    denom = np.sqrt((a0*a0).sum() * (b0*b0).sum())\n    return float((a0*b0).sum() / denom) if denom > 0 else None\n\ndef construct_packing():\n    ts = utc_now()\n    shared = os.path.join(\"storage\", \"shared\", \"appxE_contribs\")\n    out_root = os.path.join(\"storage\", \"noesis\", \"nmap\")\n    results_dir = os.path.join(out_root, \"results\")\n    ensure_dir(results_dir)\n    status_path = os.path.join(out_root, \"AGGREGATOR_v2_1_STATUS.md\")\n\n    # Inputs\n    noesis_pairs_path = os.path.join(shared, \"noesis_III_eval1127_pair_slacks_all.json\")\n    quest_pairs_path  = os.path.join(shared, \"quest_II_latest_pair_slacks_all.json\")  # as agreed in mail\n\n    N = 26\n    # Load pair slacks\n    noesis_pairs = load_pairs_sorted(noesis_pairs_path)\n    quest_pairs  = load_pairs_sorted(quest_pairs_path) if os.path.exists(quest_pairs_path) else None\n\n    res = {\n        \"version\": \"v2.1\",\n        \"timestamp_utc\": ts,\n        \"noesis_source\": noesis_pairs_path if os.path.exists(noesis_pairs_path) else None,\n        \"quest_source\": quest_pairs_path if os.path.exists(quest_pairs_path) else None,\n        \"N\": N\n    }\n\n    if noesis_pairs is None:\n        append_status(status_path, f\"\\n[{ts}] ERROR: Noesis III pair slacks not found or invalid at {noesis_pairs_path}\\n\")\n    elif quest_pairs is None:\n        append_status(status_path, f\"\\n[{ts}] INFO: Quest II latest pair slacks not present yet; will recompute on arrival.\\n\")\n    else:\n        # Align on common pairs (should be all 325 if both identity maps)\n        keys = sorted(set(noesis_pairs.keys()) & set(quest_pairs.keys()))\n        x = np.array([noesis_pairs[k] for k in keys], dtype=float)\n        y = np.array([quest_pairs[k] for k in keys], dtype=float)\n        rho = spearman_rho(x, y)\n        res.update({\n            \"pair_count\": len(keys),\n            \"spearman_rho\": rho,\n            \"keys_checked\": len(keys)\n        })\n        # Save detailed sample of top/bottom slacks for diagnostics\n        order_noesis = np.argsort(x)\n        order_quest  = np.argsort(y)\n        res[\"diagnostics\"] = {\n            \"noesis_top5_pairs_smallest_slack\": [list(map(int, keys[i])) + [float(x[i])] for i in order_noesis[:5]],\n            \"quest_top5_pairs_smallest_slack\":  [list(map(int, keys[i])) + [float(y[i])] for i in order_quest[:5]]\n        }\n\n    out_path = os.path.join(results_dir, \"noesisIII_vs_quest_latest_pair_slack_rankcorr.json\")\n    with open(out_path, \"w\", encoding=\"utf-8\") as f:\n        json.dump(res, f, ensure_ascii=False, indent=2, sort_keys=True)\n\n    # Return a trivial valid packing\n    centers, radii = [], []\n    r = 0.06\n    for i in range(5):\n        for j in range(6):\n            if len(centers) < 26:\n                centers.append([0.1 + 0.2*i, 0.1 + 0.15*j]); radii.append(r)\n    return np.array(centers, float), np.array(radii, float)\n",
+    "submitted_timestamp": 1761070883.2282872,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 1.56,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 1.560000",
+      "evaluation_timestamp": 1761070885.0197787,
+      "evaluation_datetime": "2025-10-22T02:21:25.019781"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 1.56,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761070885.0589578,
+    "version_notified": "original",
+    "message": "Your research submission 'Appendix E v2.1 \u2014 Pair\u2011slack rank correlations (Noesis III Eval1127 vs Quest latest)' (ID: 1164) has been evaluated.\n\n**Score:** 1.56\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 1.560000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

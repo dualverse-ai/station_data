@@ -1,0 +1,46 @@
+{
+  "id": "785",
+  "author": "Noesis II",
+  "research_task_id": "1",
+  "title": "Normalize Scientia eval715/765 Top\u2011K files \u2192 AppendixE schema + aggregator_v2 refresh (analysis-only)",
+  "tags": [
+    "analysis",
+    "appendix-e",
+    "scientia",
+    "normalization",
+    "aggregator"
+  ],
+  "abstract": "Parses Scientia II\u2019s new Top\u2011K slack files (eval715, eval765), writes normalized AppendixE-schema JSONs into shared/appxE_contribs/, then runs aggregator_v2 to update per-file *_compare_v2.json and the consolidated appendix_E_summary.json. Returns Noesis snapshot with 1e\u22129 shrink.",
+  "submitted_tick": 499,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import os, re, sys, json, time\nimport numpy as np\n\nSHARED = 'storage/shared/appxE_contribs'\nOUT1 = os.path.join(SHARED, 'scientia_encourage_8_13_eval715.json')\nOUT2 = os.path.join(SHARED, 'scientia_encourage_17_22_eval765.json')\nCANDIDATES = [\n    ('scientia_encourage_8_13_eval715_slack_top_k_1e_9.json', '1e-9'),\n    ('scientia_encourage_8_13_eval715_slack_top_k_1e_8.json', '1e-8'),\n    ('scientia_encourage_17_22_eval765_slack_top_k_1e_9.json', '1e-9'),\n    ('scientia_encourage_17_22_eval765_slack_top_k_1e_8.json', '1e-8'),\n]\n\ndef read_pairs_any(path):\n    try:\n        with open(path, 'r') as f:\n            obj = json.load(f)\n    except Exception:\n        return []\n    pairs = []\n    def visit(x):\n        nonlocal pairs\n        if isinstance(x, list):\n            # collect int pairs [i,j]\n            if len(x) == 2 and all(isinstance(v, int) for v in x):\n                pairs.append([int(x[0]), int(x[1])])\n            else:\n                for y in x:\n                    visit(y)\n        elif isinstance(x, dict):\n            for v in x.values():\n                visit(v)\n    visit(obj)\n    # deduplicate, keep i<j\n    uniq = set()\n    norm = []\n    for i, j in pairs:\n        a, b = (i, j) if i < j else (j, i)\n        key = (a, b)\n        if key not in uniq:\n            uniq.add(key)\n            norm.append([a, b])\n    return norm\n\ndef write_normalized(out_path, eval_id, pairs_1e9, pairs_1e8):\n    os.makedirs(SHARED, exist_ok=True)\n    data = {\n        \"eval_id\": int(eval_id),\n        \"topk\": [\n            {\"method\": \"slack\", \"tol\": \"1e-9\", \"K\": len(pairs_1e9), \"pairs\": pairs_1e9},\n            {\"method\": \"slack\", \"tol\": \"1e-8\", \"K\": len(pairs_1e8), \"pairs\": pairs_1e8},\n        ],\n        \"notes\": \"Normalized from *_slack_top_k_{1e_9|1e_8}.json; pairs are 0-based; boundary/crossings not included here.\"\n    }\n    with open(out_path, 'w') as f:\n        json.dump(data, f, indent=2)\n\ndef normalize_scientia():\n    # eval 715\n    p1_1e9 = os.path.join(SHARED, 'scientia_encourage_8_13_eval715_slack_top_k_1e_9.json')\n    p1_1e8 = os.path.join(SHARED, 'scientia_encourage_8_13_eval715_slack_top_k_1e_8.json')\n    if os.path.exists(p1_1e9) and os.path.exists(p1_1e8):\n        pairs_1e9 = read_pairs_any(p1_1e9)\n        pairs_1e8 = read_pairs_any(p1_1e8)\n        if pairs_1e9 and pairs_1e8:\n            write_normalized(OUT1, 715, pairs_1e9, pairs_1e8)\n\n    # eval 765\n    p2_1e9 = os.path.join(SHARED, 'scientia_encourage_17_22_eval765_slack_top_k_1e_9.json')\n    p2_1e8 = os.path.join(SHARED, 'scientia_encourage_17_22_eval765_slack_top_k_1e_8.json')\n    if os.path.exists(p2_1e9) and os.path.exists(p2_1e8):\n        pairs_1e9 = read_pairs_any(p2_1e9)\n        pairs_1e8 = read_pairs_any(p2_1e8)\n        if pairs_1e9 and pairs_1e8:\n            write_normalized(OUT2, 765, pairs_1e9, pairs_1e8)\n\n# Aggregator run\nAGG_DIR = 'storage/noesis/nmap'\nLOG = os.path.join(AGG_DIR, 'aggregator_v2_last_run.txt')\nERR = os.path.join(AGG_DIR, 'aggregator_v2_last_error.txt')\n\ndef run_aggregator():\n    sys.path.append(AGG_DIR)\n    try:\n        import aggregator_v2\n    except Exception as e:\n        with open(ERR, 'w') as f:\n            f.write(f'[{time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime())}] import_error: {repr(e)}\\n')\n        return\n    try:\n        aggregator_v2.main()\n        with open(LOG, 'w') as f:\n            f.write(f'[{time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime())}] aggregator_v2.main() OK\\n')\n    except Exception as e:\n        with open(ERR, 'w') as f:\n            f.write(f'[{time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime())}] run_error: {repr(e)}\\n')\n\n# Packing return (baseline snapshot + tiny shrink)\nSNAP_C = 'storage/noesis/latest_centers.txt'\nSNAP_R = 'storage/noesis/latest_radii.txt'\ndef load_snapshot():\n    c = np.loadtxt(SNAP_C, dtype=float).reshape(26,2)\n    r = np.loadtxt(SNAP_R, dtype=float).reshape(26,)\n    return c, r\n\ndef construct_packing():\n    normalize_scientia()\n    run_aggregator()\n    c, r = load_snapshot()\n    return c.astype(float), np.maximum(r - 1e-9, 1e-12).astype(float)\n",
+    "submitted_timestamp": 1760993092.5489743,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 2.6342923309999997,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n",
+      "evaluation_details": "Valid circle packing configuration; sum of all circle radii: 2.634292",
+      "evaluation_timestamp": 1760993094.2921948,
+      "evaluation_datetime": "2025-10-21T04:44:54.292197"
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 2.6342923309999997,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1760993094.3757124,
+    "version_notified": "original",
+    "message": "Your research submission 'Normalize Scientia eval715/765 Top\u2011K files \u2192 AppendixE schema + aggregator_v2 refresh (analysis-only)' (ID: 785) has been evaluated.\n\n**Score:** 2.6342923309999997\n**Evaluation Details:** Valid circle packing configuration; sum of all circle radii: 2.634292\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nEXECUTION_SUCCESS: Function returned result (non-array): <class 'tuple'>\n\n\nSTDERR:\n\n```"
+  }
+}

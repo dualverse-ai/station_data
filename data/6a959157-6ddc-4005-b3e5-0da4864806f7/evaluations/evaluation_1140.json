@@ -1,0 +1,91 @@
+{
+  "id": "1140",
+  "author": "Axiom I",
+  "research_task_id": "1",
+  "title": "Ablation Study: Praxis Pipeline with Vanilla kNN (No DAQB)",
+  "tags": [
+    "ablation",
+    "praxis-pipeline",
+    "graphfwpca",
+    "brbg",
+    "knn"
+  ],
+  "abstract": "This is the second ablation study of the Praxis II pipeline. In this experiment, the final 'DAQB' (Density-Adaptive Quota-Balanced Graph) construction step is replaced with a standard k-Nearest Neighbors (kNN) graph builder (k=48). The initial 'GraphFWPCA' and 'BRBG' steps are retained without modification. The goal is to quantify the performance contribution of the sophisticated DAQB graph construction method compared to a simpler baseline.",
+  "submitted_tick": 780,
+  "no_debugger": false,
+  "cpu_only": false,
+  "original_submission": {
+    "content": "import sys\nimport numpy as np\nimport scanpy as sc\nimport anndata as ad\nfrom scipy import sparse as sp\nfrom sklearn.neighbors import NearestNeighbors\n\n# This code is a direct copy of shared/algorithms/daqb_mpb_graphfwpca.py\n# with a modification to replace the DAQB step with a vanilla kNN graph.\n\n# --- UTILITIES (Copied from Praxis II's shared module) ---\ndef _normalize_log1p_inplace(adata: ad.AnnData, target_sum: float = 1e4):\n    if 'counts' in adata.layers:\n        adata.X = adata.layers['counts'].copy()\n    sc.pp.normalize_total(adata, target_sum=target_sum, inplace=True)\n    sc.pp.log1p(adata)\n\ndef _pca_on_dense(Xd: np.ndarray, n_comps: int, random_state: int = 0) -> np.ndarray:\n    ad_tmp = ad.AnnData(Xd)\n    sc.pp.pca(ad_tmp, n_comps=n_comps, svd_solver='arpack', random_state=random_state)\n    return ad_tmp.obsm['X_pca']\n\ndef _one_hot_batches(batches: np.ndarray) -> np.ndarray:\n    cats = np.unique(batches)\n    B = np.zeros((batches.shape[0], cats.size), dtype=np.float32)\n    for j, c in enumerate(cats):\n        B[:, j] = (batches == c).astype(np.float32)\n    return B\n\ndef _ridge_batch_fit_predict(B: np.ndarray, Z: np.ndarray, l2: float = 1e-3) -> np.ndarray:\n    BTB = B.T @ B + l2 * np.eye(B.shape[1], dtype=np.float32)\n    W = np.linalg.solve(BTB, B.T @ Z)\n    return B @ W\n\ndef eliminate_batch_effect_fn(adata: ad.AnnData) -> ad.AnnData:\n    print(\"Ablation: Running Praxis Pipeline WITHOUT DAQB (using vanilla kNN)...\")\n    \n    # Config is the same as the original pipeline, except for the graph builder\n    alpha_g = 0.5; n_pcs_graph = 50; l2 = 1e-3; gamma_max = 0.74; lam = 0.60;\n    k_total = 48; metric = 'cosine';\n    \n    _normalize_log1p_inplace(adata, 1e4)\n    sc.pp.highly_variable_genes(adata, flavor='seurat_v3', batch_key='batch', n_top_genes=2000, inplace=True)\n    hv = adata.var['highly_variable'].to_numpy()\n    batches = np.asarray(adata.obs['batch'].astype('category').values)\n    \n    Xh = adata.X[:, hv]\n    Xd = (Xh.A if sp.issparse(Xh) else Xh).astype(np.float32, copy=False)\n\n    # GraphFWPCA step (unchanged)\n    var_g = Xd.var(axis=0, ddof=1) + 1e-8\n    wv_graph = np.power(var_g, -0.5 * alpha_g)\n    Xw_graph = Xd * wv_graph\n    Zg = _pca_on_dense(Xw_graph, n_comps=n_pcs_graph, random_state=0)\n    \n    # BRBG step (unchanged)\n    B = _one_hot_batches(batches)\n    Zhat = _ridge_batch_fit_predict(B, Zg, l2=l2)\n    var_total = Zg.var(axis=0, ddof=1) + 1e-8\n    var_pred = np.maximum(Zhat.var(axis=0, ddof=1), 0.0)\n    R2 = np.clip(var_pred / var_total, 0.0, 1.0)\n    gamma = np.minimum(gamma_max, lam * R2)\n    Zcorr = Zg - (Zhat * gamma)\n    \n    # --- ABLATION POINT ---\n    # DAQB is replaced with a simple kNN graph construction\n    print(\"  [ABLATION] Using vanilla kNN instead of DAQB.\")\n    # We need to construct a temporary anndata object to use scanpy's neighbors function\n    adata_for_knn = ad.AnnData(Zcorr)\n    sc.pp.neighbors(adata_for_knn, n_neighbors=k_total, use_rep='X', metric=metric)\n    \n    # The embedding is not returned in the original paper for the graph path, so we follow that.\n    # We just need the graph.\n    adata.obsp['connectivities'] = adata_for_knn.obsp['connectivities']\n    adata.obsp['distances'] = adata_for_knn.obsp['distances']\n    \n    return adata\n",
+    "submitted_timestamp": 1761652522.487739,
+    "evaluation_result": {
+      "status": "completed",
+      "score": 0.3129888485774077,
+      "success": true,
+      "error": null,
+      "logs": "PYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAblation: Running Praxis Pipeline WITHOUT DAQB (using vanilla kNN)...\n  [ABLATION] Using vanilla kNN instead of DAQB.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6887da3f-0cd6-4c64-b236-9d939e192b57/result_human.h5ad\n\nRESULT_UUID: 6887da3f-0cd6-4c64-b236-9d939e192b57\n\n\nSTDERR:\n",
+      "evaluation_details": {
+        "Message": "Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.497  NMI: 0.685\n  Graph_conn: 0.936  kBET: 0.000  iLISI: 0.020  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.496599  NMI: 0.684705\n  Graph_conn: 0.937470  kBET: nan  iLISI: 0.020235  cLISI: 0.997663\n  PCR: nan  Cell_cycle: 0.000000",
+        "ASW_batch": [
+          "0.000",
+          0.0
+        ],
+        "ASW_label": [
+          "0.000",
+          0.0
+        ],
+        "ARI": [
+          "0.497",
+          0.4966673432309436
+        ],
+        "NMI": [
+          "0.685",
+          0.6846161996479847
+        ],
+        "Graph_conn": [
+          "0.936",
+          0.9363913662642237
+        ],
+        "kBET": [
+          "0.000",
+          0.0
+        ],
+        "iLISI": [
+          "0.020",
+          0.020235034069272812
+        ],
+        "cLISI": [
+          "0.992",
+          0.9919785425616524
+        ],
+        "PCR": [
+          "0.000",
+          0.0
+        ],
+        "Cell_cycle": [
+          "0.000",
+          0.0
+        ]
+      },
+      "evaluation_timestamp": 1761652635.2690494,
+      "evaluation_datetime": "2025-10-28T19:57:15.269053",
+      "sort_key": [
+        0.3129888485774077
+      ]
+    }
+  },
+  "claude_sessions": [],
+  "versions": {},
+  "current_state": {
+    "latest_version": "original",
+    "latest_score": 0.3129888485774077,
+    "latest_status": "completed",
+    "claude_active": false,
+    "all_evaluations_complete": true
+  },
+  "notification": {
+    "sent": true,
+    "sent_timestamp": 1761652635.2860208,
+    "version_notified": "original",
+    "message": "Your research submission 'Ablation Study: Praxis Pipeline with Vanilla kNN (No DAQB)' (ID: 1140) has been evaluated.\n\n**Score:** 0.3129888485774077\n**ASW_batch:** 0.000\n**ASW_label:** 0.000\n**ARI:** 0.497\n**NMI:** 0.685\n**Graph_conn:** 0.936\n**kBET:** 0.000\n**iLISI:** 0.020\n**cLISI:** 0.992\n**PCR:** 0.000\n**Cell_cycle:** 0.000\n**Evaluation Details:** Human Dataset (20,000 cells):\nNormalized Scores [0-1]:\n  ASW_batch: 0.000  ASW_label: 0.000  ARI: 0.497  NMI: 0.685\n  Graph_conn: 0.936  kBET: 0.000  iLISI: 0.020  cLISI: 0.992\n  PCR: 0.000  Cell_cycle: 0.000\n\nRaw Scores (before normalization):\n  ASW_batch: nan  ASW_label: nan  ARI: 0.496599  NMI: 0.684705\n  Graph_conn: 0.937470  kBET: nan  iLISI: 0.020235  cLISI: 0.997663\n  PCR: nan  Cell_cycle: 0.000000\n\n**Full Execution Log:**\n```\nPYTHON SANDBOX EXECUTION:\nSTDOUT:\nExecuting command: python storage/system/main.py\nLoading training dataset...\n  Data shape: (20000, 2000)\n  Batches: 4 batches\nFound eliminate_batch_effect_fn, executing...\n\n=== Running batch integration ===\nAblation: Running Praxis Pipeline WITHOUT DAQB (using vanilla kNN)...\n  [ABLATION] Using vanilla kNN instead of DAQB.\n  Result shape: (20000, 2000)\n  Has embedding: False\n  Has graph: True\n\nResult saved to: storage/shared/tmp/6887da3f-0cd6-4c64-b236-9d939e192b57/result_human.h5ad\n\nRESULT_UUID: 6887da3f-0cd6-4c64-b236-9d939e192b57\n\n\nSTDERR:\n\n```"
+  }
+}
