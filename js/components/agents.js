@@ -664,7 +664,17 @@ class AgentsPage {
             return '';
         }
 
-        const lines = content.replace(/\r\n/g, '\n').split('\n');
+        const normalizedLineEndings = content.replace(/\r\n/g, '\n');
+
+        // Some transcripts mash section headers like "!**Heading**" without a newline.
+        // Insert a blank line before bold headings that immediately follow sentence-ending punctuation
+        // so Markdown renders them as separate paragraphs.
+        const withHeadingSpacing = normalizedLineEndings.replace(
+            /([.!?])(\*\*[A-Z][^*]*\*\*)/g,
+            (_, punctuation, heading) => `${punctuation}\n\n${heading}`
+        );
+
+        const lines = withHeadingSpacing.split('\n');
         const normalized = [];
         let inFence = false;
 
