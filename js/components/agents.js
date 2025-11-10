@@ -643,6 +643,8 @@ class AgentsPage {
      * Render markdown content
      */
     renderMarkdown(content) {
+        const normalized = this.normalizeMarkdownContent(content);
+
         // Configure marked options
         marked.setOptions({
             breaks: true,
@@ -651,7 +653,38 @@ class AgentsPage {
             mangle: false
         });
 
-        return `<div class="markdown-content-host">${marked.parse(content)}</div>`;
+        return `<div class="markdown-content-host">${marked.parse(normalized)}</div>`;
+    }
+
+    /**
+     * Ensure code fences have a blank line before them so marked renders correctly
+     */
+    normalizeMarkdownContent(content) {
+        if (!content) {
+            return '';
+        }
+
+        const lines = content.replace(/\r\n/g, '\n').split('\n');
+        const normalized = [];
+        let inFence = false;
+
+        for (const line of lines) {
+            const trimmed = line.trimStart();
+            const isFence = trimmed.startsWith('```');
+
+            if (isFence) {
+                if (!inFence && normalized.length && normalized[normalized.length - 1].trim() !== '') {
+                    normalized.push('');
+                }
+                normalized.push(line);
+                inFence = !inFence;
+                continue;
+            }
+
+            normalized.push(line);
+        }
+
+        return normalized.join('\n');
     }
 
     /**
