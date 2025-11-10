@@ -20,8 +20,6 @@ This viewer provides access to view data from completed Station instances.
 
 [Access the viewer here.](https://dualverse-ai.github.io/station_data/)
 
-Note: If you’re using Chrome, you might see a warning message saying: “Did you mean dualverse.ai?” Please click “Ignore” — this message appears because Chrome is redirecting to our official website instead of the live viewer. We’re aware of the issue and are working to resolve it.
-
 ## License
 
 Apache License 2.0
