@@ -78,13 +78,17 @@ class AgentsPage {
             }
 
             const index = await indexResponse.json();
+            const summaries = Array.isArray(index.agent_summaries) ? index.agent_summaries : [];
             const agentFiles = index.files || [];
 
-            console.log(`Loading ${agentFiles.length} agents from index`);
-
-            // Load each agent file
-            for (const agentName of agentFiles) {
-                await this.loadAgent(dataLoader, agentName);
+            if (summaries.length > 0) {
+                console.log(`Loaded ${summaries.length} agent summaries from index`);
+                this.agents = summaries.map(summary => this.normalizeAgentSummary(summary));
+            } else {
+                console.log(`Loading ${agentFiles.length} agents from YAML (legacy index)`);
+                for (const agentName of agentFiles) {
+                    await this.loadAgent(dataLoader, agentName);
+                }
             }
 
         } catch (error) {
@@ -98,6 +102,43 @@ class AgentsPage {
 
         // Sort agents by birth tick by default
         this.sortAgents();
+    }
+
+
+    /**
+     * Convert a summary entry into the format expected by the table
+     */
+    normalizeAgentSummary(summary) {
+        const normalized = { ...summary };
+        normalized._name = summary.name || summary.agent_name || summary.display_name || '';
+        normalized._displayName = summary.display_name || summary.agent_name || normalized._name;
+        normalized.description = summary.description || summary.lineage || '';
+        normalized._tickDeath = summary.tick_exit_display ?? this.computeTickDeathFromSummary(summary);
+        return normalized;
+    }
+
+
+    /**
+     * Compute exit tick fallback when summaries are missing the precomputed field
+     */
+    computeTickDeathFromSummary(summary) {
+        if (summary.name === 'Reviewer' || summary.status === 'Reviewer') {
+            return 'n/a';
+        }
+
+        if (summary.tick_exit !== undefined && summary.tick_exit !== null && summary.tick_exit !== '') {
+            return summary.tick_exit;
+        }
+
+        if (summary.session_ended === true) {
+            return 'Ended';
+        }
+
+        if (summary.status === 'Exited') {
+            return 'Exited';
+        }
+
+        return 'Active';
     }
 
 

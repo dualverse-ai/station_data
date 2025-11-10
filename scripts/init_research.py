@@ -113,6 +113,9 @@ def init_research_index(station_path):
 
                 # Extract metadata
                 eval_id = data.get('id', filename.replace('evaluation_', '').replace('.json', ''))
+                if eval_id is None:
+                    eval_id = filename.replace('evaluation_', '').replace('.json', '')
+                eval_id = str(eval_id)
                 author_name = data.get('author', 'Unknown')
 
                 metadata = {

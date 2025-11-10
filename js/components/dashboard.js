@@ -21,6 +21,9 @@ class DashboardPage {
                 <div class="station-grid">
                     ${this.renderStationCards()}
                 </div>
+                <div class="dashboard-footer">
+                    <a href="https://dualverse.ai" target="_blank" rel="noopener noreferrer">DualverseAI 2025</a>
+                </div>
             </div>
         `;
     }

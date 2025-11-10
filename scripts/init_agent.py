@@ -10,47 +10,104 @@ Usage:
 
 import os
 import json
-from pathlib import Path
+from datetime import datetime
+
+import yaml
 
 
 def init_agent_index(station_path):
-    """
-    Generate _index.json for agents directory of a specific station.
+    """Generate agent index (with summaries) for a specific station."""
 
-    Args:
-        station_path: Full path to the station directory
-
-    Returns:
-        List of agent names found, or empty list if no agents directory
-    """
     agents_path = os.path.join(station_path, 'agents')
     if not os.path.exists(agents_path):
         return []
 
-    # Get all .yaml files except AutoArchiveEvaluator and Guest agents
     agent_files = []
-    for f in os.listdir(agents_path):
-        if f.endswith('.yaml'):
-            # Skip system agents and guest agents
-            if f not in ['AutoArchiveEvaluator.yaml', 'Reviewer.yaml'] and not f.startswith('Guest_'):
-                # Remove .yaml extension
-                agent_name = f[:-5]
-                agent_files.append(agent_name)
+    agent_summaries = []
 
-    # Sort the list
-    agent_files.sort()
+    for filename in sorted(os.listdir(agents_path)):
+        if not filename.endswith('.yaml'):
+            continue
 
-    # Always check for special agents separately
-    # Reviewer should be included if it exists
-    if os.path.exists(os.path.join(agents_path, 'Reviewer.yaml')):
-        agent_files.append('Reviewer')
+        agent_name = filename[:-5]
 
-    # Write index file
+        # Skip viewer-only/system helpers and guest agents
+        if filename == 'AutoArchiveEvaluator.yaml' or agent_name.startswith('Guest_'):
+            continue
+
+        summary = build_agent_summary(os.path.join(agents_path, filename), agent_name)
+        if summary is None:
+            continue
+
+        agent_files.append(agent_name)
+        agent_summaries.append(summary)
+
+    index_payload = {
+        'files': agent_files,
+        'agent_summaries': agent_summaries,
+        'generated_at': datetime.utcnow().isoformat() + 'Z',
+    }
+
     index_path = os.path.join(agents_path, '_index.json')
     with open(index_path, 'w') as f:
-        json.dump({'files': agent_files}, f, indent=2)
+        json.dump(index_payload, f, indent=2)
 
     return agent_files
+
+
+def build_agent_summary(agent_file, agent_name):
+    """Build a lightweight summary for displaying an agent in the table."""
+
+    try:
+        with open(agent_file, 'r') as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as exc:
+        print(f"  Warning: could not parse {agent_file}: {exc}")
+        data = {}
+
+    status = data.get('status')
+    session_ended = data.get('session_ended')
+    tick_exit = data.get('tick_exit')
+
+    # Special handling for Reviewer entry
+    is_reviewer = agent_name == 'Reviewer' or status == 'Reviewer'
+
+    display_name = 'Reviewer' if is_reviewer else data.get('agent_name') or agent_name
+    tick_birth = 'n/a' if is_reviewer else data.get('tick_birth')
+    description = data.get('description')
+    if is_reviewer and not description:
+        description = 'Archive Evaluation Reviewer'
+
+    tick_exit_display = compute_tick_exit_display(tick_exit, session_ended, status, is_reviewer)
+
+    return {
+        'name': agent_name,
+        'display_name': display_name,
+        'agent_name': data.get('agent_name'),
+        'model_name': data.get('model_name'),
+        'tick_birth': tick_birth,
+        'tick_exit': tick_exit,
+        'tick_exit_display': tick_exit_display,
+        'status': status,
+        'session_ended': session_ended,
+        'description': description,
+        'lineage': data.get('lineage'),
+        'generation': data.get('generation'),
+    }
+
+
+def compute_tick_exit_display(tick_exit, session_ended, status, is_reviewer):
+    """Mirror the frontend's exit-column logic so tables don't need YAML."""
+
+    if is_reviewer:
+        return 'n/a'
+    if tick_exit not in (None, ''):
+        return tick_exit
+    if session_ended is True:
+        return 'Ended'
+    if status == 'Exited':
+        return 'Exited'
+    return 'Active'
 
 
 def check_agent_index_exists(station_path):

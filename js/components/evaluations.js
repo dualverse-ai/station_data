@@ -6,7 +6,7 @@ class EvaluationsPage {
     constructor() {
         this.evaluations = [];
         this.filteredEvaluations = [];
-        this.currentSort = { column: 'submitted_tick', order: 'desc' };
+        this.currentSort = { column: 'id', order: 'asc' };
     }
 
     async renderList(dataLoader) {
@@ -30,11 +30,11 @@ class EvaluationsPage {
             }
 
             const data = await response.json();
-            this.evaluations = data.evaluations || [];
+            this.evaluations = (data.evaluations || []).map(item => this.normalizeEvaluationItem(item));
             this.filteredEvaluations = [...this.evaluations];
 
             // Apply default sort (descending by submitted tick - newest first)
-            this.sortEvaluations('submitted_tick', 'desc');
+            this.sortEvaluations('id', 'asc');
 
             // Store this instance globally for event handlers
             window.currentEvaluationsPage = this;
@@ -63,6 +63,7 @@ class EvaluationsPage {
                     <thead>
                         <tr>
                             <th class="sortable research-name-col" data-sort="name">Name</th>
+                            <th class="sortable research-id-col" data-sort="id">ID</th>
                             <th class="sortable research-author-col" data-sort="author">Author</th>
                             <th class="sortable research-model-col" data-sort="author_model">Author Model</th>
                             <th class="sortable research-tick-col" data-sort="submitted_tick">Submitted Tick</th>
@@ -88,11 +89,29 @@ class EvaluationsPage {
         }
     }
 
+    normalizeEvaluationItem(item) {
+        const normalized = { ...item };
+        if (normalized.id === undefined || normalized.id === null) {
+            normalized.id = '';
+        } else {
+            normalized.id = String(normalized.id);
+        }
+        normalized.name = normalized.name || 'Untitled';
+        normalized.author = normalized.author || 'Unknown';
+        normalized.author_model = normalized.author_model || 'Unknown';
+        normalized.submitted_tick = normalized.submitted_tick ?? 0;
+        if (normalized.score === undefined || normalized.score === null) {
+            normalized.score = 'n.a.';
+        }
+        normalized.breakthrough = Boolean(normalized.breakthrough);
+        return normalized;
+    }
+
     renderEvaluationRows() {
         if (this.filteredEvaluations.length === 0) {
             return `
                 <tr>
-                    <td colspan="6" style="text-align: center; color: var(--text-muted);">
+                    <td colspan="7" style="text-align: center; color: var(--text-muted);">
                         No research submissions found
                     </td>
                 </tr>
@@ -108,6 +127,7 @@ class EvaluationsPage {
             return `
                 <tr onclick="router.navigate('#/${router.currentStationId}/evaluations/${item.id}')">
                     <td title="${this.escapeHtml(item.name)}">${this.truncateName(this.escapeHtml(item.name))}</td>
+                    <td>${this.escapeHtml(String(item.id || '—'))}</td>
                     <td>${this.escapeHtml(item.author)}</td>
                     <td>${this.escapeHtml(item.author_model || 'Unknown')}</td>
                     <td>${item.submitted_tick}</td>
@@ -168,6 +188,13 @@ class EvaluationsPage {
                 // Convert boolean to number for sorting
                 aVal = aVal ? 1 : 0;
                 bVal = bVal ? 1 : 0;
+            } else if (column === 'id') {
+                const aNum = parseInt(aVal, 10);
+                const bNum = parseInt(bVal, 10);
+                if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {
+                    aVal = aNum;
+                    bVal = bNum;
+                }
             }
 
             // Handle strings
@@ -192,6 +219,7 @@ class EvaluationsPage {
         } else {
             this.filteredEvaluations = this.evaluations.filter(item => {
                 const searchFields = [
+                    item.id.toLowerCase(),
                     item.name.toLowerCase(),
                     item.author.toLowerCase(),
                     (item.author_model || 'Unknown').toLowerCase(),
@@ -313,6 +341,10 @@ class EvaluationsPage {
                             <div class="metadata-item">
                                 <span class="metadata-label">Submitted:</span>
                                 <span class="metadata-value">Tick ${evalData.submitted_tick || 0}</span>
+                            </div>
+                            <div class="metadata-item">
+                                <span class="metadata-label">Submission ID:</span>
+                                <span class="metadata-value">${this.escapeHtml(evalId)}</span>
                             </div>
                             <div class="metadata-item">
                                 <span class="metadata-label">Primary Score:</span>
