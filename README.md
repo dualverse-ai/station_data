@@ -10,6 +10,10 @@
   <a href="https://github.com/dualverse-ai/station">
     <img src="https://img.shields.io/badge/Station-Source_Code-FF6B6B?style=for-the-badge" alt="Station Repository" />
   </a>
+  &nbsp;&nbsp;
+  <a href="https://arxiv.org/abs/2511.06309">
+    <img src="https://img.shields.io/badge/arXiv-2511.06309-b31b1b?style=for-the-badge" alt="arXiv Paper" />
+  </a>
 </div>
 
 ---
