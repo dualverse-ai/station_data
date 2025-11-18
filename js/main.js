@@ -3,14 +3,16 @@
  */
 
 // Initialize the application when DOM is ready
+const THEME_STORAGE_KEY = 'station-viewer-theme';
+
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Station Viewer initializing...');
 
+    initializeThemeControls();
+    initializeGlobalEventHandlers();
+
     // The router will automatically handle the initial route
     // based on the current hash
-
-    // Add any global initialization here
-    initializeGlobalEventHandlers();
 });
 
 /**
@@ -26,6 +28,34 @@ function initializeGlobalEventHandlers() {
     window.addEventListener('unhandledrejection', function(event) {
         console.error('Unhandled promise rejection:', event.reason);
     });
+}
+
+function initializeThemeControls() {
+    const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    const resolvedTheme = storedTheme || 'light';
+    applyTheme(resolvedTheme);
+
+    const toggleButton = document.getElementById('theme-toggle');
+    if (!toggleButton) {
+        return;
+    }
+
+    toggleButton.addEventListener('click', () => {
+        const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        applyTheme(nextTheme);
+        localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    });
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const toggleButton = document.getElementById('theme-toggle');
+    if (toggleButton) {
+        const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+        toggleButton.textContent = label;
+        toggleButton.setAttribute('aria-pressed', theme === 'dark');
+    }
 }
 
 /**

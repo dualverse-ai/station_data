@@ -14,6 +14,10 @@
   <a href="https://arxiv.org/abs/2511.06309">
     <img src="https://img.shields.io/badge/arXiv-2511.06309-b31b1b?style=for-the-badge" alt="arXiv Paper" />
   </a>
+   &nbsp;&nbsp;
+   <a href="https://forms.gle/NbSWL1KEE4kdm3Hs9">
+     <img src="https://img.shields.io/badge/Collab-Apply-6A5ACD?style=for-the-badge" alt="Collaboration Form" />
+   </a>  
 </div>
 
 ---
