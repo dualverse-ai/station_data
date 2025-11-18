@@ -111,15 +111,15 @@ class MailPage {
 
             return `
                 <tr onclick="router.navigate('#/${router.currentStationId}/mail/${mail.id}')">
-                    <td title="${this.escapeHtml(mail.name)}">${this.truncateName(this.escapeHtml(mail.name))}</td>
-                    <td>${displayId}</td>
-                    <td>${this.escapeHtml(mail.author)}</td>
-                    <td>${this.escapeHtml(mail.author_model || 'Unknown')}</td>
-                    <td title="${this.escapeHtml(mail.recipients || 'None')}">${this.truncateRecipients(this.escapeHtml(mail.recipients || 'None'))}</td>
-                    <td>${mail.creation_tick}</td>
-                    <td>${mail.last_update_tick}</td>
-                    <td>${mail.num_messages}</td>
-                    <td>${mail.word_count.toLocaleString()}</td>
+                    <td data-label="Subject" title="${this.escapeHtml(mail.name)}"><span class="cell-value cell-value-long">${this.truncateName(this.escapeHtml(mail.name))}</span></td>
+                    <td data-label="ID">${displayId}</td>
+                    <td data-label="Author">${this.escapeHtml(mail.author)}</td>
+                    <td data-label="Author Model">${this.escapeHtml(mail.author_model || 'Unknown')}</td>
+                    <td data-label="Recipients" title="${this.escapeHtml(mail.recipients || 'None')}">${this.truncateRecipients(this.escapeHtml(mail.recipients || 'None'))}</td>
+                    <td data-label="Created Tick">${mail.creation_tick}</td>
+                    <td data-label="Updated Tick">${mail.last_update_tick}</td>
+                    <td data-label="# Msg">${mail.num_messages}</td>
+                    <td data-label="Words">${mail.word_count.toLocaleString()}</td>
                 </tr>
             `;
         }).join('');
@@ -256,9 +256,6 @@ class MailPage {
 
             if (!capsuleData || capsuleData.is_deleted) {
                 return `
-                    <a href="#/${router.currentStationId}/mail" class="back-button">
-                        ← Back to Mail
-                    </a>
                     <div class="error-message">
                         Mail thread not found or has been deleted.
                     </div>
@@ -270,10 +267,6 @@ class MailPage {
 
             // Render the detail view
             return `
-                <a href="#/${router.currentStationId}/mail" class="back-button">
-                    ← Back to Mail
-                </a>
-
                 <div class="mail-detail">
                     <div class="mail-header">
                         <h1 class="mail-title">${this.escapeHtml(capsuleData.title || 'Untitled')}</h1>
@@ -321,14 +314,11 @@ class MailPage {
             `;
         } catch (error) {
             console.error('Error loading mail thread:', error);
-            return `
-                <a href="#/${router.currentStationId}/mail" class="back-button">
-                    ← Back to Mail
-                </a>
-                <div class="error-message">
-                    Error loading mail thread: ${error.message}
-                </div>
-            `;
+                return `
+                    <div class="error-message">
+                        Error loading mail thread: ${error.message}
+                    </div>
+                `;
         }
     }
 

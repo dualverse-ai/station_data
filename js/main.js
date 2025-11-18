@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     initializeThemeControls();
     initializeGlobalEventHandlers();
+    initializeMobileNavigation();
 
     // The router will automatically handle the initial route
     // based on the current hash
@@ -35,27 +36,112 @@ function initializeThemeControls() {
     const resolvedTheme = storedTheme || 'light';
     applyTheme(resolvedTheme);
 
-    const toggleButton = document.getElementById('theme-toggle');
-    if (!toggleButton) {
+    const toggleButtons = document.querySelectorAll('[data-theme-toggle]');
+    if (!toggleButtons.length) {
         return;
     }
 
-    toggleButton.addEventListener('click', () => {
-        const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
-        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        applyTheme(nextTheme);
-        localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    toggleButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+            const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            applyTheme(nextTheme);
+            localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+        });
     });
 }
 
 function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    const toggleButton = document.getElementById('theme-toggle');
-    if (toggleButton) {
-        const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
-        toggleButton.textContent = label;
-        toggleButton.setAttribute('aria-pressed', theme === 'dark');
+    const toggleButtons = document.querySelectorAll('[data-theme-toggle]');
+    const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    toggleButtons.forEach(button => {
+        button.textContent = label;
+        button.setAttribute('aria-pressed', theme === 'dark');
+    });
+}
+
+function initializeMobileNavigation() {
+    const menuToggle = document.getElementById('mobile-menu-toggle');
+    const drawer = document.querySelector('#navbar .nav-left');
+    const backdrop = document.getElementById('mobile-menu-backdrop');
+    const root = document.documentElement;
+
+    if (!menuToggle || !drawer || !backdrop) {
+        return;
     }
+
+    const originalParent = drawer.parentElement;
+    const drawerPlaceholder = document.createComment('mobile-drawer-placeholder');
+    originalParent.insertBefore(drawerPlaceholder, drawer.nextSibling);
+    let drawerDetached = false;
+
+    const attachDrawerToBody = () => {
+        if (!drawerDetached) {
+            document.body.appendChild(drawer);
+            drawerDetached = true;
+        }
+    };
+
+    const restoreDrawer = () => {
+        if (drawerDetached && drawerPlaceholder.parentNode) {
+            drawerPlaceholder.parentNode.insertBefore(drawer, drawerPlaceholder);
+            drawerDetached = false;
+        }
+    };
+
+    const closeDrawer = () => {
+        document.body.classList.remove('mobile-drawer-open');
+        root.classList.remove('mobile-drawer-open');
+        menuToggle.setAttribute('aria-expanded', 'false');
+        menuToggle.classList.remove('is-active');
+        drawer.classList.remove('drawer-open');
+        drawer.style.transform = '';
+        restoreDrawer();
+    };
+
+    const openDrawer = () => {
+        attachDrawerToBody();
+        document.body.classList.add('mobile-drawer-open');
+        root.classList.add('mobile-drawer-open');
+        menuToggle.setAttribute('aria-expanded', 'true');
+        menuToggle.classList.add('is-active');
+        drawer.classList.add('drawer-open');
+        drawer.style.transform = 'translateX(0)';
+    };
+
+    const toggleDrawer = () => {
+        if (document.body.classList.contains('mobile-drawer-open')) {
+            closeDrawer();
+        } else {
+            openDrawer();
+        }
+    };
+
+    menuToggle.addEventListener('click', toggleDrawer);
+    backdrop.addEventListener('click', closeDrawer);
+
+    window.addEventListener('resize', () => {
+        if (window.innerWidth > 768) {
+            closeDrawer();
+            drawer.style.transform = '';
+        } else if (document.body.classList.contains('mobile-drawer-open')) {
+            attachDrawerToBody();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeDrawer();
+        }
+    });
+
+    drawer.addEventListener('click', (event) => {
+        const link = event.target.closest('a');
+        if (link) {
+            closeDrawer();
+        }
+    });
 }
 
 /**

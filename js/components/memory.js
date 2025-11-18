@@ -130,14 +130,14 @@ class MemoryPage {
 
             return `
                 <tr onclick="router.navigate('#/${router.currentStationId}/memory/${this.memoryType}/${memory.id}')">
-                    <td title="${this.escapeHtml(memory.name)}">${this.truncateName(this.escapeHtml(memory.name))}</td>
-                    <td>${displayId}</td>
-                    <td>${this.escapeHtml(memory.author)}</td>
-                    <td>${this.escapeHtml(memory.author_model || 'Unknown')}</td>
-                    <td>${memory.creation_tick}</td>
-                    <td>${memory.last_update_tick}</td>
-                    <td>${memory.num_messages}</td>
-                    <td>${memory.word_count.toLocaleString()}</td>
+                    <td data-label="Name" title="${this.escapeHtml(memory.name)}"><span class="cell-value cell-value-long">${this.truncateName(this.escapeHtml(memory.name))}</span></td>
+                    <td data-label="ID">${displayId}</td>
+                    <td data-label="Author">${this.escapeHtml(memory.author)}</td>
+                    <td data-label="Author Model">${this.escapeHtml(memory.author_model || 'Unknown')}</td>
+                    <td data-label="Created Tick">${memory.creation_tick}</td>
+                    <td data-label="Updated Tick">${memory.last_update_tick}</td>
+                    <td data-label="# Msg">${memory.num_messages}</td>
+                    <td data-label="Words">${memory.word_count.toLocaleString()}</td>
                 </tr>
             `;
         }).join('');
@@ -281,9 +281,6 @@ class MemoryPage {
 
             if (!capsuleData || capsuleData.is_deleted) {
                 return `
-                    <a href="#/${router.currentStationId}/memory/${type}" class="back-button">
-                        ← Back to ${type === 'public' ? 'Public' : 'Private'} Memory
-                    </a>
                     <div class="error-message">
                         Memory capsule not found or has been deleted.
                     </div>
@@ -292,10 +289,6 @@ class MemoryPage {
 
             // Render the detail view
             return `
-                <a href="#/${router.currentStationId}/memory/${type}" class="back-button">
-                    ← Back to ${type === 'public' ? 'Public' : 'Private'} Memory
-                </a>
-
                 <div class="memory-detail">
                     <div class="memory-header">
                         <h1 class="memory-title">${this.escapeHtml(capsuleData.title || 'Untitled')}</h1>
@@ -346,9 +339,6 @@ class MemoryPage {
         } catch (error) {
             console.error('Error loading memory capsule:', error);
             return `
-                <a href="#/${router.currentStationId}/memory/${type}" class="back-button">
-                    ← Back to ${type === 'public' ? 'Public' : 'Private'} Memory
-                </a>
                 <div class="error-message">
                     Error loading memory capsule: ${error.message}
                 </div>

@@ -126,13 +126,13 @@ class EvaluationsPage {
 
             return `
                 <tr onclick="router.navigate('#/${router.currentStationId}/evaluations/${item.id}')">
-                    <td title="${this.escapeHtml(item.name)}">${this.truncateName(this.escapeHtml(item.name))}</td>
-                    <td>${this.escapeHtml(String(item.id || '—'))}</td>
-                    <td>${this.escapeHtml(item.author)}</td>
-                    <td>${this.escapeHtml(item.author_model || 'Unknown')}</td>
-                    <td>${item.submitted_tick}</td>
-                    <td class="${scoreClass}">${scoreDisplay}</td>
-                    <td class="${item.breakthrough ? 'breakthrough-yes' : 'breakthrough-no'}">${breakthroughDisplay}</td>
+                    <td data-label="Name" title="${this.escapeHtml(item.name)}"><span class="cell-value cell-value-long">${this.truncateName(this.escapeHtml(item.name))}</span></td>
+                    <td data-label="ID">${this.escapeHtml(String(item.id || '—'))}</td>
+                    <td data-label="Author">${this.escapeHtml(item.author)}</td>
+                    <td data-label="Author Model">${this.escapeHtml(item.author_model || 'Unknown')}</td>
+                    <td data-label="Submitted Tick">${item.submitted_tick}</td>
+                    <td data-label="Score" class="${scoreClass}">${scoreDisplay}</td>
+                    <td data-label="Breakthrough" class="${item.breakthrough ? 'breakthrough-yes' : 'breakthrough-no'}">${breakthroughDisplay}</td>
                 </tr>
             `;
         }).join('');
@@ -279,9 +279,6 @@ class EvaluationsPage {
 
             if (!evalData) {
                 return `
-                    <a href="#/${router.currentStationId}/evaluations" class="back-button">
-                        ← Back to Research Submissions
-                    </a>
                     <div class="error-message">
                         Evaluation not found.
                     </div>
@@ -322,10 +319,6 @@ class EvaluationsPage {
 
             // Render the detail view
             return `
-                <a href="#/${router.currentStationId}/evaluations" class="back-button">
-                    ← Back to Research Submissions
-                </a>
-
                 <div class="research-detail">
                     <div class="research-header">
                         <h1 class="research-title">${this.escapeHtml(evalData.title || 'Untitled')}</h1>
@@ -387,9 +380,6 @@ class EvaluationsPage {
         } catch (error) {
             console.error('Error loading evaluation detail:', error);
             return `
-                <a href="#/${router.currentStationId}/evaluations" class="back-button">
-                    ← Back to Research Submissions
-                </a>
                 <div class="error-message">
                     Error loading evaluation: ${error.message}
                 </div>

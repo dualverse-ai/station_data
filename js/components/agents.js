@@ -219,13 +219,13 @@ class AgentsPage {
             const agentPath = encodeURIComponent(agent._name);
             return `
                 <tr onclick="router.navigate('#/${router.currentStationId}/agents/${agentPath}')">
-                    <td>${agent._displayName}</td>
-                    <td>${agent.model_name || 'Unknown'}</td>
-                    <td>${agent.tick_birth}</td>
-                    <td class="${agent._tickDeath === 'Active' ? 'active' : 'muted'}">
+                    <td data-label="Agent"><span class="cell-value cell-value-long">${agent._displayName}</span></td>
+                    <td data-label="Model">${agent.model_name || 'Unknown'}</td>
+                    <td data-label="Birth Tick">${agent.tick_birth}</td>
+                    <td data-label="End Tick" class="${agent._tickDeath === 'Active' ? 'active' : 'muted'}">
                         ${agent._tickDeath}
                     </td>
-                    <td>${agent.description || agent.lineage || ''}</td>
+                    <td data-label="Summary">${agent.description || agent.lineage || ''}</td>
                 </tr>
             `;
         }).join('');
@@ -441,10 +441,6 @@ class AgentsPage {
             }
 
             return `
-                <a href="#/${router.currentStationId}/agents" class="back-button">
-                    ← Back to Agents
-                </a>
-
                 <div class="agent-detail">
                     <h1>${agent.agent_name || agentName}</h1>
 
@@ -482,7 +478,6 @@ class AgentsPage {
                 <div class="error-message">
                     <h2>Error Loading Agent</h2>
                     <p>Failed to load agent data: ${error.message}</p>
-                    <a href="#/${router.currentStationId}/agents" class="back-button">← Back to Agents</a>
                 </div>
             `;
         }

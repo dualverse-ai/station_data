@@ -104,15 +104,15 @@ class ArchivePage {
 
         return this.filteredArchives.map(archive => `
             <tr onclick="router.navigate('#/${router.currentStationId}/archive/${archive.id}')">
-                <td title="${this.escapeHtml(archive.name)}">${this.truncateName(this.escapeHtml(archive.name))}</td>
-                <td>${archive.id.replace('archive_', '')}</td>
-                <td>${this.escapeHtml(archive.author)}</td>
-                <td>${this.escapeHtml(archive.author_model || 'Unknown')}</td>
-                <td>${archive.creation_tick}</td>
-                <td>${archive.last_update_tick}</td>
-                <td>${archive.num_responses}</td>
-                <td>${archive.word_count.toLocaleString()}</td>
-                <td class="${archive.reviewer_score === 'n.a.' ? 'muted' : ''}">${archive.reviewer_score}</td>
+                <td data-label="Name" title="${this.escapeHtml(archive.name)}"><span class="cell-value cell-value-long">${this.truncateName(this.escapeHtml(archive.name))}</span></td>
+                <td data-label="ID">${archive.id.replace('archive_', '')}</td>
+                <td data-label="Author">${this.escapeHtml(archive.author)}</td>
+                <td data-label="Author Model">${this.escapeHtml(archive.author_model || 'Unknown')}</td>
+                <td data-label="Created Tick">${archive.creation_tick}</td>
+                <td data-label="Updated Tick">${archive.last_update_tick}</td>
+                <td data-label="# Msg">${archive.num_responses}</td>
+                <td data-label="Words">${archive.word_count.toLocaleString()}</td>
+                <td data-label="Score" class="${archive.reviewer_score === 'n.a.' ? 'muted' : ''}">${archive.reviewer_score}</td>
             </tr>
         `).join('');
     }
@@ -228,9 +228,6 @@ class ArchivePage {
 
             if (!capsuleData || capsuleData.is_deleted) {
                 return `
-                    <a href="#/${router.currentStationId}/archive" class="back-button">
-                        ← Back to Archive
-                    </a>
                     <div class="error-message">
                         Archive capsule not found or has been deleted.
                     </div>
@@ -239,10 +236,6 @@ class ArchivePage {
 
             // Render the detail view
             return `
-                <a href="#/${router.currentStationId}/archive" class="back-button">
-                    ← Back to Archive
-                </a>
-
                 <div class="archive-detail">
                     <div class="archive-header">
                         <h1 class="archive-title">${this.escapeHtml(capsuleData.title || 'Untitled')}</h1>
@@ -287,9 +280,6 @@ class ArchivePage {
         } catch (error) {
             console.error('Error loading archive capsule:', error);
             return `
-                <a href="#/${router.currentStationId}/archive" class="back-button">
-                    ← Back to Archive
-                </a>
                 <div class="error-message">
                     Error loading archive capsule: ${error.message}
                 </div>
